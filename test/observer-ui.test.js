@@ -61,6 +61,14 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   listener(snapshot); assert.equal(scene().workers.length, 16); assert.equal(elements.sessions.children.length, 1);
   assert.equal(scene().platforms.length, 1); assert(scene().workers.every(worker => worker.platformKey === scene().platforms[0].key), 'every worker stands on its project platform');
   assert.equal(new Set(scene().workers.map(worker => worker.chair.x + ',' + worker.chair.y)).size, 16, '16 distinct desks');
+  // Recording mode hides every inspector entrypoint while ordinary observation remains inspectable.
+  const recordedRow = elements.sessions.children[0].children[2].children[0];
+  listener({ ...snapshot, data: { ...snapshot.data, presentation: { company: 'Helioforge' } } });
+  assert.equal(recordedRow.children[1].disabled, true); assert.equal(recordedRow.children[2].disabled, true);
+  viewOptions.onTitleToggle('obs_0'); recordedRow.children[2].handlers.click();
+  assert.equal(elements.panels.children.length, 0, 'canvas and console cannot open private inspectors');
+  listener(poll());
+  assert.equal(recordedRow.children[1].disabled, false); assert.equal(recordedRow.children[2].disabled, false);
   const firstRevision = scene().revision;
   listener(snapshot); assert.equal(scene().revision, firstRevision, 'a repeated snapshot keeps the geometry');
   assert.equal(options().stale(), false); assert.equal(options().inspected(), null);

@@ -83,7 +83,7 @@
   const panelFor = target => target && panels.find(entry => entry.key === panelKey(target));
   // A helper's exact target includes its parent: reparenting or parent loss is a different conversation.
   const targetIdentity = row => { const identity = inspectionIdentity(row); return identity == null ? null : isHelper(row) ? identity + '|' + row.parentId : identity; };
-  const agentTarget = row => ({ kind: 'agent', id: row.id, identity: targetIdentity(row) });
+  const agentTarget = row => latest?.data?.presentation ? null : ({ kind: 'agent', id: row.id, identity: targetIdentity(row) });
   const mailTarget = message => ObserverMailInspector.validIdentity(message.identity) ? { kind: 'mail', id: message.id, identity: message.identity } : null;
   function describeAgent(id) {
     const row = byId.get(id);
@@ -454,6 +454,7 @@
     [helper ? [row.paneId, 'link ' + (row.lineageState || 'unknown'), lifecycleText(row), taskState(row)].filter(Boolean).join(' · ') : row.paneId || (row.source === 'desktop' ? 'window' : ''), row.repo && row.repo !== row.project ? row.repo : '', row.worktree || '',
       stale ? 'observed ' + ObserverModel.age(seen) : last ? ObserverModel.age(last.at) : '']
       .forEach((value, index) => setText(entry.fields[index], String(value || '')));
+    entry.inspect.disabled = entry.title.disabled = !!latest?.data?.presentation;
     entry.inspect.setAttribute('aria-label', (isOpenTarget(agentTarget(row)) ? 'Close inspector for ' : 'Inspect ') + workerName(row) + ' — ' + (composedTask(row) ? taskText(row) : ObserverModel.taskTitle(row) || 'untitled task'));
     // Title and magnifier report and toggle the same exact panel.
     const target = agentTarget(row), panel = panelFor(target), name = workerName(row);
@@ -639,6 +640,9 @@
        page was hidden can settle but never replaces the data. New data, settled after resume and live, proves it. */
     if (awaitingProof && state.data && state.data !== cachedAtResume && !state.error && !state.pending && !stale && state.updatedAt >= resumedAt) { awaitingProof = false; for (const entry of panels) entry.view.resume(); }
     const data = state.data, rows = data?.sessions || [];
+    const brand = document.querySelector?.('.brand h1'), badge = document.querySelector?.('.read-only');
+    if (brand) setText(brand, data?.presentation ? data.presentation.company + ' · Observer' : 'Local observer');
+    if (badge) setText(badge, data?.presentation ? 'LIVE · FICTIONAL LABELS' : 'READ ONLY');
     // A repository whose last row left clears its highlight.
     if (selectedRepoId !== null && !rows.some(row => row.repoId === selectedRepoId)) selectedRepoId = null;
     layout.reconcile(rows);

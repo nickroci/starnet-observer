@@ -5,6 +5,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { makeObserver } = require('./sidecar/observer.js');
+const { makePresentationObserver } = require('./sidecar/presentation.js');
 const { redact, setKnownSecretSource } = require('./sidecar/redaction.js');
 const { setClock } = require('./sidecar/failopen.js');
 const ROOT = path.join(__dirname, 'frontend');
@@ -76,7 +77,9 @@ if (require.main === module) {
   const heldSecrets = () => Object.entries(process.env).filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY/i.test(name)).map(([, value]) => value);
   setKnownSecretSource(heldSecrets);
   setClock(Date.now);
-  const server = createServer();
+  const presentation = process.argv.includes('--presentation');
+  const observer = makeObserver({ now: Date.now });
+  const server = createServer({ observer: presentation ? makePresentationObserver(observer) : observer });
   server.on('error', error => { console.error('[observer]', redact(String(error.message))); process.exitCode = 1; });
   server.listen(port, '127.0.0.1', () => console.log('Local Observer: http://127.0.0.1:' + port + '\nRead only. Stop with Ctrl+C.'));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { server.close(); server.closeAllConnections(); });

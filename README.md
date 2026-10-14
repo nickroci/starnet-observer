@@ -95,6 +95,22 @@ Run `llm-bus whoami` through each agent's shell tool to confirm registration. Ag
 
 The observer reads the default macOS mailbox at `~/.local/share/llm-bus/bus.sqlite3`. If you use a custom bus database, set `LLM_BUS_DB` to the same database file when launching it. The bus must have actual messages for couriers to appear.
 
+## Record a presentation with fictional company names
+
+For a screen recording, stop the normal server and start:
+
+```sh
+npm run presentation
+```
+
+Open http://127.0.0.1:4319. This mode shows **real live activity** under a fictional company, **Helioforge**. Rooms use Product, Platform, Intelligence, and Operations; repositories use names such as `helio-web`, `helio-auth`, `helio-agents`, and `helio-console`. Additional rooms and repositories receive numbered aliases.
+
+Labels stay stable during that server run. Actual repositories, folders, sessions, and their ownership are unchanged. Task titles, helper nicknames, worktree names, and pane labels are masked at the server boundary. Session and mail inspectors are disabled, and their API routes return no content. Live status, timestamps, token totals, and body-free message traffic remain visible.
+
+The header explicitly says **LIVE · FICTIONAL LABELS**. Describe a shared recording as “Live agent activity with fictional company/project labels”; these labels do not represent an actual customer or employer. This is presentation masking, not a guarantee of full anonymity: activity patterns, timing, and aggregate counts are still real.
+
+Restart with `npm start` to return to normal observation. Do not record private terminal windows or unrelated browser tabs alongside it.
+
 ## Optional Codex desktop observation
 
 Terminal users can skip this. For Codex desktop windows, install Apple's command-line tools if `swiftc` is missing:
