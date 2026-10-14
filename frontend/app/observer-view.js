@@ -694,6 +694,120 @@ const ObserverView = (() => {
       if (animate) { paintShootingStars(now); paintShuttle(now); }
     }
 
+    // ---------- FX: glow and sparks on the station itself (world space, deterministic) ----------
+    // A burst of rising pixel sparks around a screen point. Each spark loops on its own phase so there is no state.
+    function sparks(x, y, key, now, { count = 6, color = '#ffffff', alt = null, rise = 18, spread = 14, life = 1400, size = 2, gravity = 0 } = {}) {
+      const base = hash(key);
+      for (let i = 0; i < count; i++) {
+        const h1 = hash(key + ':' + i), h2 = hash(i + '#' + key);
+        const t = ((now + (h1 % life)) % life) / life;
+        const dx = ((h2 % 1000) / 1000 - 0.5) * spread, vy = 0.6 + ((h1 >>> 8) % 1000) / 1000 * 0.8;
+        const px = x + dx + Math.sin((now / 300) + i) * 1.5, py = y - rise * t * vy + gravity * t * t;
+        const a = t < 0.2 ? t / 0.2 : 1 - (t - 0.2) / 0.8, sz = size * (1 - t * 0.5);
+        ctx.globalAlpha = Math.max(0, a) * 0.9; ctx.fillStyle = alt && ((base + i) % 3 === 0) ? alt : color;
+        ctx.fillRect(px - sz / 2, py - sz / 2, sz, sz);
+      }
+      ctx.globalAlpha = 1;
+    }
+    // Neon bloom along the two lit front edges of a rect, plus a running light chasing around them.
+    function rimBloom(rect, accent, now, animate, strength = 1) {
+      const a = P({ x: rect.x, y: rect.y + rect.h }), b = P({ x: rect.x + rect.w, y: rect.y + rect.h }), c = P({ x: rect.x + rect.w, y: rect.y });
+      const pulse = animate ? 0.75 + 0.25 * Math.sin(now / 1800 * Math.PI * 2 + rect.x) : 0.85;
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.strokeStyle = accent; ctx.lineCap = 'round';
+      for (const [width, alpha] of [[18, 0.08], [10, 0.14], [5, 0.26], [2.5, 0.55]]) {
+        ctx.lineWidth = width; ctx.globalAlpha = alpha * pulse * strength;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.stroke();
+      }
+      if (animate) {
+        // Running light: one bright bead per edge pair, 4s per lap, with a short fading tail.
+        const lap = 4000, len1 = Math.hypot(b.x - a.x, b.y - a.y), len2 = Math.hypot(c.x - b.x, c.y - b.y), total = len1 + len2;
+        for (let k = 0; k < 10; k++) {
+          const d = (((now - k * 40) / lap + rect.y * 0.01 + (k >= 5 ? 0.5 : 0)) % 1) * total;
+          const pt = d < len1 ? { x: a.x + (b.x - a.x) * d / len1, y: a.y + (b.y - a.y) * d / len1 } : { x: b.x + (c.x - b.x) * (d - len1) / len2, y: b.y + (c.y - b.y) * (d - len1) / len2 };
+          ctx.globalAlpha = (1 - (k % 5) / 5) * 0.95 * strength; ctx.fillStyle = (k % 5) === 0 ? '#ffffff' : accent;
+          ctx.fillRect(pt.x - 1.5, pt.y - 1.5, 3, 3);
+        }
+      }
+      ctx.restore();
+    }
+    function paintPlatformGlow(now, animate) {
+      for (const platform of scene.platforms) {
+        const r = platform.rect;
+        if (!onStage(r, 1, 48)) continue;
+        // Underglow beneath the deck in the project hue, breathing slowly.
+        const breathe = animate ? 0.16 + 0.07 * Math.sin(now / 3200 * Math.PI * 2 + r.x * 0.7) : 0.18;
+        glow(ctx, { x: r.x + r.w / 2, y: r.y + r.h / 2, z: -2.4 }, Math.max(r.w, r.h) * 17, platform.accent, breathe * 1.3);
+        rimBloom(r, platform.accent, now, animate);
+        // Corner beacons: a spark fountain at each lit corner, staggered.
+        if (animate) for (const corner of [{ x: r.x, y: r.y + r.h }, { x: r.x + r.w, y: r.y + r.h }, { x: r.x + r.w, y: r.y }]) {
+          const at = P(corner);
+          sparks(at.x, at.y - 2, 'corner' + platform.key + corner.x + ',' + corner.y, now, { count: 7, color: platform.accent, alt: '#ffffff', rise: 30, spread: 10, life: 1600, size: 2 });
+        }
+      }
+      // Mailroom and observatory get their own halos.
+      const hub = scene.mail.rect;
+      if (onStage(hub, 1, 48)) {
+        glow(ctx, { x: hub.x + hub.w / 2, y: hub.y + hub.h / 2, z: -1 }, Math.max(hub.w, hub.h) * 24, PALETTE.amber, animate ? 0.25 + 0.1 * Math.sin(now / 2600 * Math.PI * 2) : 0.3);
+        rimBloom(hub, PALETTE.amber, now, animate, 0.8);
+      }
+      if (scene.observatory && onStage(scene.observatory.rect, 1, 48)) {
+        const o = scene.observatory.rect;
+        glow(ctx, { x: o.x + o.w / 2, y: o.y + o.h / 2, z: -1 }, Math.max(o.w, o.h) * 24, PALETTE.cyan, animate ? 0.25 + 0.1 * Math.sin(now / 2900 * Math.PI * 2 + 1) : 0.3);
+        rimBloom(o, PALETTE.cyan, now, animate, 0.8);
+      }
+    }
+    // Sparks and screen bloom on an active desk: the monitors throw light and the working lamp crackles.
+    function paintDeskFx(worker, now, live) {
+      const d = worker.desk, status = worker.row.status, scale = worker.scale || 1;
+      if (status !== 'working' && status !== 'blocked') return;
+      const color = STATUS[status], helper = worker.kind === 'helper';
+      const pulse = live ? 0.6 + 0.4 * Math.sin(now / (status === 'working' ? 700 : 1600) * Math.PI * 2 + hash(worker.id) % 7) : 0.7;
+      // Screen bloom above the monitors.
+      const screens = helper ? [{ x: d.x + d.w - 0.2, y: d.y + 0.26, z: 0.9 }] : [{ x: d.x + 0.25, y: d.y + 0.35, z: 1.1 }, { x: d.x + 1.75, y: d.y + 0.35, z: 1.1 }];
+      for (const sc of screens) glow(ctx, sc, 26 * scale, status === 'working' ? PALETTE.cyan : color, 0.55 * pulse);
+      if (!live) return;
+      for (const sc of screens) { const at = P(sc); sparks(at.x, at.y, 'screen' + worker.id + sc.x, now, { count: status === 'working' ? 9 : 3, color: status === 'working' ? '#bffcff' : color, alt: '#ffffff', rise: 22 * scale, spread: 14 * scale, life: 1000, size: 2 }); }
+      // Lamp crackle.
+      const lamp = P(helper ? { x: d.x + 0.15, y: d.y + d.h - 0.15, z: 0.5 } : { x: d.x + 1.85, y: d.y + 0.9, z: 0.6 });
+      sparks(lamp.x, lamp.y, 'lamp' + worker.id, now, { count: 5, color, alt: '#ffffff', rise: 16 * scale, spread: 8 * scale, life: 850, size: 2 });
+    }
+    // Agent aura: a status-coloured halo behind the body and a ring of orbiting motes in front of it.
+    function paintAgentAura(worker, foot, extent, now, live, before) {
+      const status = worker.row.status, size = worker.scale || 1, working = status === 'working', blocked = status === 'blocked';
+      const color = working ? STATUS.working : blocked ? STATUS.blocked : worker.accent;
+      const chestY = extent ? extent.top + extent.h * 0.45 : foot.y - CREW_HEIGHT * size * 0.5;
+      const pulse = live ? 0.7 + 0.3 * Math.sin(now / (working ? 900 : 2600) * Math.PI * 2 + (hash(worker.id) % 10)) : 0.8;
+      if (before) {
+        const radius = (working ? 44 : blocked ? 36 : 24) * size;
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (working ? 0.75 : blocked ? 0.5 : 0.22) * pulse;
+        const g = ctx.createRadialGradient(foot.x, chestY, 0, foot.x, chestY, radius);
+        g.addColorStop(0, color); g.addColorStop(0.5, color); g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(foot.x, chestY, radius, radius * 1.25, 0, 0, Math.PI * 2); ctx.fill();
+        // Floor ring under the feet.
+        ctx.globalAlpha = (working ? 0.45 : 0.2) * pulse; ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.ellipse(foot.x, foot.y, 12 * size, 6 * size, 0, 0, Math.PI * 2); ctx.stroke();
+        if (live && working) { const ring = (now / 1400) % 1; ctx.globalAlpha = (1 - ring) * 0.5; ctx.beginPath(); ctx.ellipse(foot.x, foot.y, (12 + 16 * ring) * size, (6 + 8 * ring) * size, 0, 0, Math.PI * 2); ctx.stroke(); }
+        ctx.restore();
+        return;
+      }
+      // Orbiting motes: six when working, two otherwise; blocked agents get slow amber embers instead.
+      const count = working ? 8 : 3, rx = 15 * size, ry = 22 * size * 0.45, speed = working ? 1600 : 5200, seed = hash(worker.id) % 360;
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < count; i++) {
+        const ang = (live ? now / speed : 0.3) * Math.PI * 2 + i * (Math.PI * 2 / count) + seed;
+        const bob = Math.sin(ang * 2) * 6 * size;
+        const x = foot.x + Math.cos(ang) * rx, y = chestY + Math.sin(ang) * ry + bob;
+        const front = Math.sin(ang) > 0;
+        ctx.globalAlpha = (front ? 0.95 : 0.35) * pulse; ctx.fillStyle = i % 2 ? '#ffffff' : color;
+        ctx.fillRect(x - 1, y - 1, 2, 2);
+        // short tail
+        for (let k = 1; k <= 3; k++) { const ta = ang - k * 0.18; ctx.globalAlpha = (front ? 0.5 : 0.15) * pulse * (1 - k / 4); ctx.fillRect(foot.x + Math.cos(ta) * rx - 0.5, chestY + Math.sin(ta) * ry + Math.sin(ta * 2) * 6 * size - 0.5, 1, 1); }
+      }
+      ctx.restore();
+      if (live && working) sparks(foot.x, chestY - 10 * size, 'head' + worker.id, now, { count: 8, color: '#ffffff', alt: color, rise: 28 * size, spread: 22 * size, life: 1200, size: 2 });
+      if (live && blocked) sparks(foot.x, chestY, 'ember' + worker.id, now, { count: 3, color, rise: 26 * size, spread: 12 * size, life: 2600, size: 2 });
+    }
+
     // ---------- crew ----------
     function bodyFor(worker) {
       let body = bodies.get(worker.id);
@@ -709,6 +823,7 @@ const ObserverView = (() => {
       if (onStage({ x: actor.point.x - 0.3, y: actor.point.y - 0.3, w: 0.6, h: 0.6 }, 0, 2)) isoEllipse(ctx, actor.point, 0.28 * size, null, 'rgba(0,0,0,0.38)');
       body.px = foot.x; body.py = foot.y; body.dir = actor.direction;
       body.state = actor.pose === 'walk' ? 'walk' : 'idle'; body.working = actor.pose === 'working'; body.sitting = actor.pose === 'working';
+      if (fx) paintAgentAura(worker, foot, null, now, !reduced, true);
       ctx.save(); ctx.translate(foot.x, foot.y); ctx.scale(scale, scale); ctx.translate(-foot.x, -foot.y);
       let extent = null;
       // The stateful sprite call always runs (pose, facing, frame and skin loading advance); the shared seam rejects
@@ -730,6 +845,7 @@ const ObserverView = (() => {
         ctx.beginPath(); ctx.arc(foot.x, foot.y - h * 0.84, 6 * size, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore();
         extent = { top: foot.y - h, w, h, fallback: true };
       } else if (!extent.fallback) extent = { top: foot.y + (extent.top - foot.y) * scale, w: extent.w * scale, h: extent.h * scale, painted: extent.painted };
+      if (fx) paintAgentAura(worker, foot, extent, now, !reduced, false);
       // Hit regions are in CSS pixels; DPR only touches the backing store.
       const left = camera.tx + (foot.x - extent.w / 2) * camera.zoom, top = camera.ty + extent.top * camera.zoom;
       const width = extent.w * camera.zoom, height = extent.h * camera.zoom, padX = Math.max(0, (MIN_HIT - width) / 2), padY = Math.max(0, (MIN_HIT - height) / 2);
@@ -881,6 +997,7 @@ const ObserverView = (() => {
       // body is submitted so its sprite state advances, and the shared sprite seam skips its pixels when off stage.
       const items = [], zoom = camera.zoom;
       visibleArea = { left: -camera.tx / zoom, top: -camera.ty / zoom, right: (viewport.width - camera.tx) / zoom, bottom: (viewport.height - camera.ty) / zoom };
+      if (fx) paintPlatformGlow(now, animate);
       const byId = new Map(actors.map(actor => [actor.id, actor])), staleKeys = new Set();
       for (const worker of scene.workers) {
         // Each worker animates on its own row's freshness; a stale row freezes its desk, sprite breathing and blinks.
@@ -888,6 +1005,7 @@ const ObserverView = (() => {
         if (own) staleKeys.add(worker.platformKey);
         const paintStation = worker.kind === 'helper' ? paintHelperDesk : paintDesk;
         if (onStage(worker.desk, 1.1, 16)) items.push({ depth: middle(worker.desk), draw: () => paintStation(ctx, worker, now, live) });
+        if (fx && onStage(worker.desk, 1.1, 24)) items.push({ depth: middle(worker.desk) + 0.01, draw: () => paintDeskFx(worker, now, live) });
         const c = worker.chair;
         if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: c.x + c.y - 0.6, draw: () => paintChair(ctx, worker) });
         const actor = byId.get(worker.id);
