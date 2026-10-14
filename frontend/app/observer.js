@@ -223,6 +223,12 @@
     if (next === page) return;
     setPage(next); overview(); if (latest) render(latest, true);
   }
+  // Ambient sky effects (Matrix rain, pixies, nebulae): on by default, remembered per browser.
+  const FX_KEY = 'observer.fx';
+  const fxButton = get('fx-toggle');
+  function readFx() { try { return window.localStorage.getItem(FX_KEY) !== 'off'; } catch (_) { return true; } }
+  function applyFx(on) { view.setFx(on); fxButton.setAttribute('aria-pressed', on ? 'true' : 'false'); try { window.localStorage.setItem(FX_KEY, on ? 'on' : 'off'); } catch (_) {} }
+  if (fxButton && typeof view.setFx === 'function') { applyFx(readFx()); fxButton.addEventListener('click', () => applyFx(!view.fx())); }
   get('zoom-in').addEventListener('click', () => view.zoomBy(1.25));
   get('zoom-out').addEventListener('click', () => view.zoomBy(0.8));
   get('previous-page').addEventListener('click', () => changePage(-1));

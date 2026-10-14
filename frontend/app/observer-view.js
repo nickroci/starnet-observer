@@ -404,7 +404,7 @@ const ObserverView = (() => {
       if (next === mode && key === platform) return;
       mode = next; platform = key; onMode({ mode, platform });
     }
-    let viewport = { width: 0, height: 0 }, dpr = 1, frame = null, running = false, staticLayer = null, stars = null, observer = null;
+    let viewport = { width: 0, height: 0 }, dpr = 1, frame = null, running = false, staticLayer = null, stars = null, observer = null, fx = true;
     const pointers = new Map(); let drag = null, pinch = null;
     // Paint scheduling: a live scene keeps its RAF; a frozen (stale or reduced) one paints once per invalidation.
     let dirty = false, reported = null, workerIndex = new Map(), signature = '', platformCounts = new Map();
@@ -510,35 +510,188 @@ const ObserverView = (() => {
     }
 
     // ---------- space background (screen space, deterministic) ----------
+    // Three depth layers: far dust (dense, dim, slow parallax), mid stars, and a few near bright ones with
+    // cross rays. Nebula haze and shooting stars are ambient; everything freezes when stale or reduced.
+    const STAR_TINTS = ['#cfe6ff', '#ffffff', '#9fd8ff', '#ffe9c4', '#c9fff3'];
     function starfield() {
       if (stars) return stars;
-      const list = [];
       let seed = hash('starfield');
       const next = () => (seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0) / 4294967296;
-      for (let i = 0; i < 220; i++) list.push({ x: next(), y: next(), size: next() < 0.8 ? 1 : next() < 0.7 ? 1.5 : 2, a: 0.25 + next() * 0.6, twinkle: next() < 0.1, period: 4000 + next() * 3000 });
-      stars = list; return stars;
+      const layer = (count, depth, sizes, alpha, twinkleRate) => {
+        const list = [];
+        for (let i = 0; i < count; i++) {
+          const r = next();
+          list.push({ x: next(), y: next(), depth, size: r < sizes[0] ? 1 : r < sizes[1] ? 1.5 : 2, a: alpha[0] + next() * alpha[1],
+            tint: STAR_TINTS[Math.floor(next() * STAR_TINTS.length)], twinkle: next() < twinkleRate, period: 1800 + next() * 4200, phase: next() * Math.PI * 2 });
+        }
+        return list;
+      };
+      const bright = [];
+      for (let i = 0; i < 14; i++) bright.push({ x: next(), y: next(), depth: 0.12, size: 2, a: 0.75 + next() * 0.25, tint: STAR_TINTS[Math.floor(next() * 2)], twinkle: true, period: 2600 + next() * 2600, phase: next() * Math.PI * 2, ray: 4 + next() * 5 });
+      const nebulae = [];
+      for (let i = 0; i < 4; i++) nebulae.push({ x: next(), y: next(), r: 0.18 + next() * 0.22, hue: i % 2 ? 'rgba(63,216,232,' : 'rgba(150,96,220,', a: 0.05 + next() * 0.05 });
+      stars = { far: layer(520, 0.02, [0.85, 0.97], [0.12, 0.3], 0.08), mid: layer(260, 0.06, [0.6, 0.9], [0.3, 0.5], 0.35), bright, nebulae };
+      return stars;
     }
-    function paintSpace(now, animate) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = PALETTE.space; ctx.fillRect(0, 0, viewport.width, viewport.height);
+    function paintStarLayer(list, now, animate, shiftScale) {
+      const w = viewport.width, h = viewport.height;
+      for (const star of list) {
+        const sx = animate ? camera.tx * star.depth * shiftScale : 0, sy = animate ? camera.ty * star.depth * shiftScale : 0;
+        const x = ((star.x * w + sx) % w + w) % w, y = ((star.y * h + sy) % h + h) % h;
+        const pulse = star.twinkle && animate ? 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(now / star.period * Math.PI * 2 + star.phase)) : 1;
+        ctx.globalAlpha = star.a * pulse; ctx.fillStyle = star.tint;
+        ctx.fillRect(x, y, star.size, star.size);
+        if (star.ray) {
+          const len = star.ray * (0.6 + 0.4 * pulse);
+          ctx.globalAlpha = star.a * pulse * 0.55;
+          ctx.fillRect(x - len, y + 0.5, len * 2 + star.size, 1); ctx.fillRect(x + 0.5, y - len, 1, len * 2 + star.size);
+          ctx.globalAlpha = star.a * pulse * 0.18;
+          ctx.fillRect(x - len * 0.5, y - len * 0.5, len + star.size, len + star.size);
+        }
+      }
+    }
+    function paintNebulae(nebulae, now, animate) {
+      const w = viewport.width, h = viewport.height, base = Math.max(w, h);
+      for (const n of nebulae) {
+        const sx = animate ? camera.tx * 0.015 : 0, sy = animate ? camera.ty * 0.015 : 0;
+        const cx = ((n.x * w + sx) % w + w) % w, cy = ((n.y * h + sy) % h + h) % h, r = n.r * base;
+        const breathe = animate ? 1 + 0.12 * Math.sin(now / 9000 * Math.PI * 2 + n.x * 7) : 1;
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * breathe);
+        g.addColorStop(0, n.hue + (n.a * 1.6) + ')'); g.addColorStop(0.55, n.hue + n.a + ')'); g.addColorStop(1, n.hue + '0)');
+        ctx.fillStyle = g; ctx.fillRect(cx - r * 1.2, cy - r * 1.2, r * 2.4, r * 2.4);
+      }
+    }
+    function paintShootingStars(now) {
+      // One streak roughly every 7s, each lasting ~1.1s; the slot index seeds a deterministic path.
+      const SLOT = 7000, LIFE = 1100, slot = Math.floor(now / SLOT), t = now - slot * SLOT;
+      if (t > LIFE) return;
+      let seed = hash('meteor' + slot);
+      const next = () => (seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0) / 4294967296;
+      if (next() < 0.25) return; // skip some slots so it feels irregular
+      const w = viewport.width, h = viewport.height, p = t / LIFE;
+      const x0 = w * (0.1 + next() * 0.9), y0 = h * (next() * 0.45), angle = Math.PI * (0.62 + next() * 0.2), speed = 420 + next() * 380;
+      const dist = speed * p, x = x0 + Math.cos(angle) * dist, y = y0 + Math.sin(angle) * dist, tail = 60 + next() * 70;
+      const fade = p < 0.15 ? p / 0.15 : 1 - (p - 0.15) / 0.85;
+      // Pixel-art tail: a run of 2px dots fading toward the back (the test canvas has no linear gradients).
+      const steps = 14, dx = -Math.cos(angle) * tail / steps, dy = -Math.sin(angle) * tail / steps;
+      ctx.save();
+      for (let i = steps - 1; i >= 0; i--) {
+        ctx.globalAlpha = Math.max(0, fade) * 0.85 * (1 - i / steps) * (1 - i / steps);
+        ctx.fillStyle = i < 2 ? '#ffffff' : '#cfe6ff';
+        ctx.fillRect(x + dx * i - 1, y + dy * i - 1, 2, 2);
+      }
+      ctx.restore();
+    }
+    // Plain field (effects off): the original 220-star sky.
+    let plainStars = null;
+    function plainStarfield() {
+      if (plainStars) return plainStars;
+      const list = []; let seed = hash('starfield');
+      const next = () => (seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0) / 4294967296;
+      for (let i = 0; i < 220; i++) list.push({ x: next(), y: next(), size: next() < 0.8 ? 1 : next() < 0.7 ? 1.5 : 2, a: 0.25 + next() * 0.6, twinkle: next() < 0.1, period: 4000 + next() * 3000 });
+      plainStars = list; return plainStars;
+    }
+    function paintPlainStars(now, animate) {
       const shiftX = animate ? camera.tx * 0.05 : 0, shiftY = animate ? camera.ty * 0.05 : 0;
-      for (const star of starfield()) {
+      for (const star of plainStarfield()) {
         const x = ((star.x * viewport.width + shiftX) % viewport.width + viewport.width) % viewport.width, y = ((star.y * viewport.height + shiftY) % viewport.height + viewport.height) % viewport.height;
         ctx.globalAlpha = star.twinkle && animate ? star.a * (0.55 + 0.45 * Math.sin(now / star.period * Math.PI * 2)) : star.a;
         ctx.fillStyle = '#cfe6ff'; ctx.fillRect(x, y, star.size, star.size);
       }
       ctx.globalAlpha = 1;
+    }
+    // Matrix rain: columns of falling phosphor glyphs far behind the station. Glyphs flicker on a time bucket;
+    // every value is derived from (column, slot) so the rain is deterministic and needs no per-frame state.
+    const RAIN_GLYPHS = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:・"*+-<>¦|╌≡ЖλΣΨ';
+    const RAIN_COL = 16, RAIN_ROW = 15;
+    function paintMatrixRain(now, animate) {
+      const w = viewport.width, h = viewport.height, cols = Math.ceil(w / RAIN_COL) + 1;
+      ctx.font = '12px "VT323", "Courier New", monospace'; ctx.textBaseline = 'top';
+      for (let c = 0; c < cols; c++) {
+        const cseed = hash('rain' + c);
+        const speed = 55 + (cseed % 1000) / 1000 * 110;           // px per second
+        const len = 10 + ((cseed >>> 10) % 14);                    // trail glyphs
+        const offset = ((cseed >>> 4) % 10000) / 10000;            // phase along the column
+        const skip = (cseed % 7) === 0;                            // some columns stay dark
+        if (skip) continue;
+        const cycle = (h + len * RAIN_ROW) / speed * 1000;
+        const t = animate ? now : 0;
+        const headY = (((t / cycle) + offset) % 1) * (h + len * RAIN_ROW) - len * RAIN_ROW;
+        const x = c * RAIN_COL;
+        for (let i = 0; i < len; i++) {
+          const y = headY - i * RAIN_ROW;
+          if (y < -RAIN_ROW || y > h) continue;
+          const bucket = Math.floor((t + i * 97 + c * 31) / 140);
+          const g = RAIN_GLYPHS[(hash('g' + c + ':' + i + ':' + bucket) >>> 0) % RAIN_GLYPHS.length];
+          const k = 1 - i / len;
+          if (i === 0) { ctx.globalAlpha = 0.55; ctx.fillStyle = '#d8ffe8'; }
+          else { ctx.globalAlpha = 0.06 + 0.26 * k * k; ctx.fillStyle = k > 0.6 ? '#5cff9e' : '#1f8f55'; }
+          ctx.fillText(g, x, y);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+    // Pixies: small glowing motes drifting on sine paths with short trails, cyan and phosphor green.
+    let pixies = null;
+    function pixieField() {
+      if (pixies) return pixies;
+      const list = []; let seed = hash('pixies');
+      const next = () => (seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0) / 4294967296;
+      for (let i = 0; i < 26; i++) list.push({ x: next(), y: next(), vx: (next() - 0.5) * 0.012, vy: (next() - 0.5) * 0.008, amp: 6 + next() * 18, period: 2500 + next() * 4500,
+        phase: next() * Math.PI * 2, r: 1.5 + next() * 2, tint: next() < 0.5 ? [63, 216, 232] : [92, 255, 158], blink: 1500 + next() * 2500 });
+      pixies = list; return pixies;
+    }
+    function paintPixies(now, animate) {
+      const w = viewport.width, h = viewport.height, t = animate ? now / 1000 : 0;
+      for (const m of pixieField()) {
+        const bx = ((m.x + m.vx * t) % 1 + 1) % 1 * w, by = ((m.y + m.vy * t) % 1 + 1) % 1 * h;
+        const px = bx + Math.sin(now / m.period * Math.PI * 2 + m.phase) * m.amp, py = by + Math.cos(now / (m.period * 1.3) * Math.PI * 2 + m.phase) * m.amp * 0.6;
+        const glow = animate ? 0.55 + 0.45 * Math.sin(now / m.blink * Math.PI * 2 + m.phase) : 0.8;
+        const [r, g, b] = m.tint, rad = m.r * (2.5 + glow * 2.5);
+        const halo = ctx.createRadialGradient(px, py, 0, px, py, rad);
+        halo.addColorStop(0, `rgba(${r},${g},${b},${0.35 * glow})`); halo.addColorStop(1, `rgba(${r},${g},${b},0)`);
+        ctx.fillStyle = halo; ctx.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+        // trail: three fading echoes behind the mote along its sine path
+        for (let k = 1; k <= 3; k++) {
+          const back = now - k * 90, tx = ((m.x + m.vx * (animate ? back / 1000 : 0)) % 1 + 1) % 1 * w + Math.sin(back / m.period * Math.PI * 2 + m.phase) * m.amp;
+          const ty = ((m.y + m.vy * (animate ? back / 1000 : 0)) % 1 + 1) % 1 * h + Math.cos(back / (m.period * 1.3) * Math.PI * 2 + m.phase) * m.amp * 0.6;
+          ctx.globalAlpha = glow * (0.5 - k * 0.13); ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.fillRect(tx - 0.5, ty - 0.5, 1, 1);
+        }
+        ctx.globalAlpha = Math.min(1, 0.6 + glow * 0.4); ctx.fillStyle = '#ffffff'; ctx.fillRect(px - m.r * 0.5, py - m.r * 0.5, m.r, m.r);
+      }
+      ctx.globalAlpha = 1;
+    }
+    function paintPlanet() {
       // Distant planet arc anchored bottom-left of the stage, as in the reference.
       const radius = Math.max(viewport.width, viewport.height) * 0.42, cx = -radius * 0.35, cy = viewport.height + radius * 0.55;
       const planet = ctx.createRadialGradient(cx + radius * 0.3, cy - radius * 0.3, radius * 0.2, cx, cy, radius);
       planet.addColorStop(0, '#1b2a3a'); planet.addColorStop(0.85, '#0b131c'); planet.addColorStop(1, 'rgba(63,216,232,0.25)');
       ctx.fillStyle = planet; ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill();
-      // An occasional distant shuttle (ambient): eight seconds in every sixty.
-      if (animate) {
-        const t = now % 60000;
-        if (t < 8000) { const x = viewport.width * (1.1 - (t / 8000) * 1.2), y = viewport.height * 0.12 + Math.sin(t / 900) * 4;
-          ctx.fillStyle = '#9fb3c6'; ctx.fillRect(x, y, 7, 2); ctx.fillStyle = PALETTE.window; ctx.fillRect(x + 7, y, 3, 2); }
+      if (fx) {
+        const rim = ctx.createRadialGradient(cx, cy, radius * 0.97, cx, cy, radius * 1.12);
+        rim.addColorStop(0, 'rgba(63,216,232,0.22)'); rim.addColorStop(1, 'rgba(63,216,232,0)');
+        ctx.fillStyle = rim; ctx.beginPath(); ctx.arc(cx, cy, radius * 1.12, 0, Math.PI * 2); ctx.fill();
       }
+    }
+    function paintShuttle(now) {
+      // An occasional distant shuttle (ambient): eight seconds in every sixty.
+      const t = now % 60000;
+      if (t < 8000) { const x = viewport.width * (1.1 - (t / 8000) * 1.2), y = viewport.height * 0.12 + Math.sin(t / 900) * 4;
+        ctx.fillStyle = '#9fb3c6'; ctx.fillRect(x, y, 7, 2); ctx.fillStyle = PALETTE.window; ctx.fillRect(x + 7, y, 3, 2); }
+    }
+    function paintSpace(now, animate) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = PALETTE.space; ctx.fillRect(0, 0, viewport.width, viewport.height);
+      if (!fx) { paintPlainStars(now, animate); paintPlanet(); if (animate) paintShuttle(now); return; }
+      const field = starfield();
+      paintNebulae(field.nebulae, now, animate);
+      paintStarLayer(field.far, now, animate, 1);
+      paintMatrixRain(now, animate);
+      paintStarLayer(field.mid, now, animate, 1);
+      paintStarLayer(field.bright, now, animate, 1);
+      paintPlanet();
+      paintPixies(now, animate);
+      if (animate) { paintShootingStars(now); paintShuttle(now); }
     }
 
     // ---------- crew ----------
@@ -899,7 +1052,8 @@ const ObserverView = (() => {
       readiness.clear();
       pointers.clear(); drag = null; pinch = null; pointer = null; hovered = null; tap = null; titleRegions = []; signRegions = []; plateFrame = null;
     }
-    return { update, focus, focusPlatform, overview, zoomBy, start, stop, paint, limits, invalidate,
+    function setFx(on) { on = !!on; if (on === fx) return fx; fx = on; invalidate(); return fx; }
+    return { update, focus, focusPlatform, overview, zoomBy, start, stop, paint, limits, invalidate, setFx, fx: () => fx,
       camera: () => ({ ...camera }), mode: () => mode, platform: () => platform, hitRegions: () => regions.map(region => ({ ...region })), hovered: () => hovered,
       cacheBuilds: () => (staticLayer ? staticLayer.builds : 0), running: () => running, titleRegions: () => titleRegions.map(region => ({ ...region })),
       signRegions: () => signRegions.map(region => ({ ...region })) };
