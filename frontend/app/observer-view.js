@@ -404,7 +404,7 @@ const ObserverView = (() => {
       if (next === mode && key === platform) return;
       mode = next; platform = key; onMode({ mode, platform });
     }
-    let viewport = { width: 0, height: 0 }, dpr = 1, frame = null, running = false, staticLayer = null, stars = null, observer = null;
+    let viewport = { width: 0, height: 0 }, dpr = 1, frame = null, running = false, staticLayer = null, stars = null, observer = null, fx = true;
     const pointers = new Map(); let drag = null, pinch = null;
     // Paint scheduling: a live scene keeps its RAF; a frozen (stale or reduced) one paints once per invalidation.
     let dirty = false, reported = null, workerIndex = new Map(), signature = '', platformCounts = new Map();
@@ -510,35 +510,391 @@ const ObserverView = (() => {
     }
 
     // ---------- space background (screen space, deterministic) ----------
+    // Three depth layers: far dust (dense, dim, slow parallax), mid stars, and a few near bright ones with
+    // cross rays. Nebula haze and shooting stars are ambient; everything freezes when stale or reduced.
+    const STAR_TINTS = ['#cfe6ff', '#ffffff', '#9fd8ff', '#ffe9c4', '#c9fff3'];
     function starfield() {
       if (stars) return stars;
-      const list = [];
       let seed = hash('starfield');
       const next = () => (seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0) / 4294967296;
-      for (let i = 0; i < 220; i++) list.push({ x: next(), y: next(), size: next() < 0.8 ? 1 : next() < 0.7 ? 1.5 : 2, a: 0.25 + next() * 0.6, twinkle: next() < 0.1, period: 4000 + next() * 3000 });
-      stars = list; return stars;
+      const layer = (count, depth, sizes, alpha, twinkleRate) => {
+        const list = [];
+        for (let i = 0; i < count; i++) {
+          const r = next();
+          list.push({ x: next(), y: next(), depth, size: r < sizes[0] ? 1 : r < sizes[1] ? 1.5 : 2, a: alpha[0] + next() * alpha[1],
+            tint: STAR_TINTS[Math.floor(next() * STAR_TINTS.length)], twinkle: next() < twinkleRate, period: 1800 + next() * 4200, phase: next() * Math.PI * 2 });
+        }
+        return list;
+      };
+      const bright = [];
+      for (let i = 0; i < 14; i++) bright.push({ x: next(), y: next(), depth: 0.12, size: 2, a: 0.75 + next() * 0.25, tint: STAR_TINTS[Math.floor(next() * 2)], twinkle: true, period: 2600 + next() * 2600, phase: next() * Math.PI * 2, ray: 4 + next() * 5 });
+      const nebulae = [];
+      for (let i = 0; i < 4; i++) nebulae.push({ x: next(), y: next(), r: 0.18 + next() * 0.22, hue: i % 2 ? 'rgba(63,216,232,' : 'rgba(150,96,220,', a: 0.05 + next() * 0.05 });
+      stars = { far: layer(520, 0.02, [0.85, 0.97], [0.12, 0.3], 0.08), mid: layer(260, 0.06, [0.6, 0.9], [0.3, 0.5], 0.35), bright, nebulae };
+      return stars;
     }
-    function paintSpace(now, animate) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = PALETTE.space; ctx.fillRect(0, 0, viewport.width, viewport.height);
+    function paintStarLayer(list, now, animate, shiftScale) {
+      const w = viewport.width, h = viewport.height;
+      for (const star of list) {
+        const sx = animate ? camera.tx * star.depth * shiftScale : 0, sy = animate ? camera.ty * star.depth * shiftScale : 0;
+        const x = ((star.x * w + sx) % w + w) % w, y = ((star.y * h + sy) % h + h) % h;
+        const pulse = star.twinkle && animate ? 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(now / star.period * Math.PI * 2 + star.phase)) : 1;
+        ctx.globalAlpha = star.a * pulse; ctx.fillStyle = star.tint;
+        ctx.fillRect(x, y, star.size, star.size);
+        if (star.ray) {
+          const len = star.ray * (0.6 + 0.4 * pulse);
+          ctx.globalAlpha = star.a * pulse * 0.55;
+          ctx.fillRect(x - len, y + 0.5, len * 2 + star.size, 1); ctx.fillRect(x + 0.5, y - len, 1, len * 2 + star.size);
+          ctx.globalAlpha = star.a * pulse * 0.18;
+          ctx.fillRect(x - len * 0.5, y - len * 0.5, len + star.size, len + star.size);
+        }
+      }
+    }
+    function paintNebulae(nebulae, now, animate) {
+      const w = viewport.width, h = viewport.height, base = Math.max(w, h);
+      for (const n of nebulae) {
+        const sx = animate ? camera.tx * 0.015 : 0, sy = animate ? camera.ty * 0.015 : 0;
+        const cx = ((n.x * w + sx) % w + w) % w, cy = ((n.y * h + sy) % h + h) % h, r = n.r * base;
+        const breathe = animate ? 1 + 0.12 * Math.sin(now / 9000 * Math.PI * 2 + n.x * 7) : 1;
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * breathe);
+        g.addColorStop(0, n.hue + (n.a * 1.6) + ')'); g.addColorStop(0.55, n.hue + n.a + ')'); g.addColorStop(1, n.hue + '0)');
+        ctx.fillStyle = g; ctx.fillRect(cx - r * 1.2, cy - r * 1.2, r * 2.4, r * 2.4);
+      }
+    }
+    function paintShootingStars(now) {
+      // One streak roughly every 7s, each lasting ~1.1s; the slot index seeds a deterministic path.
+      const SLOT = 7000, LIFE = 1100, slot = Math.floor(now / SLOT), t = now - slot * SLOT;
+      if (t > LIFE) return;
+      let seed = hash('meteor' + slot);
+      const next = () => (seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0) / 4294967296;
+      if (next() < 0.25) return; // skip some slots so it feels irregular
+      const w = viewport.width, h = viewport.height, p = t / LIFE;
+      const x0 = w * (0.1 + next() * 0.9), y0 = h * (next() * 0.45), angle = Math.PI * (0.62 + next() * 0.2), speed = 420 + next() * 380;
+      const dist = speed * p, x = x0 + Math.cos(angle) * dist, y = y0 + Math.sin(angle) * dist, tail = 60 + next() * 70;
+      const fade = p < 0.15 ? p / 0.15 : 1 - (p - 0.15) / 0.85;
+      // Pixel-art tail: a run of 2px dots fading toward the back (the test canvas has no linear gradients).
+      const steps = 14, dx = -Math.cos(angle) * tail / steps, dy = -Math.sin(angle) * tail / steps;
+      ctx.save();
+      for (let i = steps - 1; i >= 0; i--) {
+        ctx.globalAlpha = Math.max(0, fade) * 0.85 * (1 - i / steps) * (1 - i / steps);
+        ctx.fillStyle = i < 2 ? '#ffffff' : '#cfe6ff';
+        ctx.fillRect(x + dx * i - 1, y + dy * i - 1, 2, 2);
+      }
+      ctx.restore();
+    }
+    // Plain field (effects off): the original 220-star sky.
+    let plainStars = null;
+    function plainStarfield() {
+      if (plainStars) return plainStars;
+      const list = []; let seed = hash('starfield');
+      const next = () => (seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0) / 4294967296;
+      for (let i = 0; i < 220; i++) list.push({ x: next(), y: next(), size: next() < 0.8 ? 1 : next() < 0.7 ? 1.5 : 2, a: 0.25 + next() * 0.6, twinkle: next() < 0.1, period: 4000 + next() * 3000 });
+      plainStars = list; return plainStars;
+    }
+    function paintPlainStars(now, animate) {
       const shiftX = animate ? camera.tx * 0.05 : 0, shiftY = animate ? camera.ty * 0.05 : 0;
-      for (const star of starfield()) {
+      for (const star of plainStarfield()) {
         const x = ((star.x * viewport.width + shiftX) % viewport.width + viewport.width) % viewport.width, y = ((star.y * viewport.height + shiftY) % viewport.height + viewport.height) % viewport.height;
         ctx.globalAlpha = star.twinkle && animate ? star.a * (0.55 + 0.45 * Math.sin(now / star.period * Math.PI * 2)) : star.a;
         ctx.fillStyle = '#cfe6ff'; ctx.fillRect(x, y, star.size, star.size);
       }
       ctx.globalAlpha = 1;
+    }
+    // Matrix rain: columns of falling phosphor glyphs far behind the station. Glyphs flicker on a time bucket;
+    // every value is derived from (column, slot) so the rain is deterministic and needs no per-frame state.
+    const RAIN_GLYPHS = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:・"*+-<>¦|╌≡ЖλΣΨ';
+    const RAIN_COL = 16, RAIN_ROW = 15;
+    function paintMatrixRain(now, animate) {
+      const w = viewport.width, h = viewport.height, cols = Math.ceil(w / RAIN_COL) + 1;
+      ctx.font = '12px "VT323", "Courier New", monospace'; ctx.textBaseline = 'top';
+      for (let c = 0; c < cols; c++) {
+        const cseed = hash('rain' + c);
+        const speed = 55 + (cseed % 1000) / 1000 * 110;           // px per second
+        const len = 10 + ((cseed >>> 10) % 14);                    // trail glyphs
+        const offset = ((cseed >>> 4) % 10000) / 10000;            // phase along the column
+        const skip = (cseed % 7) === 0;                            // some columns stay dark
+        if (skip) continue;
+        const cycle = (h + len * RAIN_ROW) / speed * 1000;
+        const t = animate ? now : 0;
+        const headY = (((t / cycle) + offset) % 1) * (h + len * RAIN_ROW) - len * RAIN_ROW;
+        const x = c * RAIN_COL;
+        for (let i = 0; i < len; i++) {
+          const y = headY - i * RAIN_ROW;
+          if (y < -RAIN_ROW || y > h) continue;
+          const bucket = Math.floor((t + i * 97 + c * 31) / 140);
+          const g = RAIN_GLYPHS[(hash('g' + c + ':' + i + ':' + bucket) >>> 0) % RAIN_GLYPHS.length];
+          const k = 1 - i / len;
+          if (i === 0) { ctx.globalAlpha = 0.55; ctx.fillStyle = '#d8ffe8'; }
+          else { ctx.globalAlpha = 0.06 + 0.26 * k * k; ctx.fillStyle = k > 0.6 ? '#5cff9e' : '#1f8f55'; }
+          ctx.fillText(g, x, y);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+    // Pixies: small glowing motes drifting on sine paths with short trails, cyan and phosphor green.
+    let pixies = null;
+    function pixieField() {
+      if (pixies) return pixies;
+      const list = []; let seed = hash('pixies');
+      const next = () => (seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0) / 4294967296;
+      for (let i = 0; i < 26; i++) list.push({ x: next(), y: next(), vx: (next() - 0.5) * 0.012, vy: (next() - 0.5) * 0.008, amp: 6 + next() * 18, period: 2500 + next() * 4500,
+        phase: next() * Math.PI * 2, r: 1.5 + next() * 2, tint: next() < 0.5 ? [63, 216, 232] : [92, 255, 158], blink: 1500 + next() * 2500 });
+      pixies = list; return pixies;
+    }
+    function paintPixies(now, animate) {
+      const w = viewport.width, h = viewport.height, t = animate ? now / 1000 : 0;
+      for (const m of pixieField()) {
+        const bx = ((m.x + m.vx * t) % 1 + 1) % 1 * w, by = ((m.y + m.vy * t) % 1 + 1) % 1 * h;
+        const px = bx + Math.sin(now / m.period * Math.PI * 2 + m.phase) * m.amp, py = by + Math.cos(now / (m.period * 1.3) * Math.PI * 2 + m.phase) * m.amp * 0.6;
+        const glow = animate ? 0.55 + 0.45 * Math.sin(now / m.blink * Math.PI * 2 + m.phase) : 0.8;
+        const [r, g, b] = m.tint, rad = m.r * (2.5 + glow * 2.5);
+        const halo = ctx.createRadialGradient(px, py, 0, px, py, rad);
+        halo.addColorStop(0, `rgba(${r},${g},${b},${0.35 * glow})`); halo.addColorStop(1, `rgba(${r},${g},${b},0)`);
+        ctx.fillStyle = halo; ctx.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+        // trail: three fading echoes behind the mote along its sine path
+        for (let k = 1; k <= 3; k++) {
+          const back = now - k * 90, tx = ((m.x + m.vx * (animate ? back / 1000 : 0)) % 1 + 1) % 1 * w + Math.sin(back / m.period * Math.PI * 2 + m.phase) * m.amp;
+          const ty = ((m.y + m.vy * (animate ? back / 1000 : 0)) % 1 + 1) % 1 * h + Math.cos(back / (m.period * 1.3) * Math.PI * 2 + m.phase) * m.amp * 0.6;
+          ctx.globalAlpha = glow * (0.5 - k * 0.13); ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.fillRect(tx - 0.5, ty - 0.5, 1, 1);
+        }
+        ctx.globalAlpha = Math.min(1, 0.6 + glow * 0.4); ctx.fillStyle = '#ffffff'; ctx.fillRect(px - m.r * 0.5, py - m.r * 0.5, m.r, m.r);
+      }
+      ctx.globalAlpha = 1;
+    }
+    function paintPlanet() {
       // Distant planet arc anchored bottom-left of the stage, as in the reference.
       const radius = Math.max(viewport.width, viewport.height) * 0.42, cx = -radius * 0.35, cy = viewport.height + radius * 0.55;
       const planet = ctx.createRadialGradient(cx + radius * 0.3, cy - radius * 0.3, radius * 0.2, cx, cy, radius);
       planet.addColorStop(0, '#1b2a3a'); planet.addColorStop(0.85, '#0b131c'); planet.addColorStop(1, 'rgba(63,216,232,0.25)');
       ctx.fillStyle = planet; ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill();
-      // An occasional distant shuttle (ambient): eight seconds in every sixty.
-      if (animate) {
-        const t = now % 60000;
-        if (t < 8000) { const x = viewport.width * (1.1 - (t / 8000) * 1.2), y = viewport.height * 0.12 + Math.sin(t / 900) * 4;
-          ctx.fillStyle = '#9fb3c6'; ctx.fillRect(x, y, 7, 2); ctx.fillStyle = PALETTE.window; ctx.fillRect(x + 7, y, 3, 2); }
+      if (fx) {
+        const rim = ctx.createRadialGradient(cx, cy, radius * 0.97, cx, cy, radius * 1.12);
+        rim.addColorStop(0, 'rgba(63,216,232,0.22)'); rim.addColorStop(1, 'rgba(63,216,232,0)');
+        ctx.fillStyle = rim; ctx.beginPath(); ctx.arc(cx, cy, radius * 1.12, 0, Math.PI * 2); ctx.fill();
       }
+    }
+    function paintShuttle(now) {
+      // An occasional distant shuttle (ambient): eight seconds in every sixty.
+      const t = now % 60000;
+      if (t < 8000) { const x = viewport.width * (1.1 - (t / 8000) * 1.2), y = viewport.height * 0.12 + Math.sin(t / 900) * 4;
+        ctx.fillStyle = '#9fb3c6'; ctx.fillRect(x, y, 7, 2); ctx.fillStyle = PALETTE.window; ctx.fillRect(x + 7, y, 3, 2); }
+    }
+    function paintSpace(now, animate) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = PALETTE.space; ctx.fillRect(0, 0, viewport.width, viewport.height);
+      if (!fx) { paintPlainStars(now, animate); paintPlanet(); if (animate) paintShuttle(now); return; }
+      const field = starfield();
+      paintNebulae(field.nebulae, now, animate);
+      paintStarLayer(field.far, now, animate, 1);
+      paintMatrixRain(now, animate);
+      paintStarLayer(field.mid, now, animate, 1);
+      paintStarLayer(field.bright, now, animate, 1);
+      paintPlanet();
+      paintPixies(now, animate);
+      if (animate) { paintShootingStars(now); paintShuttle(now); }
+    }
+
+    // ---------- FX: glow and sparks on the station itself (world space, deterministic) ----------
+    // A burst of rising pixel sparks around a screen point. Each spark loops on its own phase so there is no state.
+    function sparks(x, y, key, now, { count = 6, color = '#ffffff', alt = null, rise = 18, spread = 14, life = 1400, size = 2, gravity = 0 } = {}) {
+      const base = hash(key);
+      for (let i = 0; i < count; i++) {
+        const h1 = hash(key + ':' + i), h2 = hash(i + '#' + key);
+        const t = ((now + (h1 % life)) % life) / life;
+        const dx = ((h2 % 1000) / 1000 - 0.5) * spread, vy = 0.6 + ((h1 >>> 8) % 1000) / 1000 * 0.8;
+        const px = x + dx + Math.sin((now / 300) + i) * 1.5, py = y - rise * t * vy + gravity * t * t;
+        const a = t < 0.2 ? t / 0.2 : 1 - (t - 0.2) / 0.8, sz = size * (1 - t * 0.5);
+        ctx.globalAlpha = Math.max(0, a) * 0.9; ctx.fillStyle = alt && ((base + i) % 3 === 0) ? alt : color;
+        ctx.fillRect(px - sz / 2, py - sz / 2, sz, sz);
+      }
+      ctx.globalAlpha = 1;
+    }
+    // Neon bloom along the two lit front edges of a rect, plus a running light chasing around them.
+    function rimBloom(rect, accent, now, animate, strength = 1) {
+      const a = P({ x: rect.x, y: rect.y + rect.h }), b = P({ x: rect.x + rect.w, y: rect.y + rect.h }), c = P({ x: rect.x + rect.w, y: rect.y });
+      const pulse = animate ? 0.75 + 0.25 * Math.sin(now / 1800 * Math.PI * 2 + rect.x) : 0.85;
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.strokeStyle = accent; ctx.lineCap = 'round';
+      for (const [width, alpha] of [[26, 0.1], [14, 0.2], [7, 0.38], [3, 0.8]]) {
+        ctx.lineWidth = width; ctx.globalAlpha = alpha * pulse * strength;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.stroke();
+      }
+      if (animate) {
+        // Running light: one bright bead per edge pair, 4s per lap, with a short fading tail.
+        const lap = 4000, len1 = Math.hypot(b.x - a.x, b.y - a.y), len2 = Math.hypot(c.x - b.x, c.y - b.y), total = len1 + len2;
+        for (let k = 0; k < 10; k++) {
+          const d = (((now - k * 40) / lap + rect.y * 0.01 + (k >= 5 ? 0.5 : 0)) % 1) * total;
+          const pt = d < len1 ? { x: a.x + (b.x - a.x) * d / len1, y: a.y + (b.y - a.y) * d / len1 } : { x: b.x + (c.x - b.x) * (d - len1) / len2, y: b.y + (c.y - b.y) * (d - len1) / len2 };
+          ctx.globalAlpha = (1 - (k % 5) / 5) * 0.95 * strength; ctx.fillStyle = (k % 5) === 0 ? '#ffffff' : accent;
+          ctx.fillRect(pt.x - 1.5, pt.y - 1.5, 3, 3);
+        }
+      }
+      ctx.restore();
+    }
+    function paintPlatformGlow(now, animate) {
+      for (const platform of scene.platforms) {
+        const r = platform.rect;
+        if (!onStage(r, 1, 48)) continue;
+        // Underglow beneath the deck in the project hue, breathing slowly.
+        const breathe = animate ? 0.22 + 0.08 * Math.sin(now / 3200 * Math.PI * 2 + r.x * 0.7) : 0.25;
+        glow(ctx, { x: r.x + r.w / 2, y: r.y + r.h / 2, z: -2.4 }, Math.max(r.w, r.h) * 17, platform.accent, breathe * 1.3);
+        rimBloom(r, platform.accent, now, animate);
+        // Corner beacons: a spark fountain at each lit corner, staggered.
+        if (animate) for (const corner of [{ x: r.x, y: r.y + r.h }, { x: r.x + r.w, y: r.y + r.h }, { x: r.x + r.w, y: r.y }]) {
+          const at = P(corner);
+          sparks(at.x, at.y - 2, 'corner' + platform.key + corner.x + ',' + corner.y, now, { count: 10, color: platform.accent, alt: '#ffffff', rise: 40, spread: 14, life: 1500, size: 2 });
+        }
+      }
+      // Mailroom and observatory get their own halos.
+      const hub = scene.mail.rect;
+      if (onStage(hub, 1, 48)) {
+        glow(ctx, { x: hub.x + hub.w / 2, y: hub.y + hub.h / 2, z: -1 }, Math.max(hub.w, hub.h) * 24, PALETTE.amber, animate ? 0.25 + 0.1 * Math.sin(now / 2600 * Math.PI * 2) : 0.3);
+        rimBloom(hub, PALETTE.amber, now, animate, 0.8);
+      }
+      if (scene.observatory && onStage(scene.observatory.rect, 1, 48)) {
+        const o = scene.observatory.rect;
+        glow(ctx, { x: o.x + o.w / 2, y: o.y + o.h / 2, z: -1 }, Math.max(o.w, o.h) * 24, PALETTE.cyan, animate ? 0.25 + 0.1 * Math.sin(now / 2900 * Math.PI * 2 + 1) : 0.3);
+        rimBloom(o, PALETTE.cyan, now, animate, 0.8);
+      }
+    }
+    // Furniture FX: every wall unit, corner prop, walkway, chair, apron lamp, mail prop and observatory prop lights up.
+    function paintFurnitureFx(now, animate) {
+      const pulse = (k, o = 0) => animate ? 0.65 + 0.35 * Math.sin(now / k * Math.PI * 2 + o) : 0.85;
+      for (const platform of scene.platforms) {
+        if (!onStage(platform.rect, 2.4, 48)) continue;
+        platform.decorationRegions.forEach((region, index) => {
+          if (region.kind !== 'wall' && region.kind !== 'corner') return;
+          const kinds = region.kind === 'corner' ? CORNER_KINDS : WALL_KINDS;
+          wallUnits(region).forEach((unit, slot) => {
+            const key = platform.key + ':' + index + ':' + slot, kind = kinds[hash(key) % kinds.length], o = hash(key) % 6;
+            const c = { x: unit.x + unit.w / 2, y: unit.y + unit.h / 2 }, at = z => P({ ...c, z });
+            if (kind === 'rack') {
+              glow(ctx, { ...c, z: 0.7 }, 30, PALETTE.cyan, 0.45 * pulse(1300, o));
+              // LED column: blinking pixels up the rack face.
+              const top = at(1.05), bottom = at(0.2);
+              for (let i = 0; i < 5; i++) { const on = animate ? (Math.floor(now / 180) + i * 3 + o) % 5 !== 0 : true; ctx.globalAlpha = on ? 0.95 : 0.2; ctx.fillStyle = i % 2 ? STATUS.working : PALETTE.cyan; ctx.fillRect(bottom.x - 6 + i * 3, bottom.y - (bottom.y - top.y) * (i / 5) - 1, 2, 2); }
+              ctx.globalAlpha = 1;
+            } else if (kind === 'screen') {
+              glow(ctx, { ...c, z: 0.9 }, 44, PALETTE.cyan, 0.7 * pulse(900, o));
+              if (animate) { const a = at(1.1); sparks(a.x, a.y, 'scr' + key, now, { count: 8, color: '#bffcff', alt: '#ffffff', rise: 26, spread: 20, life: 1000, size: 2 }); }
+            } else if (kind === 'vent') {
+              glow(ctx, { ...c, z: 0.4 }, 30, PALETTE.window, 0.55 * pulse(2200, o));
+              if (animate) { const a = at(0.5); sparks(a.x, a.y, 'vent' + key, now, { count: 7, color: PALETTE.window, alt: '#ffd9a0', rise: 34, spread: 14, life: 1800, size: 2 }); }
+            } else if (kind === 'board') {
+              glow(ctx, { ...c, z: 0.8 }, 34, platform.accent, 0.6 * pulse(1700, o));
+            } else if (kind === 'tank') {
+              glow(ctx, { ...c, z: 0.6 }, 36, PALETTE.cyan, 0.7 * pulse(1100, o));
+              if (animate) { const a = at(0.15); sparks(a.x, a.y, 'tank' + key, now, { count: 8, color: '#9ff3ff', alt: '#ffffff', rise: 28, spread: 10, life: 2200, size: 2 }); }
+            } else if (kind === 'planter') {
+              glow(ctx, { ...c, z: 0.6 }, 34, STATUS.working, 0.6 * pulse(2600, o));
+              if (animate) { const a = at(0.7); sparks(a.x, a.y, 'plant' + key, now, { count: 7, color: STATUS.working, alt: '#ffffff', rise: 30, spread: 18, life: 2400, size: 2 }); }
+            } else if (kind === 'crates') {
+              glow(ctx, { ...c, z: 0.7 }, 30, PALETTE.window, 0.5 * pulse(1900, o));
+            } else {
+              // mast: strong red beacon with a flare and sparks.
+              const beacon = { ...c, z: 2.2 }, b = pulse(700, o);
+              glow(ctx, beacon, 40, '#ff5a3a', 0.9 * b);
+              const a = at(2.2); ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.8 * b; ctx.fillStyle = '#ffd0c0';
+              ctx.fillRect(a.x - 12, a.y - 0.5, 24, 1); ctx.fillRect(a.x - 0.5, a.y - 12, 1, 24); ctx.restore();
+              if (animate) sparks(a.x, a.y, 'mast' + key, now, { count: 8, color: '#ff8a6a', alt: '#ffffff', rise: 30, spread: 20, life: 1200, size: 2, gravity: 14 });
+            }
+          });
+        });
+        // Apron lamps: big warm halos with a sparkle.
+        for (const region of platform.decorationRegions) if (region.kind === 'apron') {
+          const r = region.rect, post = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+          glow(ctx, { ...post, z: 1.6 }, 46, PALETTE.window, 0.8 * pulse(1500, r.x));
+          if (animate) { const a = P({ ...post, z: 1.6 }); sparks(a.x, a.y, 'apron' + platform.key + r.x, now, { count: 6, color: '#ffe0b0', alt: '#ffffff', rise: 22, spread: 16, life: 1300, size: 2 }); }
+        }
+      }
+      // Walkways: cyan running lights streaming along both long edges.
+      if (animate) for (const walkway of scene.walkways) {
+        const r = walkway.rect; if (!onStage(r, 0.5, 24)) continue;
+        const along = r.w >= r.h, len = along ? r.w : r.h, lap = 2600, beads = Math.max(2, Math.round(len / 4));
+        for (const side of [0, 1]) for (let k = 0; k < beads; k++) {
+          const f = ((now / lap) + k / beads + side * 0.5) % 1, d = f * len;
+          const pt = along ? { x: r.x + d, y: side ? r.y + r.h : r.y } : { x: side ? r.x + r.w : r.x, y: r.y + d };
+          const a = P(pt); ctx.save(); ctx.globalCompositeOperation = 'lighter';
+          for (let t = 0; t < 4; t++) { const back = along ? P({ x: pt.x - t * 0.35, y: pt.y }) : P({ x: pt.x, y: pt.y - t * 0.35 }); ctx.globalAlpha = (1 - t / 4) * 0.9; ctx.fillStyle = t === 0 ? '#ffffff' : PALETTE.cyan; ctx.fillRect(back.x - 1, back.y - 1, 2, 2); }
+          ctx.restore();
+        }
+      }
+      // Chairs: a small ring; desks: every desk blooms, idle ones dimly.
+      for (const worker of scene.workers) {
+        const sc = worker.scale || 1, status = worker.row.status, idle = status !== 'working' && status !== 'blocked';
+        if (onStage(worker.desk, 1.2, 24)) glow(ctx, { x: worker.desk.x + worker.desk.w / 2, y: worker.desk.y + worker.desk.h / 2, z: 0.6 }, 40 * sc, idle ? worker.accent : status === 'working' ? PALETTE.cyan : STATUS.blocked, (idle ? 0.3 : 0.6) * pulse(1400, hash(worker.id) % 6));
+        const c = worker.chair; if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.5 * pulse(2000, c.x); isoEllipse(ctx, c, 0.34 * sc, worker.accent, null, 1.5); ctx.restore(); }
+      }
+      // Mailroom: tower bloom, pad pulse rings, pod and chute sparks.
+      const mail = scene.mail;
+      if (onStage(mail.rect, 3.5, 48)) {
+        const t = mail.tower, top = { x: t.x + t.w / 2, y: t.y + t.h / 2, z: 2 };
+        glow(ctx, top, 90, PALETTE.amber, 0.7 * pulse(1800));
+        glow(ctx, { ...top, z: 0.2 }, 70, PALETTE.window, 0.45 * pulse(2300, 1));
+        for (const pad of mail.pads) { glow(ctx, pad, 46, PALETTE.amber, 0.55 * pulse(1600, pad.x)); if (animate) { const ring = ((now / 1600) + pad.x) % 1; ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (1 - ring) * 0.8; isoEllipse(ctx, pad, 0.5 + 0.9 * ring, PALETTE.window, null, 1.5); ctx.restore(); } }
+        if (animate) { const a = P({ ...top, z: 3.4 }); sparks(a.x, a.y, 'tower', now, { count: 12, color: PALETTE.window, alt: '#ffffff', rise: 40, spread: 30, life: 1500, size: 2, gravity: 10 }); }
+        const pod = mail.pod[0]; glow(ctx, { x: pod.x, y: pod.y, z: 0.8 }, 36, PALETTE.cyan, 0.7 * pulse(1000));
+        if (animate) { const a = P({ x: pod.x, y: pod.y, z: 0.9 }); sparks(a.x, a.y, 'pod', now, { count: 7, color: '#bffcff', alt: '#ffffff', rise: 26, spread: 16, life: 1100, size: 2 }); }
+      }
+      // Observatory: screens, telescope tip, plant and the beacon light.
+      const ob = scene.observatory;
+      if (ob && onStage(ob.rect, 3, 48)) {
+        for (const screen of ob.screens) { const r = screen.rect; glow(ctx, { x: r.x + r.w / 2, y: r.y + 0.3, z: screen.height * 0.6 }, 44, PALETTE.cyan, 0.7 * pulse(1200, r.x)); if (animate) { const a = P({ x: r.x + r.w / 2, y: r.y + 0.3, z: screen.height }); sparks(a.x, a.y, 'obs' + r.x, now, { count: 7, color: '#bffcff', alt: '#ffffff', rise: 24, spread: 20, life: 1100, size: 2 }); } }
+        for (const tel of ob.telescopes) { const r = tel.rect, tip = { x: r.x + r.w / 2, y: r.y + r.h / 2 - 0.7, z: tel.height - 0.3 }; glow(ctx, tip, 34, PALETTE.cyan, 0.9 * pulse(800)); if (animate) { const a = P(tip); sparks(a.x, a.y, 'tel' + r.x, now, { count: 6, color: '#ffffff', alt: PALETTE.cyan, rise: 22, spread: 18, life: 1000, size: 2 }); } }
+        const pr = ob.plant.rect; glow(ctx, { x: pr.x + 0.5, y: pr.y + 0.5, z: 1.2 }, 36, STATUS.working, 0.6 * pulse(2400));
+        if (animate) { const a = P({ x: pr.x + 0.5, y: pr.y + 0.5, z: 1.5 }); sparks(a.x, a.y, 'obplant', now, { count: 6, color: STATUS.working, alt: '#ffffff', rise: 28, spread: 16, life: 2200, size: 2 }); }
+        const light = ob.light.rect; glow(ctx, { x: light.x + light.w / 2, y: light.y + light.h / 2 + 1.5, z: 0.5 }, 110, PALETTE.cyan, 0.5 * pulse(2000));
+      }
+    }
+    // Sparks and screen bloom on an active desk: the monitors throw light and the working lamp crackles.
+    function paintDeskFx(worker, now, live) {
+      const d = worker.desk, status = worker.row.status, scale = worker.scale || 1;
+      if (status !== 'working' && status !== 'blocked') return;
+      const color = STATUS[status], helper = worker.kind === 'helper';
+      const pulse = live ? 0.6 + 0.4 * Math.sin(now / (status === 'working' ? 700 : 1600) * Math.PI * 2 + hash(worker.id) % 7) : 0.7;
+      // Screen bloom above the monitors.
+      const screens = helper ? [{ x: d.x + d.w - 0.2, y: d.y + 0.26, z: 0.9 }] : [{ x: d.x + 0.25, y: d.y + 0.35, z: 1.1 }, { x: d.x + 1.75, y: d.y + 0.35, z: 1.1 }];
+      for (const sc of screens) glow(ctx, sc, 34 * scale, status === 'working' ? PALETTE.cyan : color, 0.85 * pulse);
+      if (!live) return;
+      for (const sc of screens) { const at = P(sc); sparks(at.x, at.y, 'screen' + worker.id + sc.x, now, { count: status === 'working' ? 9 : 3, color: status === 'working' ? '#bffcff' : color, alt: '#ffffff', rise: 22 * scale, spread: 14 * scale, life: 1000, size: 2 }); }
+      // Lamp crackle.
+      const lamp = P(helper ? { x: d.x + 0.15, y: d.y + d.h - 0.15, z: 0.5 } : { x: d.x + 1.85, y: d.y + 0.9, z: 0.6 });
+      sparks(lamp.x, lamp.y, 'lamp' + worker.id, now, { count: 5, color, alt: '#ffffff', rise: 16 * scale, spread: 8 * scale, life: 850, size: 2 });
+    }
+    // Agent aura: a status-coloured halo behind the body and a ring of orbiting motes in front of it.
+    function paintAgentAura(worker, foot, extent, now, live, before) {
+      const status = worker.row.status, size = worker.scale || 1, working = status === 'working', blocked = status === 'blocked';
+      const color = working ? STATUS.working : blocked ? STATUS.blocked : worker.accent;
+      const chestY = extent ? extent.top + extent.h * 0.45 : foot.y - CREW_HEIGHT * size * 0.5;
+      const pulse = live ? 0.7 + 0.3 * Math.sin(now / (working ? 900 : 2600) * Math.PI * 2 + (hash(worker.id) % 10)) : 0.8;
+      if (before) {
+        const radius = (working ? 54 : blocked ? 44 : 30) * size;
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (working ? 0.95 : blocked ? 0.65 : 0.32) * pulse;
+        const g = ctx.createRadialGradient(foot.x, chestY, 0, foot.x, chestY, radius);
+        g.addColorStop(0, color); g.addColorStop(0.5, color); g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(foot.x, chestY, radius, radius * 1.25, 0, 0, Math.PI * 2); ctx.fill();
+        // Floor ring under the feet.
+        ctx.globalAlpha = (working ? 0.45 : 0.2) * pulse; ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.ellipse(foot.x, foot.y, 12 * size, 6 * size, 0, 0, Math.PI * 2); ctx.stroke();
+        if (live && working) { const ring = (now / 1400) % 1; ctx.globalAlpha = (1 - ring) * 0.5; ctx.beginPath(); ctx.ellipse(foot.x, foot.y, (12 + 16 * ring) * size, (6 + 8 * ring) * size, 0, 0, Math.PI * 2); ctx.stroke(); }
+        ctx.restore();
+        return;
+      }
+      // Orbiting motes: six when working, two otherwise; blocked agents get slow amber embers instead.
+      const count = working ? 10 : 4, rx = 17 * size, ry = 22 * size * 0.45, speed = working ? 1600 : 5200, seed = hash(worker.id) % 360;
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < count; i++) {
+        const ang = (live ? now / speed : 0.3) * Math.PI * 2 + i * (Math.PI * 2 / count) + seed;
+        const bob = Math.sin(ang * 2) * 6 * size;
+        const x = foot.x + Math.cos(ang) * rx, y = chestY + Math.sin(ang) * ry + bob;
+        const front = Math.sin(ang) > 0;
+        ctx.globalAlpha = (front ? 0.95 : 0.35) * pulse; ctx.fillStyle = i % 2 ? '#ffffff' : color;
+        ctx.fillRect(x - 1, y - 1, 2, 2);
+        // short tail
+        for (let k = 1; k <= 3; k++) { const ta = ang - k * 0.18; ctx.globalAlpha = (front ? 0.5 : 0.15) * pulse * (1 - k / 4); ctx.fillRect(foot.x + Math.cos(ta) * rx - 0.5, chestY + Math.sin(ta) * ry + Math.sin(ta * 2) * 6 * size - 0.5, 1, 1); }
+      }
+      ctx.restore();
+      if (live && working) sparks(foot.x, chestY - 10 * size, 'head' + worker.id, now, { count: 8, color: '#ffffff', alt: color, rise: 28 * size, spread: 22 * size, life: 1200, size: 2 });
+      if (live && blocked) sparks(foot.x, chestY, 'ember' + worker.id, now, { count: 3, color, rise: 26 * size, spread: 12 * size, life: 2600, size: 2 });
     }
 
     // ---------- crew ----------
@@ -556,6 +912,7 @@ const ObserverView = (() => {
       if (onStage({ x: actor.point.x - 0.3, y: actor.point.y - 0.3, w: 0.6, h: 0.6 }, 0, 2)) isoEllipse(ctx, actor.point, 0.28 * size, null, 'rgba(0,0,0,0.38)');
       body.px = foot.x; body.py = foot.y; body.dir = actor.direction;
       body.state = actor.pose === 'walk' ? 'walk' : 'idle'; body.working = actor.pose === 'working'; body.sitting = actor.pose === 'working';
+      if (fx) paintAgentAura(worker, foot, null, now, !reduced, true);
       ctx.save(); ctx.translate(foot.x, foot.y); ctx.scale(scale, scale); ctx.translate(-foot.x, -foot.y);
       let extent = null;
       // The stateful sprite call always runs (pose, facing, frame and skin loading advance); the shared seam rejects
@@ -577,6 +934,7 @@ const ObserverView = (() => {
         ctx.beginPath(); ctx.arc(foot.x, foot.y - h * 0.84, 6 * size, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore();
         extent = { top: foot.y - h, w, h, fallback: true };
       } else if (!extent.fallback) extent = { top: foot.y + (extent.top - foot.y) * scale, w: extent.w * scale, h: extent.h * scale, painted: extent.painted };
+      if (fx) paintAgentAura(worker, foot, extent, now, !reduced, false);
       // Hit regions are in CSS pixels; DPR only touches the backing store.
       const left = camera.tx + (foot.x - extent.w / 2) * camera.zoom, top = camera.ty + extent.top * camera.zoom;
       const width = extent.w * camera.zoom, height = extent.h * camera.zoom, padX = Math.max(0, (MIN_HIT - width) / 2), padY = Math.max(0, (MIN_HIT - height) / 2);
@@ -728,6 +1086,8 @@ const ObserverView = (() => {
       // body is submitted so its sprite state advances, and the shared sprite seam skips its pixels when off stage.
       const items = [], zoom = camera.zoom;
       visibleArea = { left: -camera.tx / zoom, top: -camera.ty / zoom, right: (viewport.width - camera.tx) / zoom, bottom: (viewport.height - camera.ty) / zoom };
+      if (fx) paintPlatformGlow(now, animate);
+      if (fx) paintFurnitureFx(now, animate);
       const byId = new Map(actors.map(actor => [actor.id, actor])), staleKeys = new Set();
       for (const worker of scene.workers) {
         // Each worker animates on its own row's freshness; a stale row freezes its desk, sprite breathing and blinks.
@@ -735,6 +1095,7 @@ const ObserverView = (() => {
         if (own) staleKeys.add(worker.platformKey);
         const paintStation = worker.kind === 'helper' ? paintHelperDesk : paintDesk;
         if (onStage(worker.desk, 1.1, 16)) items.push({ depth: middle(worker.desk), draw: () => paintStation(ctx, worker, now, live) });
+        if (fx && onStage(worker.desk, 1.1, 24)) items.push({ depth: middle(worker.desk) + 0.01, draw: () => paintDeskFx(worker, now, live) });
         const c = worker.chair;
         if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: c.x + c.y - 0.6, draw: () => paintChair(ctx, worker) });
         const actor = byId.get(worker.id);
@@ -899,7 +1260,8 @@ const ObserverView = (() => {
       readiness.clear();
       pointers.clear(); drag = null; pinch = null; pointer = null; hovered = null; tap = null; titleRegions = []; signRegions = []; plateFrame = null;
     }
-    return { update, focus, focusPlatform, overview, zoomBy, start, stop, paint, limits, invalidate,
+    function setFx(on) { on = !!on; if (on === fx) return fx; fx = on; invalidate(); return fx; }
+    return { update, focus, focusPlatform, overview, zoomBy, start, stop, paint, limits, invalidate, setFx, fx: () => fx,
       camera: () => ({ ...camera }), mode: () => mode, platform: () => platform, hitRegions: () => regions.map(region => ({ ...region })), hovered: () => hovered,
       cacheBuilds: () => (staticLayer ? staticLayer.builds : 0), running: () => running, titleRegions: () => titleRegions.map(region => ({ ...region })),
       signRegions: () => signRegions.map(region => ({ ...region })) };
