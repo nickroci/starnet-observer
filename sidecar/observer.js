@@ -111,12 +111,22 @@ function makeObserver(options = {}) {
       const inventoryAt = now();
       const rows = [], seen = new Set(), proofs = new Map();
       const identityRefresh = { endpointTimedOut: false };
+      const panes = [];
       for (const pane of inventory.result.agents) {
         if (!pane || !['codex', 'claude'].includes(pane.agent)) continue;
         if (typeof pane.pane_id !== 'string' || !/^[A-Za-z0-9:_-]{1,100}$/.test(pane.pane_id) || seen.has(pane.pane_id)) throw new Error('Invalid pane identity');
         seen.add(pane.pane_id);
+        panes.push(pane);
+      }
+      let resolved;
+      if (identities.resolveMany) resolved = await identities.resolveMany(panes, identityRefresh);
+      else {
+        resolved = [];
+        for (const pane of panes) resolved.push(await identities.resolve(pane, identityRefresh));
+      }
+      for (const [index, pane] of panes.entries()) {
         const id = 'obs_' + crypto.createHash('sha256').update(endpoint + '\0' + pane.pane_id).digest('hex').slice(0, 24);
-        const identity = await identities.resolve(pane, identityRefresh);
+        const identity = resolved[index];
         const sessionId = identity.sessionId;
         if (identity.proof) proofs.set(id, identity.proof);
         const tool = await transcripts.read(id, pane.agent, sessionId);

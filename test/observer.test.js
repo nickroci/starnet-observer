@@ -66,6 +66,7 @@ const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status:
   assert.equal((await observer.get()).health, 'unavailable');
   now = 18000; inventory = [];
   assert.deepEqual((await observer.get()).sessions, []);
+  await identityEnrichmentOrdering();
   await usageAggregate();
   await aggregateAgeAndOverflow();
   await claudeHelperNamespaces();
@@ -745,4 +746,30 @@ async function claudeHelperNamespaces() {
     assert.equal(result.aggregate.coverage.counters.inputTokens.available, 2);
     assert.equal(result.aggregate.coverage.counters.inputTokens.unavailable, 2);
   } finally { await fs.rm(folder, { recursive: true, force: true }); }
+}
+
+async function identityEnrichmentOrdering() {
+  let clock = 1000, inventory = [pane('a'), pane('b')];
+  const events = [];
+  const identities = { resolveMany: async panes => { events.push('identities:' + panes.length); return panes.map(row => ({ sessionId: row.agent_session.value, source: 'native' })); },
+    resolve: async row => { events.push('identity:' + row.pane_id); await new Promise(resolve => setImmediate(resolve)); return { sessionId: row.agent_session.value, source: 'native' }; }, retain() {} };
+  const observer = makeObserver({ now: () => clock, endpoint: 'ordering', identities,
+    execute: async () => ({ stdout: JSON.stringify({ result: { agents: inventory } }) }),
+    desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) }, bus: { read: () => ({ rows: [] }) },
+    transcripts: { retain() {}, read: async () => { events.push('transcript'); await new Promise(resolve => setImmediate(resolve)); return {}; } },
+    projects: { resolve: async () => { events.push('project'); await new Promise(resolve => setImmediate(resolve)); return {}; } },
+    helpers: { children: async parents => { events.push('helpers:' + parents.length); return { rows: [], annotations: new Map(), overflow: new Map() }; } } });
+  assert.equal((await observer.get()).sessions.length, 2);
+  assert.deepEqual(events, ['identities:2', 'transcript', 'project', 'transcript', 'project', 'helpers:2']);
+  events.length = 0; inventory = [pane('a'), pane('a')]; clock += 3000;
+  assert.equal((await observer.get()).sources.herdr.health, 'unavailable');
+  assert.deepEqual(events, ['helpers:2'], 'duplicate inventory rejected before any identity or enrichment calls');
+  events.length = 0; inventory = [pane('a'), pane('bad id')]; clock += 3000;
+  assert.equal((await observer.get()).sources.herdr.health, 'unavailable');
+  assert.deepEqual(events, ['helpers:2'], 'invalid pane ID rejected before any identity or enrichment calls');
+  events.length = 0; inventory = []; clock += 3000;
+  assert.deepEqual((await observer.get()).sessions, []); assert.deepEqual(events, ['identities:0', 'helpers:0']);
+  events.length = 0; delete identities.resolveMany; inventory = [pane('a'), pane('b')]; clock += 3000;
+  await observer.get();
+  assert.deepEqual(events, ['identity:a', 'identity:b', 'transcript', 'project', 'transcript', 'project', 'helpers:2'], 'supported injected resolver fallback remains serial');
 }

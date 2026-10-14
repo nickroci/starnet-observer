@@ -23,8 +23,14 @@ See: .planning/PROJECT.md (updated 2026-10-14)
 
 Phase: None (0 planned)
 Plan: None
-Status: Awaiting new work; no implementation started
-Last activity: 2026-10-14 — Initialized GSD from current app state; all 18 regression test files passed.
+Status: Executing registered stale-refresh quick work; no phase started
+Last activity: 2026-10-15 — Stale-refresh Task 1 implemented; all 18 test files pass; Task 1 independently approved.
+
+## Registered Work
+
+| ID | Work | Status | Record |
+| --- | --- | --- | --- |
+| 261015-03h | Remove avoidable stale flicker from slow refreshes | Task 1 approved; Task 2 pending | quick/261015-03h-remove-avoidable-stale-flicker-from-slow/ |
 
 ## Accumulated Context
 
