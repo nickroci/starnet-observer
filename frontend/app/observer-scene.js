@@ -46,8 +46,8 @@ const ObserverScene = (() => {
       const sections = [];
       for (let block = 0; block < room.blocks.length; block++) {
         const value = room.blocks[block], previous = sections.at(-1);
-        if (previous && previous.repo === value.repo) previous.rect.h += 7;
-        else sections.push({ repo: value.repo, label: value.label, partitions: block ? partitionsFor(rect, block) : [], rect: { x: rect.x + 1, y: rect.y + 4 + block * 7, w: 18, h: 7 }, sign: pointAt(rect, 1.5, 4 + block * 7, 1.25) });
+        if (previous && (previous.section || previous.repo) === (value.section || value.repo)) previous.rect.h += 7;
+        else sections.push({ repo: value.repo, section: value.section || value.repo, label: value.label, partitions: block ? partitionsFor(rect, block) : [], rect: { x: rect.x + 1, y: rect.y + 4 + block * 7, w: 18, h: 7 }, sign: pointAt(rect, 1.5, 4 + block * 7, 1.25) });
       }
       const decorationRegions = [
         { kind: 'wall', edge: 'rear-y', rect: { x: rect.x + 2, y: rect.y + 0.5, w: 16, h: 2 } },
@@ -62,7 +62,8 @@ const ObserverScene = (() => {
         if (kind === 'helper') continue;
         const desk = deskFor(rect, block, seat);
         const chair = { x: desk.x + 1, y: desk.y - 0.5, z: 0 }, laneY = chair.y - 0.75;
-        workers.push({ id: row.id, row, kind: 'session', parentId: null, scale: 1, platformKey: room.key, accent: room.accent, desk, chair,
+        const home = sections.find(section => contains(section.rect, { x: desk.x + 1, y: desk.y + 0.5 })) || null;
+        workers.push({ id: row.id, row, kind: 'session', parentId: null, scale: 1, platformKey: room.key, accent: room.accent, desk, chair, home: home ? { ...home.rect } : null, section: home ? home.section : null,
           route: [chair, { x: chair.x, y: laneY, z: 0 }, { x: rect.x + 10, y: laneY, z: 0 }, entry, elbow, join, { x: spineX, y: 6, z: 0 }, mail.hub] });
       }
       const platform = platforms.at(-1), stations = [];
@@ -94,6 +95,13 @@ const ObserverScene = (() => {
       const parent = workers.find(parent => parent.id === worker.parentId);
       if (parent) { worker.anchor = { ...parent.chair }; worker.connector = { from: worker.anchor, to: { ...worker.chair } }; }
     }
+    // Company rule: an agent keeps its idle strolls inside its section only when another agent from the same
+    // folder sits there too; a lone agent still wanders the whole deck.
+    const company = new Map();
+    for (const worker of workers) if (worker.kind === 'session' && worker.section) company.set(worker.platformKey + '|' + worker.section, (company.get(worker.platformKey + '|' + worker.section) || 0) + 1);
+    // A lead agent with helpers in tow tours the whole deck so its formation can be seen moving.
+    const leaders = new Set(workers.filter(worker => worker.kind === 'helper').map(worker => worker.parentId));
+    for (const worker of workers) if (worker.home && ((company.get(worker.platformKey + '|' + worker.section) || 0) < 2 || leaders.has(worker.id))) worker.home = null;
     // The overseer (a Herdr agent named "overseer") takes the observatory chair; the ambient viewer stands down.
     const overseerRow = extras.overseer || null;
     if (overseerRow) {
@@ -409,9 +417,11 @@ const ObserverScene = (() => {
         const frozen = Boolean(isStale(worker, stale) || (Number.isFinite(actor.depth) && parent?.frozen) || closed(worker));
         actor.frozen = frozen;
         if (reduced) { actor.point = { ...worker.chair }; actor.path = []; actor.trail = []; clearFollow(actor); actor.due = now + 2000; }
-        else if (frozen) { actor.path = []; actor.trail = []; clearFollow(actor); }
+        else if (frozen) { actor.path = []; actor.trail = []; clearFollow(actor); actor.thaw = true; }
         else {
           const following = canFollow(actor, parent, stale);
+          // Coming out of a freeze, an idle stroller first walks back to its desk, then resumes strolling later.
+          if (actor.thaw) { actor.thaw = false; if (!atDesk(worker) && !following && worker.kind !== 'helper' && graph) { actor.targetKey = null; returnHome(actor, graph); actor.due = now + 4000 + Model.hash(worker.id) % 7000; } }
           let assignment;
           if (following) {
             if (!formations.has(parent.worker.id)) formations.set(parent.worker.id, formationFor(parent, graph, stale));
@@ -420,7 +430,9 @@ const ObserverScene = (() => {
           if (atDesk(worker) || (worker.kind === 'helper' && !following)) returnHome(actor, graph);
           else if (following) follow(actor, parent, graph, assignment);
           else if (!actor.path.length && now >= actor.due && graph?.cells.size) {
-            const cells = [...graph.cells.values()], target = cells[(Model.hash(worker.id) + ++actor.trip * 97) % cells.length];
+            // Idle strolls stay inside the worker's own section, so agents from one folder hang out together.
+            const all = [...graph.cells.values()], own = worker.home ? all.filter(cell => contains(worker.home, cell)) : [];
+            const cells = own.length ? own : all, target = cells[(Model.hash(worker.id) + ++actor.trip * 97) % cells.length];
             actor.path = pathTo(graph, actor.point, target, worker); actor.targetKey = null;
           }
           const ambient = !atDesk(worker) && (worker.kind !== 'helper' || following);
