@@ -9,11 +9,12 @@ const { makePresentationObserver } = require('./sidecar/presentation.js');
 const { redact, setKnownSecretSource } = require('./sidecar/redaction.js');
 const { setClock } = require('./sidecar/failopen.js');
 const { loadConfig, HELP } = require('./sidecar/config.js');
+const { makeControl, PANE } = require('./sidecar/control.js');
 const ROOT = path.join(__dirname, 'frontend');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.woff2': 'font/woff2' };
 const SESSION_IDENTITY = /^(?:(?:codex|claude):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|(?:helper:)?obs_[a-f0-9]{24})(?:\|obs_[a-f0-9]{24})?$/i;
 
-function createServer({ observer = makeObserver({ now: Date.now }), token = crypto.randomBytes(32).toString('hex'), theme = {} } = {}) {
+function createServer({ observer = makeObserver({ now: Date.now }), token = crypto.randomBytes(32).toString('hex'), theme = {}, control = null } = {}) {
   const server = http.createServer(async (req, res) => {
     const port = server.address()?.port;
     const hosts = new Set(['127.0.0.1:' + port, 'localhost:' + port]);
@@ -25,12 +26,24 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'nonce-" + nonce + "'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
     const json = (status, body) => { res.writeHead(status, { 'Content-Type': MIME['.json'] }); res.end(JSON.stringify(body)); };
     if (!hosts.has(req.headers.host) || req.headers.origin && ![...hosts].some(host => req.headers.origin === 'http://' + host) || req.headers['sec-fetch-site'] === 'cross-site') return json(403, { error: 'Local origin required' });
-    if (req.method !== 'GET') return json(405, { error: 'Read-only server: GET required' });
+    const authorized = () => { const supplied = req.headers['x-observer-token']; return typeof supplied === 'string' && Buffer.byteLength(supplied) === Buffer.byteLength(token) && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(token)); };
+    // Control actions are the one mutating surface, present only when the operator opted in at launch.
+    const action = control && req.method === 'POST' ? /^\/api\/control\/(attach|spawn|close)$/.exec(req.url) : null;
+    if (req.method !== 'GET' && !action) return json(405, { error: 'Read-only server: GET required' });
+    if (action) {
+      if (!authorized()) return json(403, { error: 'Observer token required; reload the page' });
+      if (!/^application\/json\b/.test(String(req.headers['content-type'] || ''))) return json(400, { error: 'JSON body required' });
+      let raw = '';
+      try { for await (const chunk of req) { raw += chunk; if (raw.length > 4096) return json(413, { error: 'Body too large' }); } } catch (_) { return json(400, { error: 'Body unreadable' }); }
+      let body; try { body = JSON.parse(raw || '{}'); } catch (_) { return json(400, { error: 'Invalid JSON' }); }
+      if (!body || typeof body.paneId !== 'string' || !PANE.test(body.paneId)) return json(400, { error: 'paneId required' });
+      try { return json(200, await control[action[1]](body.paneId)); }
+      catch (error) { const status = Number.isInteger(error.status) ? error.status : 500; if (status >= 500) console.warn('[observer control]', redact(String(error.message))); return json(status, { error: redact(String(error.message)) }); }
+    }
     try {
       const url = new URL(req.url, 'http://' + req.headers.host);
       if (url.pathname.startsWith('/api/')) {
-        const supplied = req.headers['x-observer-token'];
-        if (typeof supplied !== 'string' || Buffer.byteLength(supplied) !== Buffer.byteLength(token) || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) return json(403, { error: 'Observer token required; reload the page' });
+        if (!authorized()) return json(403, { error: 'Observer token required; reload the page' });
         if (url.pathname === '/api/observer/sessions') return json(200, await observer.get());
         const identities = url.searchParams.getAll('identity');
         const session = url.pathname.match(/^\/api\/observer\/sessions\/(obs_[a-f0-9]{24})\/inspect$/);
@@ -55,7 +68,7 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       if (!canonical.startsWith(ROOT + path.sep)) return json(403, { error: 'Forbidden path' });
       let data = await fs.readFile(canonical);
       if (canonical === path.join(ROOT, 'observer.html')) {
-        const boot = '<script nonce="' + nonce + '">window.__OBSERVER_TOKEN__=' + JSON.stringify(token) + ';window.__OBSERVER_THEME__=' + JSON.stringify(theme).replace(/</g, '\\u003c') + ';</script>';
+        const boot = '<script nonce="' + nonce + '">window.__OBSERVER_TOKEN__=' + JSON.stringify(token) + ';window.__OBSERVER_THEME__=' + JSON.stringify(theme).replace(/</g, '\\u003c') + ';window.__OBSERVER_CONTROL__=' + (control ? 'true' : 'false') + ';</script>';
         data = Buffer.from(data.toString().replace('</head>', boot + '</head>'));
       }
       res.writeHead(200, { 'Content-Type': MIME[path.extname(canonical)] || 'application/octet-stream' });
@@ -82,9 +95,10 @@ if (require.main === module) {
   setKnownSecretSource(heldSecrets);
   setClock(Date.now);
   const observer = makeObserver({ now: Date.now });
-  const server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme });
+  const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean) }) : null;
+  const server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme, control });
   server.on('error', error => { console.error('[observer]', redact(String(error.message))); process.exitCode = 1; });
-  server.listen(port, '127.0.0.1', () => console.log('Local Observer: http://127.0.0.1:' + port + '\nPrivate labels: ' + (config.presentation ? 'on (' + config.labels.company + ')' : 'off') + '\nRead only. Stop with Ctrl+C.'));
+  server.listen(port, '127.0.0.1', () => console.log('Local Observer: http://127.0.0.1:' + port + '\nPrivate labels: ' + (config.presentation ? 'on (' + config.labels.company + ')' : 'off') + (control ? '\nControl actions: on (OBSERVER_CONTROL=1): attach, spawn and close Herdr agents from the page.' : '\nRead only.') + ' Stop with Ctrl+C.'));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { server.close(); server.closeAllConnections(); });
 }
 module.exports = { createServer };

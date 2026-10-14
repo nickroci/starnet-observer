@@ -396,6 +396,26 @@
 
   /* Keyed session list. A project group and a session row keep their nodes while they exist; a poll only rewrites
      changed text and attributes, and reorders by moving nodes. */
+  /* Control actions (OBSERVER_CONTROL=1): attach a terminal, spawn a sibling agent, close an agent. The page only
+     ever sends a pane id it is already showing; Herdr validates the target. Close asks first. */
+  const CONTROL = !!window.__OBSERVER_CONTROL__;
+  if (CONTROL && document.body && document.body.classList && typeof document.body.classList.add === 'function') document.body.classList.add('control');
+  let lastGroups = new Map();
+  function notice(message, isError) {
+    let box = document.getElementById('control-notice');
+    if (!box) { box = text('div', 'control-notice', ''); box.id = 'control-notice'; box.setAttribute('role', 'status'); document.body.append(box); }
+    box.textContent = message; box.classList.toggle('error', !!isError); box.hidden = false;
+    clearTimeout(notice.timer); notice.timer = setTimeout(() => { box.hidden = true; }, isError ? 8000 : 4000);
+  }
+  async function controlAction(button, action, paneId, pending) {
+    if (!CONTROL || !paneId || button.disabled) return;
+    button.disabled = true; notice(pending);
+    try {
+      const result = await Harness.api.post('/api/control/' + action, { paneId });
+      notice(action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · terminal opening' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
+    } catch (error) { notice((action === 'spawn' ? 'Could not start an agent: ' : action === 'attach' ? 'Could not open a terminal: ' : 'Could not close the agent: ') + error.message, true); }
+    finally { button.disabled = false; }
+  }
   const groupNodes = new Map(), rowNodes = new Map();
   function groupNode(key) {
     let entry = groupNodes.get(key);
@@ -403,6 +423,16 @@
     const section = text('section', 'project-group', ''), heading = text('h3', 'project-heading', ''), label = text('span', '', ''), kind = text('span', 'project-kind', ''), total = text('span', 'project-total', '');
     const zoom = text('button', 'project-zoom', '⤢'); zoom.type = 'button'; zoom.addEventListener('click', () => zoomProject(key));
     heading.append(text('span', 'project-swatch', ''), label, kind, total, zoom);
+    if (CONTROL) {
+      const spawn = text('button', 'project-spawn', '+'); spawn.type = 'button'; spawn.title = 'Start a new Claude agent in this project (new Herdr tab, terminal opens)';
+      spawn.setAttribute('aria-label', 'Start a new Claude agent in this project');
+      spawn.addEventListener('click', () => {
+        const seed = (lastGroups.get(key) || []).find(row => row.source === 'herdr' && row.paneId);
+        if (!seed) { notice('No Herdr pane in this project to start from', true); return; }
+        controlAction(spawn, 'spawn', seed.paneId, 'Starting a new agent next to ' + seed.paneId + '…');
+      });
+      heading.append(spawn);
+    }
     const repos = text('div', 'repo-toggles', ''); repos.setAttribute('role', 'group');
     const list = text('ul', 'session-list', '');
     section.append(heading, repos, list);
@@ -440,7 +470,20 @@
     inspect.setAttribute('aria-haspopup', 'dialog');
     inspect.addEventListener('click', () => { const row = byId.get(id); if (!row) return; const target = agentTarget(row); if (!isOpenTarget(target)) select(id); togglePanel(target, inspect); });
     item.append(button, title, inspect);
-    entry = { item, button, provider, mark, markText, status, source, title, summary, mail, meta, fields, inspect, mailShown: false }; rowNodes.set(id, entry);
+    let attach = null, close = null;
+    if (CONTROL) {
+      attach = text('button', 'row-attach', '⇱'); attach.type = 'button'; attach.title = 'Open a terminal attached to this agent'; attach.setAttribute('aria-label', 'Open a terminal attached to this agent');
+      attach.addEventListener('click', () => { const row = byId.get(id); if (row && row.source === 'herdr' && row.paneId) controlAction(attach, 'attach', row.paneId, 'Opening a terminal for ' + row.paneId + '…'); });
+      close = text('button', 'row-close', '✕'); close.type = 'button'; close.title = 'Stop this agent (closes its Herdr pane)'; close.setAttribute('aria-label', 'Stop this agent');
+      close.addEventListener('click', () => {
+        const row = byId.get(id); if (!row || row.source !== 'herdr' || !row.paneId) return;
+        const what = (workerName(row) || 'this agent') + (row.title ? ' · ' + row.title : '');
+        if (!window.confirm('Stop ' + what + ' in pane ' + row.paneId + '?\n\nThis closes the Herdr pane and ends the Claude session. Unsaved conversation state is kept in its transcript; you can resume it later with claude --resume.')) return;
+        controlAction(close, 'close', row.paneId, 'Closing ' + row.paneId + '…');
+      });
+      item.append(attach, close);
+    }
+    entry = { item, button, provider, mark, markText, status, source, title, summary, mail, meta, fields, inspect, attach, close, mailShown: false }; rowNodes.set(id, entry);
     return entry;
   }
   function paintRow(entry, row, depth, unreadCount, window) {
@@ -456,6 +499,7 @@
     entry.provider.className = 'provider ' + row.provider; setText(entry.provider, workerName(row)); if (entry.provider.title !== workerName(row)) entry.provider.title = workerName(row);
     entry.status.className = 'status ' + row.status; setText(entry.status, (stale ? 'was ' : '') + (row.status === 'blocked' ? 'waiting' : row.status));
     entry.source.hidden = !chip; setText(entry.source, chip);
+    if (entry.attach) { const can = row.source === 'herdr' && !!row.paneId && !stale; entry.attach.hidden = !can; entry.close.hidden = !can; }
     setText(entry.title, composedTask(row) ? taskText(row) : row.title);
     const last = row.tool?.available && row.tool.last;
     entry.summary.className = 'row-summary' + (!last ? ' unavailable' : ''); setText(entry.summary, ObserverModel.activity(row));
@@ -528,6 +572,7 @@
     const focusedNode = document.activeElement, scrollTop = get('sessions').scrollTop;
     let moved = false;
     const sections = ordered.map(([key, group]) => {
+      lastGroups = groups;
       const first = group[0], entry = groupNode(key);
       entry.section.style.setProperty('--room', layout.colorFor(key).accent);
       setText(entry.label, (first.project || 'Unassigned') + (labels.get(first.project)?.size > 1 ? ' · ' + key.slice(-4) : ''));

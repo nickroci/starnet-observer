@@ -186,3 +186,13 @@ body.is-stale .inspector { border-style:dashed; }
 @media (max-width:500px) { h1 { font-size:24px; } .topbar { gap:6px; padding:10px 12px; } .topbar::after { left:12px; right:12px; } .brand { flex-wrap:wrap; gap:6px 8px; } .workspace { padding:12px 8px 8px; } .station-toolbar { padding:10px 10px 10px 16px; } .station-legend { padding:9px; } #observed { font-size:15px; } #page-label { font-size:21px; min-width:3.2em; } .poll-label { float:none; display:block; margin:0 0 6px; } }
 
 .fx-toggle[aria-pressed=true],.fx-toggle[aria-pressed=true]:not(:disabled):hover { color:var(--tab-ink); background:var(--phosphor); border-color:var(--phosphor); box-shadow:0 0 10px var(--glow); }
+
+/* Control actions (OBSERVER_CONTROL=1): extra row buttons sit left of the magnifier; the row leaves room for them. */
+.row-attach,.row-close { position:absolute; top:5px; width:28px; height:26px; padding:0; font:18px/1 var(--term); letter-spacing:0; text-transform:none; color:#c6f8d6; background:#06130b; border-color:var(--line); }
+.row-attach { right:38px; } .row-close { right:70px; color:#ffb08a; }
+.row-attach:not(:disabled):hover { color:var(--tab-ink); background:var(--phosphor); border-color:var(--phosphor); box-shadow:0 0 10px var(--glow); }
+.row-close:not(:disabled):hover { color:#1a0c06; background:#ff8a5c; border-color:#ff8a5c; box-shadow:0 0 10px rgba(255,138,92,.5); }
+body.control .session-row .row-top { padding-right:98px; } body.control .session-item .row-title { right:104px; }
+.project-spawn { min-width:28px; min-height:28px; padding:0 6px; font:19px/1 var(--term); letter-spacing:0; text-transform:none; flex:none; }
+.control-notice { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:60; max-width:min(80vw,720px); padding:8px 14px; font:14px/1.3 var(--term); color:var(--ink); background:#06130b; border:1px solid var(--phosphor); border-radius:4px; box-shadow:0 0 14px var(--glow); }
+.control-notice.error { color:#ffd2c0; border-color:#ff8a5c; box-shadow:0 0 14px rgba(255,138,92,.45); }
