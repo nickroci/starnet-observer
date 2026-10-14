@@ -714,7 +714,7 @@ const ObserverView = (() => {
       const a = P({ x: rect.x, y: rect.y + rect.h }), b = P({ x: rect.x + rect.w, y: rect.y + rect.h }), c = P({ x: rect.x + rect.w, y: rect.y });
       const pulse = animate ? 0.75 + 0.25 * Math.sin(now / 1800 * Math.PI * 2 + rect.x) : 0.85;
       ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.strokeStyle = accent; ctx.lineCap = 'round';
-      for (const [width, alpha] of [[18, 0.08], [10, 0.14], [5, 0.26], [2.5, 0.55]]) {
+      for (const [width, alpha] of [[26, 0.1], [14, 0.2], [7, 0.38], [3, 0.8]]) {
         ctx.lineWidth = width; ctx.globalAlpha = alpha * pulse * strength;
         ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.stroke();
       }
@@ -735,13 +735,13 @@ const ObserverView = (() => {
         const r = platform.rect;
         if (!onStage(r, 1, 48)) continue;
         // Underglow beneath the deck in the project hue, breathing slowly.
-        const breathe = animate ? 0.16 + 0.07 * Math.sin(now / 3200 * Math.PI * 2 + r.x * 0.7) : 0.18;
+        const breathe = animate ? 0.22 + 0.08 * Math.sin(now / 3200 * Math.PI * 2 + r.x * 0.7) : 0.25;
         glow(ctx, { x: r.x + r.w / 2, y: r.y + r.h / 2, z: -2.4 }, Math.max(r.w, r.h) * 17, platform.accent, breathe * 1.3);
         rimBloom(r, platform.accent, now, animate);
         // Corner beacons: a spark fountain at each lit corner, staggered.
         if (animate) for (const corner of [{ x: r.x, y: r.y + r.h }, { x: r.x + r.w, y: r.y + r.h }, { x: r.x + r.w, y: r.y }]) {
           const at = P(corner);
-          sparks(at.x, at.y - 2, 'corner' + platform.key + corner.x + ',' + corner.y, now, { count: 7, color: platform.accent, alt: '#ffffff', rise: 30, spread: 10, life: 1600, size: 2 });
+          sparks(at.x, at.y - 2, 'corner' + platform.key + corner.x + ',' + corner.y, now, { count: 10, color: platform.accent, alt: '#ffffff', rise: 40, spread: 14, life: 1500, size: 2 });
         }
       }
       // Mailroom and observatory get their own halos.
@@ -756,6 +756,95 @@ const ObserverView = (() => {
         rimBloom(o, PALETTE.cyan, now, animate, 0.8);
       }
     }
+    // Furniture FX: every wall unit, corner prop, walkway, chair, apron lamp, mail prop and observatory prop lights up.
+    function paintFurnitureFx(now, animate) {
+      const pulse = (k, o = 0) => animate ? 0.65 + 0.35 * Math.sin(now / k * Math.PI * 2 + o) : 0.85;
+      for (const platform of scene.platforms) {
+        if (!onStage(platform.rect, 2.4, 48)) continue;
+        platform.decorationRegions.forEach((region, index) => {
+          if (region.kind !== 'wall' && region.kind !== 'corner') return;
+          const kinds = region.kind === 'corner' ? CORNER_KINDS : WALL_KINDS;
+          wallUnits(region).forEach((unit, slot) => {
+            const key = platform.key + ':' + index + ':' + slot, kind = kinds[hash(key) % kinds.length], o = hash(key) % 6;
+            const c = { x: unit.x + unit.w / 2, y: unit.y + unit.h / 2 }, at = z => P({ ...c, z });
+            if (kind === 'rack') {
+              glow(ctx, { ...c, z: 0.7 }, 30, PALETTE.cyan, 0.45 * pulse(1300, o));
+              // LED column: blinking pixels up the rack face.
+              const top = at(1.05), bottom = at(0.2);
+              for (let i = 0; i < 5; i++) { const on = animate ? (Math.floor(now / 180) + i * 3 + o) % 5 !== 0 : true; ctx.globalAlpha = on ? 0.95 : 0.2; ctx.fillStyle = i % 2 ? STATUS.working : PALETTE.cyan; ctx.fillRect(bottom.x - 6 + i * 3, bottom.y - (bottom.y - top.y) * (i / 5) - 1, 2, 2); }
+              ctx.globalAlpha = 1;
+            } else if (kind === 'screen') {
+              glow(ctx, { ...c, z: 0.9 }, 44, PALETTE.cyan, 0.7 * pulse(900, o));
+              if (animate) { const a = at(1.1); sparks(a.x, a.y, 'scr' + key, now, { count: 8, color: '#bffcff', alt: '#ffffff', rise: 26, spread: 20, life: 1000, size: 2 }); }
+            } else if (kind === 'vent') {
+              glow(ctx, { ...c, z: 0.4 }, 30, PALETTE.window, 0.55 * pulse(2200, o));
+              if (animate) { const a = at(0.5); sparks(a.x, a.y, 'vent' + key, now, { count: 7, color: PALETTE.window, alt: '#ffd9a0', rise: 34, spread: 14, life: 1800, size: 2 }); }
+            } else if (kind === 'board') {
+              glow(ctx, { ...c, z: 0.8 }, 34, platform.accent, 0.6 * pulse(1700, o));
+            } else if (kind === 'tank') {
+              glow(ctx, { ...c, z: 0.6 }, 36, PALETTE.cyan, 0.7 * pulse(1100, o));
+              if (animate) { const a = at(0.15); sparks(a.x, a.y, 'tank' + key, now, { count: 8, color: '#9ff3ff', alt: '#ffffff', rise: 28, spread: 10, life: 2200, size: 2 }); }
+            } else if (kind === 'planter') {
+              glow(ctx, { ...c, z: 0.6 }, 34, STATUS.working, 0.6 * pulse(2600, o));
+              if (animate) { const a = at(0.7); sparks(a.x, a.y, 'plant' + key, now, { count: 7, color: STATUS.working, alt: '#ffffff', rise: 30, spread: 18, life: 2400, size: 2 }); }
+            } else if (kind === 'crates') {
+              glow(ctx, { ...c, z: 0.7 }, 30, PALETTE.window, 0.5 * pulse(1900, o));
+            } else {
+              // mast: strong red beacon with a flare and sparks.
+              const beacon = { ...c, z: 2.2 }, b = pulse(700, o);
+              glow(ctx, beacon, 40, '#ff5a3a', 0.9 * b);
+              const a = at(2.2); ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.8 * b; ctx.fillStyle = '#ffd0c0';
+              ctx.fillRect(a.x - 12, a.y - 0.5, 24, 1); ctx.fillRect(a.x - 0.5, a.y - 12, 1, 24); ctx.restore();
+              if (animate) sparks(a.x, a.y, 'mast' + key, now, { count: 8, color: '#ff8a6a', alt: '#ffffff', rise: 30, spread: 20, life: 1200, size: 2, gravity: 14 });
+            }
+          });
+        });
+        // Apron lamps: big warm halos with a sparkle.
+        for (const region of platform.decorationRegions) if (region.kind === 'apron') {
+          const r = region.rect, post = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+          glow(ctx, { ...post, z: 1.6 }, 46, PALETTE.window, 0.8 * pulse(1500, r.x));
+          if (animate) { const a = P({ ...post, z: 1.6 }); sparks(a.x, a.y, 'apron' + platform.key + r.x, now, { count: 6, color: '#ffe0b0', alt: '#ffffff', rise: 22, spread: 16, life: 1300, size: 2 }); }
+        }
+      }
+      // Walkways: cyan running lights streaming along both long edges.
+      if (animate) for (const walkway of scene.walkways) {
+        const r = walkway.rect; if (!onStage(r, 0.5, 24)) continue;
+        const along = r.w >= r.h, len = along ? r.w : r.h, lap = 2600, beads = Math.max(2, Math.round(len / 4));
+        for (const side of [0, 1]) for (let k = 0; k < beads; k++) {
+          const f = ((now / lap) + k / beads + side * 0.5) % 1, d = f * len;
+          const pt = along ? { x: r.x + d, y: side ? r.y + r.h : r.y } : { x: side ? r.x + r.w : r.x, y: r.y + d };
+          const a = P(pt); ctx.save(); ctx.globalCompositeOperation = 'lighter';
+          for (let t = 0; t < 4; t++) { const back = along ? P({ x: pt.x - t * 0.35, y: pt.y }) : P({ x: pt.x, y: pt.y - t * 0.35 }); ctx.globalAlpha = (1 - t / 4) * 0.9; ctx.fillStyle = t === 0 ? '#ffffff' : PALETTE.cyan; ctx.fillRect(back.x - 1, back.y - 1, 2, 2); }
+          ctx.restore();
+        }
+      }
+      // Chairs: a small ring; desks: every desk blooms, idle ones dimly.
+      for (const worker of scene.workers) {
+        const sc = worker.scale || 1, status = worker.row.status, idle = status !== 'working' && status !== 'blocked';
+        if (onStage(worker.desk, 1.2, 24)) glow(ctx, { x: worker.desk.x + worker.desk.w / 2, y: worker.desk.y + worker.desk.h / 2, z: 0.6 }, 40 * sc, idle ? worker.accent : status === 'working' ? PALETTE.cyan : STATUS.blocked, (idle ? 0.3 : 0.6) * pulse(1400, hash(worker.id) % 6));
+        const c = worker.chair; if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.5 * pulse(2000, c.x); isoEllipse(ctx, c, 0.34 * sc, worker.accent, null, 1.5); ctx.restore(); }
+      }
+      // Mailroom: tower bloom, pad pulse rings, pod and chute sparks.
+      const mail = scene.mail;
+      if (onStage(mail.rect, 3.5, 48)) {
+        const t = mail.tower, top = { x: t.x + t.w / 2, y: t.y + t.h / 2, z: 2 };
+        glow(ctx, top, 90, PALETTE.amber, 0.7 * pulse(1800));
+        glow(ctx, { ...top, z: 0.2 }, 70, PALETTE.window, 0.45 * pulse(2300, 1));
+        for (const pad of mail.pads) { glow(ctx, pad, 46, PALETTE.amber, 0.55 * pulse(1600, pad.x)); if (animate) { const ring = ((now / 1600) + pad.x) % 1; ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (1 - ring) * 0.8; isoEllipse(ctx, pad, 0.5 + 0.9 * ring, PALETTE.window, null, 1.5); ctx.restore(); } }
+        if (animate) { const a = P({ ...top, z: 3.4 }); sparks(a.x, a.y, 'tower', now, { count: 12, color: PALETTE.window, alt: '#ffffff', rise: 40, spread: 30, life: 1500, size: 2, gravity: 10 }); }
+        const pod = mail.pod[0]; glow(ctx, { x: pod.x, y: pod.y, z: 0.8 }, 36, PALETTE.cyan, 0.7 * pulse(1000));
+        if (animate) { const a = P({ x: pod.x, y: pod.y, z: 0.9 }); sparks(a.x, a.y, 'pod', now, { count: 7, color: '#bffcff', alt: '#ffffff', rise: 26, spread: 16, life: 1100, size: 2 }); }
+      }
+      // Observatory: screens, telescope tip, plant and the beacon light.
+      const ob = scene.observatory;
+      if (ob && onStage(ob.rect, 3, 48)) {
+        for (const screen of ob.screens) { const r = screen.rect; glow(ctx, { x: r.x + r.w / 2, y: r.y + 0.3, z: screen.height * 0.6 }, 44, PALETTE.cyan, 0.7 * pulse(1200, r.x)); if (animate) { const a = P({ x: r.x + r.w / 2, y: r.y + 0.3, z: screen.height }); sparks(a.x, a.y, 'obs' + r.x, now, { count: 7, color: '#bffcff', alt: '#ffffff', rise: 24, spread: 20, life: 1100, size: 2 }); } }
+        for (const tel of ob.telescopes) { const r = tel.rect, tip = { x: r.x + r.w / 2, y: r.y + r.h / 2 - 0.7, z: tel.height - 0.3 }; glow(ctx, tip, 34, PALETTE.cyan, 0.9 * pulse(800)); if (animate) { const a = P(tip); sparks(a.x, a.y, 'tel' + r.x, now, { count: 6, color: '#ffffff', alt: PALETTE.cyan, rise: 22, spread: 18, life: 1000, size: 2 }); } }
+        const pr = ob.plant.rect; glow(ctx, { x: pr.x + 0.5, y: pr.y + 0.5, z: 1.2 }, 36, STATUS.working, 0.6 * pulse(2400));
+        if (animate) { const a = P({ x: pr.x + 0.5, y: pr.y + 0.5, z: 1.5 }); sparks(a.x, a.y, 'obplant', now, { count: 6, color: STATUS.working, alt: '#ffffff', rise: 28, spread: 16, life: 2200, size: 2 }); }
+        const light = ob.light.rect; glow(ctx, { x: light.x + light.w / 2, y: light.y + light.h / 2 + 1.5, z: 0.5 }, 110, PALETTE.cyan, 0.5 * pulse(2000));
+      }
+    }
     // Sparks and screen bloom on an active desk: the monitors throw light and the working lamp crackles.
     function paintDeskFx(worker, now, live) {
       const d = worker.desk, status = worker.row.status, scale = worker.scale || 1;
@@ -764,7 +853,7 @@ const ObserverView = (() => {
       const pulse = live ? 0.6 + 0.4 * Math.sin(now / (status === 'working' ? 700 : 1600) * Math.PI * 2 + hash(worker.id) % 7) : 0.7;
       // Screen bloom above the monitors.
       const screens = helper ? [{ x: d.x + d.w - 0.2, y: d.y + 0.26, z: 0.9 }] : [{ x: d.x + 0.25, y: d.y + 0.35, z: 1.1 }, { x: d.x + 1.75, y: d.y + 0.35, z: 1.1 }];
-      for (const sc of screens) glow(ctx, sc, 26 * scale, status === 'working' ? PALETTE.cyan : color, 0.55 * pulse);
+      for (const sc of screens) glow(ctx, sc, 34 * scale, status === 'working' ? PALETTE.cyan : color, 0.85 * pulse);
       if (!live) return;
       for (const sc of screens) { const at = P(sc); sparks(at.x, at.y, 'screen' + worker.id + sc.x, now, { count: status === 'working' ? 9 : 3, color: status === 'working' ? '#bffcff' : color, alt: '#ffffff', rise: 22 * scale, spread: 14 * scale, life: 1000, size: 2 }); }
       // Lamp crackle.
@@ -778,8 +867,8 @@ const ObserverView = (() => {
       const chestY = extent ? extent.top + extent.h * 0.45 : foot.y - CREW_HEIGHT * size * 0.5;
       const pulse = live ? 0.7 + 0.3 * Math.sin(now / (working ? 900 : 2600) * Math.PI * 2 + (hash(worker.id) % 10)) : 0.8;
       if (before) {
-        const radius = (working ? 44 : blocked ? 36 : 24) * size;
-        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (working ? 0.75 : blocked ? 0.5 : 0.22) * pulse;
+        const radius = (working ? 54 : blocked ? 44 : 30) * size;
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (working ? 0.95 : blocked ? 0.65 : 0.32) * pulse;
         const g = ctx.createRadialGradient(foot.x, chestY, 0, foot.x, chestY, radius);
         g.addColorStop(0, color); g.addColorStop(0.5, color); g.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(foot.x, chestY, radius, radius * 1.25, 0, 0, Math.PI * 2); ctx.fill();
@@ -791,7 +880,7 @@ const ObserverView = (() => {
         return;
       }
       // Orbiting motes: six when working, two otherwise; blocked agents get slow amber embers instead.
-      const count = working ? 8 : 3, rx = 15 * size, ry = 22 * size * 0.45, speed = working ? 1600 : 5200, seed = hash(worker.id) % 360;
+      const count = working ? 10 : 4, rx = 17 * size, ry = 22 * size * 0.45, speed = working ? 1600 : 5200, seed = hash(worker.id) % 360;
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
       for (let i = 0; i < count; i++) {
         const ang = (live ? now / speed : 0.3) * Math.PI * 2 + i * (Math.PI * 2 / count) + seed;
@@ -998,6 +1087,7 @@ const ObserverView = (() => {
       const items = [], zoom = camera.zoom;
       visibleArea = { left: -camera.tx / zoom, top: -camera.ty / zoom, right: (viewport.width - camera.tx) / zoom, bottom: (viewport.height - camera.ty) / zoom };
       if (fx) paintPlatformGlow(now, animate);
+      if (fx) paintFurnitureFx(now, animate);
       const byId = new Map(actors.map(actor => [actor.id, actor])), staleKeys = new Set();
       for (const worker of scene.workers) {
         // Each worker animates on its own row's freshness; a stale row freezes its desk, sprite breathing and blinks.
