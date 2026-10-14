@@ -145,7 +145,7 @@ The configuration fields are:
 | `company` | Company name in the presentation header. |
 | `repoPrefix` | Prefix for generated repo aliases. With built-in room lists, it also updates the built-in aliases. Explicit `rooms[].repos` names stay verbatim. |
 | `rooms` | Ordered room objects with `name` and optional `repos` arrays. Overrides the built-in room list. Aliases are allocated by opaque source IDs; allocation stays stable during one server run. |
-| `theme.fx` | Boolean; initial sky/station FX. When set, overrides the saved browser preference at page load. The FX button still works afterward. When omitted, the browser keeps its usual saved preference. |
+| `theme.fx` | Boolean; initial sky/station FX. The standard interface starts with FX off on every page load unless set here or overridden with `--fx` or `--no-fx`. The FX button changes effects for the current visit; its choice is not saved. |
 | `theme.colors` | Optional interface colors: `accent`, `background`, `panel`, `text`, each a six-digit hex color. Omitted colors use the original defaults. The station geometry, crew sprites, and observed status colors keep their original styling. |
 
 Names must be nonempty text without control characters, at most 80 characters. Room names and explicit repo names must be unique, ignoring case. `repoPrefix` is 1–32 lowercase letters, digits, or hyphens, starting with a letter or digit. Additional rooms/repos get unique generated names. Unknown fields, invalid values, missing explicit files, and malformed JSON stop startup instead of silently applying a different mode. Files are limited to 64 KiB.

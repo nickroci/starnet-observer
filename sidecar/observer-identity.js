@@ -135,15 +135,40 @@ function makeIdentityResolver(options = {}) {
   const readConfiguration = options.readConfiguration || makeFooterConfigurationReader({ execute: options.execute });
   const readProcessBirth = options.readProcessBirth || makeProcessBirthReader({ execute: options.execute, endpoint });
   const footerOwned = new Set();
-  const readFooter = async paneId => footerSession((await rpc('pane.read', {
+  const admissions = new WeakMap();
+  const suppressed = state => state?.endpointTimedOut || state?.processBirthUnavailable;
+  function checkSuppression(state) {
+    if (suppressed(state)) throw Object.assign(new Error('Identity refresh suppressed'), { code: 'IDENTITY_SUPPRESSED' });
+  }
+  async function captureRpc(method, params, state) {
+    let release;
+    if (state) {
+      const admission = admissions.get(state);
+      if (admission) await admission;
+      else admissions.set(state, new Promise(resolve => { release = resolve; }));
+    }
+    try {
+      checkSuppression(state);
+      return await rpc(method, params);
+    } catch (error) {
+      if (error?.code === 'IDENTITY_TIMEOUT' && state) state.endpointTimedOut = true;
+      throw error;
+    } finally {
+      // Failure is published before queued captures can open their first socket.
+      release?.();
+    }
+  }
+  const readFooter = async (paneId, state) => footerSession((await captureRpc('pane.read', {
     pane_id: paneId, source: 'recent', lines: 3, format: 'text', strip_ansi: true
-  }))?.result?.read, paneId);
-  async function processBirth(paneId) {
-    const info = (await rpc('pane.process_info', { pane_id: paneId }))?.result?.process_info;
+  }, state))?.result?.read, paneId);
+  async function processBirth(paneId, state) {
+    const info = (await captureRpc('pane.process_info', { pane_id: paneId }, state))?.result?.process_info;
     const pid = info?.shell_pid;
     if (info?.pane_id !== paneId || !Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null;
     let birth;
+    checkSuppression(state);
     try { birth = await readProcessBirth(pid); } catch (_) {
+      if (state) state.processBirthUnavailable = true;
       throw Object.assign(new Error('Process birth capability unavailable'), { code: 'IDENTITY_BIRTH_UNAVAILABLE' });
     }
     // Missing/mismatched/invalid evidence concerns only this PID. Reader exceptions
@@ -151,33 +176,34 @@ function makeIdentityResolver(options = {}) {
     if (!validBirth(birth, pid)) return null;
     return { pid, startSeconds: birth.startSeconds, startMicroseconds: birth.startMicroseconds };
   }
-  async function capture(expected) {
+  async function capture(expected, state) {
     // Cost gate only: accepted text is read again inside the content bracket.
-    if (!await readFooter(expected.paneId)) return unavailable('footer-unavailable');
-    const before = (await rpc('agent.get', { target: expected.paneId }))?.result?.agent;
+    if (!await readFooter(expected.paneId, state)) return unavailable('footer-unavailable');
+    const before = (await captureRpc('agent.get', { target: expected.paneId }, state))?.result?.agent;
     if (!sameTerminal(expected, incarnation(before))) return unavailable('terminal-unavailable');
-    const birth = await processBirth(expected.paneId);
+    const birth = await processBirth(expected.paneId, state);
     if (!birth) return unavailable('process-unavailable');
-    const pane = (await rpc('pane.get', { pane_id: expected.paneId }))?.result?.pane;
+    const pane = (await captureRpc('pane.get', { pane_id: expected.paneId }, state))?.result?.pane;
     const scroll = pane?.scroll;
     if (pane?.pane_id !== expected.paneId || !Number.isSafeInteger(scroll?.max_offset_from_bottom) || scroll.max_offset_from_bottom < 0 ||
       !Number.isSafeInteger(scroll?.viewport_rows) || scroll.viewport_rows <= 0) return unavailable('geometry-unavailable');
     const row = scroll.max_offset_from_bottom + scroll.viewport_rows - 1;
     if (!Number.isSafeInteger(row)) return unavailable('geometry-unavailable');
     const probe = { pane_id: expected.paneId, cursor: { row, col: 0 }, motion: 'line_end' };
-    const initial = (await rpc('pane.copy_motion', probe))?.result;
+    const initial = (await captureRpc('pane.copy_motion', probe, state))?.result;
     if (initial?.pane_id !== expected.paneId || !evenRevision(initial.content_revision)) return unavailable('content-unavailable');
-    const sessionId = await readFooter(expected.paneId);
+    const sessionId = await readFooter(expected.paneId, state);
     if (!sessionId || await readConfiguration() !== 'configured') return unavailable('footer-unavailable');
-    const after = (await rpc('agent.get', { target: expected.paneId }))?.result?.agent;
+    const after = (await captureRpc('agent.get', { target: expected.paneId }, state))?.result?.agent;
     if (!sameTerminal(expected, incarnation(after))) return unavailable('terminal-changed');
-    const finalBirth = await processBirth(expected.paneId);
+    const finalBirth = await processBirth(expected.paneId, state);
     if (!sameBirth(birth, finalBirth)) return unavailable('process-changed');
     // No awaited input follows this conditional output probe. This is a sampled
     // local capture, not an atomic runtime epoch or a promise about later output.
-    const final = (await rpc('pane.copy_motion', { ...probe, content_revision: initial.content_revision }))?.result;
+    const final = (await captureRpc('pane.copy_motion', { ...probe, content_revision: initial.content_revision }, state))?.result;
     if (final?.pane_id !== expected.paneId || !evenRevision(final.content_revision) || final.content_revision !== initial.content_revision)
       return unavailable('content-changed');
+    checkSuppression(state);
     return { sessionId, source: 'footer', proof: { ...expected, sessionId, birth, contentRevision: final.content_revision, observedAt: now() }, reason: null };
   }
   async function resolve(pane, refreshState) {
@@ -198,13 +224,25 @@ function makeIdentityResolver(options = {}) {
       // so one unresponsive socket cannot add a full deadline for every later pane.
       if (refreshState?.endpointTimedOut || refreshState?.processBirthUnavailable) return unavailable('footer-unavailable');
       const terminal = incarnation(pane);
-      return terminal ? await capture(terminal) : unavailable('terminal-unavailable');
+      return terminal ? await capture(terminal, refreshState) : unavailable('terminal-unavailable');
     } catch (error) {
       if (error?.code === 'IDENTITY_TIMEOUT' && refreshState) refreshState.endpointTimedOut = true;
       if (error?.code === 'IDENTITY_BIRTH_UNAVAILABLE' && refreshState) refreshState.processBirthUnavailable = true;
       failNote('observer.identity.resolve', new Error('Live footer identity unavailable'));
       return unavailable('footer-unavailable');
     }
+  }
+  async function resolveMany(panes, refreshState = {}) {
+    const results = new Array(panes.length);
+    let next = 0;
+    async function worker() {
+      while (next < panes.length) {
+        const index = next++;
+        results[index] = await resolve(panes[index], refreshState);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(4, panes.length) }, worker));
+    return results;
   }
   async function revalidateAll(proofs) {
     if (!Array.isArray(proofs) || proofs.length > 65 || proofs.some(proof => !proof || !UUID.test(proof.sessionId || ''))) return false;
@@ -228,6 +266,6 @@ function makeIdentityResolver(options = {}) {
   }
   async function revalidate(proof) { return revalidateAll([proof]); }
   function retain(panes) { for (const id of footerOwned) if (!panes.has(id)) footerOwned.delete(id); }
-  return { resolve, revalidate, revalidateAll, retain };
+  return { resolve, resolveMany, revalidate, revalidateAll, retain };
 }
 module.exports = { makeIdentityResolver, makeIdentityRpc, makeFooterConfigurationReader };
