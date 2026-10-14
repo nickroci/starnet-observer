@@ -94,7 +94,7 @@ function makeObserver(options = {}) {
   const endpoint = options.endpoint || process.env.HERDR_SOCKET_PATH || path.join(os.homedir(), '.config/herdr/herdr.sock');
   const identities = options.identities || makeIdentityResolver({ execute, now, endpoint, readConfiguration: options.readIdentityConfiguration, readProcessBirth: options.readProcessBirth });
   let identityProofs = new Map();
-  let lastGood = [], aggregate = aggregateRows([]), refreshedAt = null, pending = null, mail = null;
+  let lastGood = [], aggregate = aggregateRows([]), refreshStartedAt = null, pending = null, mail = null;
   const sources = { herdr: { health: 'unavailable', observedAt: null, reason: 'not-observed' },
     desktop: { health: 'unavailable', observedAt: null, reason: 'not-observed' } };
   const rowsBySource = { herdr: [], desktop: [], helper: [] };
@@ -171,7 +171,6 @@ function makeObserver(options = {}) {
     transcripts.retain(new Set(lastGood.filter(row => row.source !== 'desktop').map(row => row.id)));
     // Bus health is independent of Herdr: its own read, observedAt and stale retention.
     try { mail = bus.read(); } catch (_) { mail = { rows: mail ? mail.rows : [], observedAt: mail ? mail.observedAt : null, health: 'unavailable', reason: 'unreadable' }; }
-    refreshedAt = now();
     return snapshot();
   }
   function snapshot() {
@@ -184,7 +183,8 @@ function makeObserver(options = {}) {
   }
   function get() {
     if (pending) return pending;
-    if (refreshedAt !== null && now() - refreshedAt < 2000) return Promise.resolve(snapshot());
+    if (refreshStartedAt !== null && now() - refreshStartedAt < 2000) return Promise.resolve(snapshot());
+    refreshStartedAt = now();
     pending = refresh().finally(() => { pending = null; });
     return pending;
   }
