@@ -49,7 +49,7 @@
     selectedRepoId = selectedRepoId === repoId ? null : repoId;
     if (latest) render(latest, true);
   }
-  const view = ObserverView.create({ canvas: get('world'), reducedMotion, onSelect: id => select(id, true),
+  const view = ObserverView.create({ canvas: get('world'), reducedMotion, onSelect: id => select(id, true), onObservatory: () => observatoryClicked(),
     // A worker's canvas title toggles the same exact panel as its list title and magnifier; focus returns to the station.
     onTitleToggle: id => { const row = rowFor(id); if (row) togglePanel(agentTarget(row), get('world')); },
     // Platform zoom never selects a worker; it only clears a previous worker selection.
@@ -76,7 +76,7 @@
   function select(id, scroll = false) {
     if (!byId.has(id)) return;
     selected = id;
-    setPage(layout.pageFor(id));
+    const target = layout.pageFor(id); if (Number.isInteger(target)) setPage(target);   // the overseer sits on every page
     render(latest, true);
     view.focus(id);
     if (scroll) rowNodes.get(id)?.button.scrollIntoView({ block: 'nearest' });
@@ -411,10 +411,19 @@
     if (!CONTROL || !paneId || button.disabled) return;
     button.disabled = true; notice(pending);
     try {
-      const result = await Harness.api.post('/api/control/' + action, { paneId });
-      notice(action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · terminal opening' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
-    } catch (error) { notice((action === 'spawn' ? 'Could not start an agent: ' : action === 'attach' ? 'Could not open a terminal: ' : 'Could not close the agent: ') + error.message, true); }
+      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? {} : { paneId });
+      notice(action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · terminal opening · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · terminal opening' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
+    } catch (error) { notice((action === 'overseer' ? 'Could not start the overseer: ' : action === 'spawn' ? 'Could not start an agent: ' : action === 'attach' ? 'Could not open a terminal: ' : 'Could not close the agent: ') + error.message, true); }
     finally { button.disabled = false; }
+  }
+  /* Observatory click: select the seated overseer, or (with control on) offer to start one. */
+  function observatoryClicked() {
+    const row = (latest?.data?.sessions || []).find(entry => entry.role === 'overseer' && entry.source === 'herdr');
+    if (row) { select(row.id, true); return; }
+    if (!CONTROL) { notice('No overseer. Start the observer with OBSERVER_CONTROL=1 to spawn one from here.', true); return; }
+    if (!window.confirm('Start an overseer agent in the observatory?\n\nThis opens a Herdr workspace named "overseer" in its own folder, starts Claude there with a brief on watching the other agents, and opens a terminal attached to it.')) return;
+    const button = get('world');
+    controlAction(button, 'overseer', 'overseer', 'Starting the overseer…');
   }
   const groupNodes = new Map(), rowNodes = new Map();
   function groupNode(key) {
@@ -706,18 +715,19 @@
     if (badge) setText(badge, data?.presentation ? 'LIVE · FICTIONAL LABELS' : 'READ ONLY');
     // A repository whose last row left clears its highlight.
     if (selectedRepoId !== null && !rows.some(row => row.repoId === selectedRepoId)) selectedRepoId = null;
-    layout.reconcile(rows);
+    const overseerRow = rows.find(row => row.role === 'overseer' && row.source === 'herdr') || null;
+    layout.reconcile(rows.filter(row => row !== overseerRow));
     if (selected && !byId.has(selected)) { overview(); }
     if (page >= layout.pages()) setPage(layout.pages() - 1);
     if (!layout.onPage(page).length && rows.length) setPage(layout.pageFor(rows[0].id));
     const rooms = layout.onPage(page), onFloor = rooms.flatMap(room => room.rows.map(value => value.row));
     // Geometry and row fields consumed by floor paint or movement; titles and tools are read live by the hover callbacks.
-    const key = JSON.stringify([page, rooms], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
+    const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider]], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
     const bus = data?.bus || null, messages = Array.isArray(bus?.messages) ? bus.messages : [];
     // Hover text, plates and pending envelopes read rows and bus live; a frozen floor repaints only when they change.
     const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages]]);
     if (key !== sceneKey || !scene) {
-      sceneKey = key; scene = ObserverScene.build(rooms, page);
+      sceneKey = key; scene = ObserverScene.build(rooms, page, { overseer: overseerRow });
       // Row freshness is read from the current roster by id: the cached scene's row objects can be older.
       view.update(scene, { stale: () => isStale(latest), rowStale: worker => rowStale(rowFor(worker.id)), mailFrame, inspected: inspectedAgent,
         repositorySelection: () => selectedRepoId, onRepositoryToggle: toggleRepository });

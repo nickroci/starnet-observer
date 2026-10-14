@@ -567,3 +567,18 @@ for (const exclusion of [{ status: 'working' }, { status: 'blocked' }, { stale: 
   assert(parentWalked, 'safe route rejection is local to boxed station');
 }
 console.log('Compact historical pair/turn/passage/regroup oracle, eligible gaps, own stale/work/closed precedence and inaccessible-departure fallback OK');
+
+// Overseer seating: a row flagged as overseer takes the observatory chair and the ambient viewer stands down.
+{
+  const Scene = require('../frontend/app/observer-scene.js');
+  const plain = Scene.build([], 0), boss = { id: 'obs_' + 'c'.repeat(24), status: 'working', provider: 'claude', role: 'overseer', source: 'herdr' };
+  const seated = Scene.build([], 0, { overseer: boss });
+  require('node:assert/strict').equal(plain.observatory.viewer.kind, 'ambient');
+  require('node:assert/strict').equal(seated.observatory.viewer, null);
+  require('node:assert/strict').equal(seated.observatory.overseer, boss.id);
+  const worker = seated.workers.find(w => w.id === boss.id);
+  require('node:assert/strict').deepEqual([worker.role, worker.platformKey, worker.chair], ['overseer', 'observatory', plain.observatory.chair]);
+  require('node:assert/strict').notEqual(plain.revision, seated.revision, 'seating the overseer rebuilds the floor');
+  console.log('observer scene: overseer seating OK');
+}
+

@@ -31,7 +31,7 @@ const ObserverScene = (() => {
       link: [{ x: 12, y: -4, z: 0 }, { x: 12, y: 0, z: 0 }, { x: 12, y: 5, z: 0 }, { x: 7, y: 5, z: 0 }, { x: 7, y: 6, z: 0 }],
       extents: [{ rect, height: 3.2 }, { rect: desk, height: 1.5 }, ...screens, ...telescopes, plant, light] };
   }
-  function build(rooms, page) {
+  function build(rooms, page, extras = {}) {
     const mail = { rect: { x: 0, y: 0, w: 14, h: 12 }, hub: { x: 7, y: 6, z: 0 },
       tower: { x: 5, y: 1, w: 4, h: 3 }, pads: [4, 7, 10].map(x => ({ x, y: 9, z: 0 })),
       pod: [{ x: 11, y: 9, z: 0 }, { x: 11, y: 6, z: 0 }, { x: 7, y: 6, z: 0 }],
@@ -94,10 +94,17 @@ const ObserverScene = (() => {
       const parent = workers.find(parent => parent.id === worker.parentId);
       if (parent) { worker.anchor = { ...parent.chair }; worker.connector = { from: worker.anchor, to: { ...worker.chair } }; }
     }
+    // The overseer (a Herdr agent named "overseer") takes the observatory chair; the ambient viewer stands down.
+    const overseerRow = extras.overseer || null;
+    if (overseerRow) {
+      observatory.viewer = null; observatory.overseer = overseerRow.id;
+      workers.push({ id: overseerRow.id, row: overseerRow, kind: 'session', role: 'overseer', parentId: null, scale: 1, platformKey: 'observatory', accent: '#3fd8e8',
+        desk: observatory.desk, chair: observatory.chair, route: [observatory.chair, { x: observatory.chair.x, y: -11, z: 0 }, { x: 12, y: -11, z: 0 }, ...observatory.link, mail.hub] });
+    }
     const extents = [mail.rect, ...platforms.map(p => p.rect), ...walkways.map(w => w.rect)].map(rect => ({ rect }))
       .concat(observatory.extents);
     const bounds = projectedBounds(extents);
-    const revision = JSON.stringify([page, observatory.extents, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.repo)]).sort(),
+    const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.repo)]).sort(),
       workers.map(w => [w.id, w.kind, w.parentId, w.chair.x, w.chair.y]).sort()]);
     return { page, revision, platforms, walkways, workers, helperOverflow, observatory, mail, bounds };
   }

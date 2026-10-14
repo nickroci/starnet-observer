@@ -364,7 +364,7 @@ const ObserverView = (() => {
   }
 
   // ---------- the view ----------
-  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, onCamera = () => {}, env = {} }) {
+  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onObservatory = () => {}, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, onCamera = () => {}, env = {} }) {
     const win = env.window || (typeof window !== 'undefined' ? window : {});
     const raf = env.raf || (fn => win.requestAnimationFrame(fn)), caf = env.caf || (id => win.cancelAnimationFrame(id));
     const dprOf = env.dpr || (() => win.devicePixelRatio || 1);
@@ -394,6 +394,8 @@ const ObserverView = (() => {
        screen boxes for the scene and camera they were drawn with; after any change to either they hit nothing until
        the next paint, so a stale box can never toggle whichever repository the moved view now shows there. */
     let signRegions = [], plateFrame = null, repositories = new Set(), repositorySelection = () => null, onRepositoryToggle = () => {};
+    let observatoryRegion = null;
+    const observatoryAt = point => paintedFrameCurrent() && observatoryRegion && point.x >= observatoryRegion.left && point.x <= observatoryRegion.left + observatoryRegion.width && point.y >= observatoryRegion.top && point.y <= observatoryRegion.top + observatoryRegion.height;
     const paintedFrameCurrent = () => !!plateFrame && plateFrame.scene === scene && plateFrame.zoom === camera.zoom && plateFrame.tx === camera.tx && plateFrame.ty === camera.ty;
     const signAt = point => {
       if (!paintedFrameCurrent()) return null;
@@ -1017,9 +1019,9 @@ const ObserverView = (() => {
       const observatory = scene.observatory;
       if (observatory) {
         const r = observatory.rect, signAt = screen({ x: r.x + r.w / 2, y: r.y, z: 3.6 });
-        plates.push(textPlate('OBSERVATORY ✦', signAt.x, signAt.y, { accent: PALETTE.cyan, size: signSize(18), color: PALETTE.cyan, priority: 44 }));
+        plates.push({ ...textPlate(observatory.overseer ? 'OBSERVATORY ✦ overseer' : 'OBSERVATORY ✦', signAt.x, signAt.y, { accent: PALETTE.cyan, size: signSize(18), color: PALETTE.cyan, priority: 44 }), observatory: true });
         // Ambient: dim, no status dot, never a hover, focus or inspection target.
-        if (tier !== 'overview') { const head = screen({ ...observatory.viewer.point, z: 2 }); plates.push(textPlate(observatory.viewer.label + ' · ambient', head.x, head.y, { accent: '#3a444e', size: 12, color: PALETTE.dim, priority: 6 })); }
+        if (tier !== 'overview' && observatory.viewer) { const head = screen({ ...observatory.viewer.point, z: 2 }); plates.push(textPlate(observatory.viewer.label + ' · ambient', head.x, head.y, { accent: '#3a444e', size: 12, color: PALETTE.dim, priority: 6 })); }
       }
       const inspectedId = inspected();
       for (const region of anchors) {
@@ -1041,6 +1043,7 @@ const ObserverView = (() => {
       titleRegions = accepted.filter(plate => plate.target).map(plate => ({ id: plate.target, left: plate.x, top: plate.y, width: plate.w, height: plate.h }));
       // Repository hits are likewise only accepted, drawn section signs; platform headings and dropped signs have none.
       signRegions = accepted.filter(plate => plate.repo).map(plate => ({ repo: plate.repo, left: plate.x, top: plate.y, width: plate.w, height: plate.h }));
+      const obsPlate = accepted.find(plate => plate.observatory); observatoryRegion = obsPlate ? { left: obsPlate.x, top: obsPlate.y, width: obsPlate.w, height: obsPlate.h } : null;
       plateFrame = { scene, zoom: camera.zoom, tx: camera.tx, ty: camera.ty };
       // Hover brackets around the real painted extent.
       const hover = regions.find(region => region.id === hovered);
@@ -1104,12 +1107,13 @@ const ObserverView = (() => {
       const observatory = scene.observatory;
       if (observatory) {
         const { desk, chair, viewer } = observatory;
-        if (onStage(desk, 1.1, 16)) items.push({ depth: middle(desk), draw: () => {
+        // With an overseer seated, its own desk, chair and body come from the worker loop; the ambient set stands down.
+        if (!observatory.overseer && onStage(desk, 1.1, 16)) items.push({ depth: middle(desk), draw: () => {
           box(ctx, desk, 0.55, { top: '#22303a', left: '#101a20', right: '#17232a', edge: 'rgba(63,216,232,0.12)' });
           line(ctx, { x: desk.x + 0.3, y: desk.y + desk.h, z: 0.6 }, { x: desk.x + desk.w - 0.3, y: desk.y + desk.h, z: 0.6 }, PALETTE.cyan, 1.5, 0.5);
         } });
-        if (onStage({ x: chair.x - 0.3, y: chair.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: chair.x + chair.y - 0.6, draw: () => paintChair(ctx, { chair }) });
-        if (onStage({ x: viewer.point.x - 0.5, y: viewer.point.y - 0.5, w: 1, h: 1 }, 2, 12)) items.push({ depth: viewer.point.x + viewer.point.y, tie: viewer.id, draw: () => paintViewer(ctx, viewer) });
+        if (!observatory.overseer && onStage({ x: chair.x - 0.3, y: chair.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: chair.x + chair.y - 0.6, draw: () => paintChair(ctx, { chair }) });
+        if (viewer && onStage({ x: viewer.point.x - 0.5, y: viewer.point.y - 0.5, w: 1, h: 1 }, 2, 12)) items.push({ depth: viewer.point.x + viewer.point.y, tie: viewer.id, draw: () => paintViewer(ctx, viewer) });
         for (const screen of observatory.screens) if (onStage(screen.rect, screen.height, 8)) items.push({ depth: middle(screen.rect), draw: () => paintObservatoryScreen(ctx, screen, now, animate) });
         for (const telescope of observatory.telescopes) if (onStage(telescope.rect, telescope.height, 8)) items.push({ depth: middle(telescope.rect), draw: () => paintTelescope(ctx, telescope, now, animate) });
         if (onStage(observatory.plant.rect, observatory.plant.height, 8)) items.push({ depth: middle(observatory.plant.rect), draw: () => paintPlant(ctx, observatory.plant) });
@@ -1195,9 +1199,11 @@ const ObserverView = (() => {
         const title = repeat ? tap.title : titleAt(point), target = title ? null : repeat ? tap.id : Scene.hitTest(point, regions);
         // A repository sign is the lowest-precedence target: a worker title or body under the point always wins.
         const sign = title || target ? null : repeat ? tap.sign : signAt(point);
+        const obs = title || target || sign ? false : repeat ? tap.obs : observatoryAt(point);
         if (title && !repeat && workerIndex.has(title)) onTitleToggle(title);
         if (sign && !repeat) onRepositoryToggle(sign);
-        tap = { id: target, title, sign, point, at: clock() };
+        if (obs && !repeat) onObservatory();
+        tap = { id: target, title, sign, obs, point, at: clock() };
         if (target && workerIndex.has(target)) onSelect(target);
       } else tap = null;   // a drag, pinch or slow touch ends any remembered gesture
       drag = null;
@@ -1212,7 +1218,7 @@ const ObserverView = (() => {
       event.preventDefault();
       const point = local(event), known = sameTap(point) ? tap : null;
       tap = null;
-      if (known && (known.title || known.sign)) return;   // a title or sign double-click already toggled once; it never zooms
+      if (known && (known.title || known.sign || known.obs)) return;   // a title, sign or observatory double-click already acted once; it never zooms
       // The clicks' own target decides; only a double-click with no recorded click hit-tests the current view.
       const id = known ? (known.id && workerIndex.has(known.id) ? known.id : null) : Scene.hitTest(point, regions);
       if (id) { onSelect(id); return; }

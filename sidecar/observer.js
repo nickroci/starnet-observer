@@ -120,7 +120,7 @@ function makeObserver(options = {}) {
         const sessionId = identity.sessionId;
         if (identity.proof) proofs.set(id, identity.proof);
         const tool = await transcripts.read(id, pane.agent, sessionId);
-        rows.push({ id, paneId: pane.pane_id, provider: pane.agent,
+        rows.push({ id, paneId: pane.pane_id, provider: pane.agent, role: /^overseer(?:$|[-_:])/i.test(String(pane.name || '')) ? 'overseer' : null,
           title: text(redactText(String(pane.terminal_title_stripped || pane.agent)), 160),
           ...await projects.resolve(pane.foreground_cwd || pane.cwd),
           status: STATUSES.has(pane.agent_status) ? pane.agent_status : 'unknown', sessionId,

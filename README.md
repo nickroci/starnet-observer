@@ -185,6 +185,8 @@ OBSERVER_CONTROL=1 npm start
 | `⇱` | session row | Opens a Terminal window attached to that pane with `herdr agent attach --takeover`, so it takes input even if another terminal was attached. Detach with `ctrl+b q`; the agent keeps running. |
 | `✕` | session row | Closes the Herdr pane, ending that agent. The page asks you to confirm first. |
 
+Clicking the **OBSERVATORY** sign on the station selects the overseer if one is running, or offers to start one. The overseer is an ordinary Claude session in a Herdr workspace named `overseer`, started in `~/.local/share/starnet-observer/overseer` with a `CLAUDE.md` brief on using Herdr and llm-bus to watch and coordinate the other agents (edit that file to change its standing orders; it is written once). Any Herdr agent named `overseer` takes the observatory chair instead of a project deck.
+
 Set `OBSERVER_CLAUDE_ARGS` to pass flags to the spawned `claude`, for example `OBSERVER_CLAUDE_ARGS="--dangerously-skip-permissions"`. Terminal launching uses macOS Terminal.app.
 
 The control routes are `POST`-only, require the same per-launch token and local origin as the read routes, validate the pane id shape, and ask Herdr to confirm an agent exists in the pane before attaching to or closing it. Without `OBSERVER_CONTROL=1` the server still rejects every non-GET request, and the buttons are not rendered.

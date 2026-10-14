@@ -28,7 +28,7 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
     if (!hosts.has(req.headers.host) || req.headers.origin && ![...hosts].some(host => req.headers.origin === 'http://' + host) || req.headers['sec-fetch-site'] === 'cross-site') return json(403, { error: 'Local origin required' });
     const authorized = () => { const supplied = req.headers['x-observer-token']; return typeof supplied === 'string' && Buffer.byteLength(supplied) === Buffer.byteLength(token) && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(token)); };
     // Control actions are the one mutating surface, present only when the operator opted in at launch.
-    const action = control && req.method === 'POST' ? /^\/api\/control\/(attach|spawn|close)$/.exec(req.url) : null;
+    const action = control && req.method === 'POST' ? /^\/api\/control\/(attach|spawn|close|overseer)$/.exec(req.url) : null;
     if (req.method !== 'GET' && !action) return json(405, { error: 'Read-only server: GET required' });
     if (action) {
       if (!authorized()) return json(403, { error: 'Observer token required; reload the page' });
@@ -36,9 +36,9 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       let raw = '';
       try { for await (const chunk of req) { raw += chunk; if (raw.length > 4096) return json(413, { error: 'Body too large' }); } } catch (_) { return json(400, { error: 'Body unreadable' }); }
       let body; try { body = JSON.parse(raw || '{}'); } catch (_) { return json(400, { error: 'Invalid JSON' }); }
-      if (!body || typeof body.paneId !== 'string' || !PANE.test(body.paneId)) return json(400, { error: 'paneId required' });
-      try { return json(200, await control[action[1]](body.paneId)); }
-      catch (error) { const status = Number.isInteger(error.status) ? error.status : 500; if (status >= 500) console.warn('[observer control]', redact(String(error.message))); return json(status, { error: redact(String(error.message)) }); }
+      if (action[1] !== 'overseer' && (!body || typeof body.paneId !== 'string' || !PANE.test(body.paneId))) return json(400, { error: 'paneId required' });
+      try { return json(200, action[1] === 'overseer' ? await control.overseer() : await control[action[1]](body.paneId)); }
+      catch (error) { const status = Number.isInteger(error.status) ? error.status : 500; if (status >= 500) console.warn('[observer control]', redact(String(error.message))); return json(status, { error: redact(String(error.message)), paneId: typeof error.paneId === 'string' ? error.paneId : undefined }); }
     }
     try {
       const url = new URL(req.url, 'http://' + req.headers.host);
