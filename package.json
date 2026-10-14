@@ -1,0 +1,22 @@
+{
+  "name": "starnet-observer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone read-only local observer for Herdr, Codex, Claude Code, and llm-bus.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node scripts/test.js"
+  },
+  "bin": {
+    "starnet-observer": "server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wnz99/starnet-observer.git"
+  },
+  "homepage": "https://github.com/wnz99/starnet-observer#readme"
+}
