@@ -296,13 +296,22 @@ native session ids or message bodies for this.
   ghosted desk for each agent the roster lists as active in the last day. The ship is labelled "via relay · not
   observed". Ghost crew are hover-only: never selected, inspected or controlled, and their status is unknown. An
   observed machine (this one, or a configured remote bound to the same relay) is never a shadow.
-- Relay links join mailrooms: each observed member's mailroom to the other members' and to each shadow mailroom. A link
-  marches while that bus saw relay activity in the last 15 minutes, is still and dashed while quiet, and is grey while
-  that bus is unreadable. The roster cache alone is not proof that a bridge is running.
-- Relayed mail uses the normal courier paths: the sender's desk, its mailroom, across the relay link, the far mailroom,
-  then the far agent's desk. The far agent is matched by an opaque hash of its relay address, never its session id.
+- Relay highways join mailrooms: each observed member's mailroom to the other members' and to each shadow mailroom.
+  A highway is an ordinary ground walkway routed around the floors. Between observed ships it runs down the centre line
+  between the room banks; to a shadow ship it climbs to a lane north of both ships' top rows, crosses, and comes down.
+  Its label gives the relay, the observed end's state (live while that bus saw relay activity in the last 15 minutes,
+  otherwise quiet with its age, or bus unreadable), and how many agents at that end are on it.
+- A highway is **unverified** (dim rails, "roster only, no mail yet") until a relayed message has actually crossed it:
+  received from that machine, or synchronised as delivered to it. The relay roster alone proves the far machine
+  published to the same relay at some point, not that it is reachable now.
+- Which agents use the relay: the bridge publishes exactly the sessions of the repositories its config maps and records
+  them in `remote_publications`. The observer joins those records to panes exactly (live, under a day old). Rooms holding
+  a relay-carried agent, and every shadow room, get amber walkways to their mailroom and "⇄ relay" on their sign. Their
+  agents read "on relay (repo)" on hover. Every other room is local to its own bus.
+- Relayed mail uses the normal courier paths: the sender's desk, its mailroom, along the relay highway, the far mailroom,
+  then the far agent's desk, along the highway. The far agent is matched by an opaque hash of its relay address, never its session id.
   Unacknowledged outgoing mail waits where llm-bus last proved it is: in the mailroom while `queued_local`, halfway along
-  the relay link once `accepted_remote`, and at the far agent's desk once `delivered_local`. When both ends are
+  the highway once `accepted_remote`, and at the far agent's desk once `delivered_local`. When both ends are
   observed, each ship shows only its own half of the crossing.
 - Ledger rows name the far side, for example "Codex on whitenoise · llm-bus (via relay)", with the synchronised relay
   state ("held at the relay", "delivered to the far machine, not acknowledged"). The bus status names the binding.
