@@ -1,6 +1,9 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { makeObserver: makeCoreObserver } = require('../sidecar/observer.js');
+const { makeObserver: makeNativeObserver } = require('../sidecar/observer.js');
+// Inventory fixtures never consult a developer's real private overseer record.
+const emptyOverseerState = { read: async () => ({ state: 'empty' }), match: async () => false };
+const makeCoreObserver = options => makeNativeObserver({ overseerState: emptyOverseerState, ...options });
 // Legacy scenarios assert completed source observations. Track only injected fixture work;
 // the progressive fixtures below exercise the production core-return boundary directly.
 function makeObserver(options) {
@@ -35,6 +38,7 @@ const ID = '00000000-0000-0000-0000-000000000001';
 const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status: 'working',
   terminal_title_stripped: 'Title', cwd: '/private/project', agent_session: { agent: 'codex', kind: 'id', value: session } });
 (async () => {
+  await overseerRoles();
   await progressivePublication();
   await progressiveOwnership();
   await progressiveOptionalFreshness();
@@ -1525,4 +1529,44 @@ async function optionalToolObservationFallback() {
     clock++;
     assert.equal((await observer.get()).sessions[0].tool.available, false);
   } finally { helper.resolve(); await observer.close(); }
+}
+
+async function overseerRoles() {
+  const { makeOverseerState } = require('../sidecar/overseer-state.js');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'observer-overseer-'));
+  const file = path.join(directory, 'identity.json'), endpoint = '/fixture/observer.sock';
+  const launched = { pane_id: 'boss', workspace_id: 'workspace', terminal_id: 'terminal', agent: 'claude', name: 'ordinary name' };
+  let inventory = [launched, { ...launched, pane_id: 'legacy', name: 'overseer' }], fail = false, clock = 1000;
+  const observers = [];
+  const create = state => {
+    const observer = makeCoreObserver({ now: () => clock, endpoint, overseerState: state,
+      identities: { resolveMany: async panes => panes.map(() => ({ sessionId: null, source: 'unavailable' })) },
+      execute: async (command, args, settings) => {
+        assert.deepEqual(args, ['agent', 'list'], 'role proof adds no per-row subprocess');
+        assert.equal(settings.env.HERDR_SOCKET_PATH, endpoint);
+        if (fail) throw Error('inventory unavailable');
+        return { stdout: JSON.stringify({ result: { agents: inventory } }) };
+      }, projects: { resolve: async () => ({ projectId: 'fixture' }) },
+      transcripts: { read: async () => ({ available: false }), retain() {} },
+      helpers: { children: async () => ({ rows: [], annotations: new Map(), overflow: new Map() }) }, bus: { read: () => ({ rows: [] }) },
+      desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) }, warmDetails: false });
+    observers.push(observer); return observer;
+  };
+  try {
+    const state = makeOverseerState({ file, endpoint });
+    const owner = await state.reserve(); await state.notePane(owner, 'boss'); await state.commit(owner, launched);
+    const first = await create(state).get();
+    assert.equal(first.sessions.find(row => row.paneId === 'boss').role, 'overseer');
+    assert.equal(first.sessions.find(row => row.paneId === 'legacy').role, null, 'legacy name cannot adopt role');
+    assert.equal(first.sessions.find(row => row.paneId === 'boss').identityHealth, 'unavailable', 'role is independent of transcript proof');
+    inventory = [{ ...launched, name: 'renamed again', terminal_title_stripped: 'random title' }];
+    const restarted = create(makeOverseerState({ file, endpoint }));
+    assert.equal((await restarted.get()).sessions[0].role, 'overseer');
+    clock += 3000; fail = true;
+    const stale = (await restarted.get()).sessions[0];
+    assert.equal(stale.role, 'overseer'); assert.equal(stale.inventoryHealth, 'unavailable');
+    fail = false; clock += 3000; inventory = [{ ...launched, terminal_id: 'reused' }];
+    assert.equal((await restarted.get()).sessions[0].role, null);
+    assert(!JSON.stringify(await restarted.get()).includes(file), 'private state path never enters rows');
+  } finally { for (const observer of observers) observer.close(); await fs.rm(directory, { recursive: true, force: true }); }
 }

@@ -1,6 +1,6 @@
 # Local Observer
 
-A standalone, read-only browser view of local Codex and Claude Code sessions, drawn as an isometric pixel-art station. Start it from your terminal, then keep working in your normal agent terminals. It shows project/repository groups, session status, available token usage, transcript inspectors, and animated llm-bus message couriers.
+A standalone browser view of local Codex and Claude Code sessions, read-only by default, drawn as an isometric pixel-art station. Start it from your terminal, then keep working in your normal agent terminals. It shows project/repository groups, session status, available token usage, transcript inspectors, and animated llm-bus message couriers.
 
 ![Local Observer with FX on: Matrix glyph rain and pixies over the station, neon rim bloom and lit furniture on three project decks, a glowing working agent, and llm-bus messages in the mailroom](docs/observer-screenshot.jpg)
 
@@ -111,7 +111,7 @@ bun run presentation
 
 Open http://127.0.0.1:4319. This mode shows **real live activity** under a fictional company, **Helioforge**. Rooms use Product, Platform, Intelligence, and Operations; repositories use names such as `helio-web`, `helio-auth`, `helio-agents`, and `helio-console`. Additional rooms and repositories receive numbered aliases.
 
-Labels stay stable during that server run. Actual repositories, folders, sessions, and their ownership are unchanged. Task titles, helper nicknames, worktree names, and pane labels are masked at the server boundary. Session and mail inspectors are disabled, and their API routes return no content. Live status, timestamps, token totals, and body-free message traffic remain visible.
+Labels stay stable during that server run. Actual repositories, folders, sessions, and their ownership are unchanged. Task titles, helper nicknames, worktree names, and project/repository labels are masked at the server boundary. Paths and raw process details are omitted. Real Herdr pane IDs remain visible so optional controls target the correct panes. Session and mail inspectors are disabled, and their API routes return no content. Live status, timestamps, token totals, and body-free message traffic remain visible.
 
 The header explicitly says **LIVE · FICTIONAL LABELS**. Describe a shared recording as “Live agent activity with fictional company/project labels”; these labels do not represent an actual customer or employer. This is presentation masking, not a guarantee of full anonymity: activity patterns, timing, and aggregate counts are still real.
 
@@ -175,9 +175,39 @@ xcode-select --install
 
 The observer compiles its bundled Swift reader lazily. Grant Accessibility access to the terminal app running the server under **System Settings → Privacy & Security → Accessibility**, then restart the observer if needed. The desktop reader covers the Codex app; it does not monitor ordinary ChatGPT or Claude Desktop windows.
 
+## Optional control actions
+
+The observer is read-only by default. Launch it with `OBSERVER_CONTROL=1` to enable three Live sessions actions and the station’s Claude overseer launcher. The three panel actions send only a real pane ID already shown on the page:
+
+```sh
+OBSERVER_CONTROL=1 bun run start
+```
+
+| Button | Where | What it does |
+| --- | --- | --- |
+| `+` | project heading | Uses a fresh Herdr session in the group as a seed, opens a tab in its workspace and current folder, starts `claude`, and opens an attached Terminal window. |
+| `⇱` | session row | Opens a Terminal window attached to that pane with `herdr agent attach --takeover`, so it takes input even if another terminal was attached. Detach with `ctrl+b q`; the agent keeps running. |
+| `✕` | session row | Closes the Herdr pane, ending that agent. The page asks you to confirm first. |
+
+Agents are grouped on the station by project (one deck), then by repository and sub-folder (one walled section per folder, with its own sign); idle agents stroll inside their own section whenever another agent from the same folder is there too. Linked Git worktrees share their main repository group; sub-folders are calculated relative to the checkout where each agent is working.
+
+Clicking the **OBSERVATORY** sign on the station selects the overseer if one is running, or offers to start one. The overseer is an ordinary Claude session in a Herdr workspace named `overseer`, started in `~/.local/share/starnet-observer/overseer` with a `CLAUDE.md` brief on using Herdr and llm-bus to watch and coordinate the other agents (edit that file to change its standing orders; it is written once). The observer recognizes only its verified, persisted overseer launch, even after a rename or observer restart; names, titles, and agent configuration do not establish that role.
+
+The private launch record is `~/.local/share/starnet-observer/overseer/identity.json`, written with mode `0600`. It binds the overseer to the Herdr endpoint, pane, workspace, terminal incarnation, provider, and native session ID when available. One shared launch reservation prevents concurrent observer processes from creating duplicate overseers. Uncertain launch state, corrupt records, or mismatched identity proof leave the overseer unavailable and block a replacement. A last-known overseer may remain visible with stale status; that does not authorize control actions.
+
+After a caught launch failure, a later request can release a recorded reservation only after a complete Herdr agent inventory omits that pane and Herdr returns the exact `pane_not_found` error for it. A crash can leave the exclusive `~/.local/share/starnet-observer/overseer/identity.json.owner` directory behind. Stop every observer process using this state and verify through Herdr that no launch or recorded pane remains active before inspecting it manually. Only an empty, confirmed abandoned owner directory may be removed manually; never recursively delete the state directory or steal an uncertain lock. Nonempty locks, missing pane records, or uncertain Herdr results require manual inspection; restarting alone does not guarantee recovery.
+
+Provider choice and separate worktree sections are deferred; new agents and the overseer currently launch Claude.
+
+Set `OBSERVER_CLAUDE_ARGS` to pass flags to the spawned `claude`, for example `OBSERVER_CLAUDE_ARGS="--dangerously-skip-permissions"`. Terminal launching uses macOS Terminal.app.
+
+The control routes are `POST`-only and require the same per-launch token and local origin as the read routes. Attach, spawn, and close require a current private observer target proof, then matching live Herdr inventory, agent, and pane identities. Stale, unavailable, foreign, or reused targets are rejected before mutation. Without `OBSERVER_CONTROL=1`, the server rejects every non-GET request and omits the panel action buttons.
+
+Controls also work in presentation mode with `OBSERVER_CONTROL=1 bun run presentation`. Fictional labels remain in place; requests use real pane IDs. Control responses omit private names, paths, endpoint details, and raw process errors. Presentation mode still disables inspectors and transcript preparation; it does not make live actions anonymous.
+
 ## Privacy and limits
 
-- Observation is read-only: no agent launching, provider setup, message sending, acknowledgments, or session edits.
+- Observation is read-only unless you opt in with `OBSERVER_CONTROL=1`: no agent launching, provider setup, message sending, acknowledgments, or session edits. With control on, the page can start, attach to and close Herdr agent panes, and nothing else.
 - The server may prepare bounded, redacted transcript projections locally in memory before you open an inspector: at most 32 identities per enrichment sweep, with two background detail jobs at once. Opening an inspector still checks current session ownership and source contents. Message bodies and desktop text remain on demand; presentation mode disables transcript preparation. Recognized credential patterns are redacted; private prose and file paths may still be visible. Share the code, not your session data.
 - The local API requires a per-launch token delivered to the local page. Foreign origins and hostnames are rejected. Do not expose the server through a public proxy.
 - Missing sources appear unavailable. Old data is marked stale; absence of a source is not treated as a fresh empty roster.

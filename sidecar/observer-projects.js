@@ -7,7 +7,7 @@ const { stationChildEnv } = require('./child-env.js');
 const opaque = (prefix, value) => prefix + crypto.createHash('sha256').update(value).digest('hex').slice(0, 20);
 const clean = value => value.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 80);
 const unassigned = () => ({ projectId: 'unassigned', project: 'Unassigned', projectKind: 'folder',
-  repoId: 'unassigned', repo: 'Unassigned', repoKind: 'folder', worktree: null });
+  repoId: 'unassigned', repo: 'Unassigned', repoKind: 'folder', worktree: null, folder: '' });
 
 /* Git owns repository/worktree discovery. Only opaque identities and short labels cross the API.
    Canonical main-repository parents own rooms; direct folder agents use that same folder identity. */
@@ -36,9 +36,10 @@ function makeProjectResolver({ execute, now }) {
   async function associate(found, mainEvidence) {
     if (found.value) return found.value;
     const { cwd, git } = found;
-    let root = found.root, identity = root, kind = 'folder', worktree = null, mainRoot = null;
+    let root = found.root, checkoutRoot = found.root, identity = root, kind = 'folder', worktree = null, mainRoot = null;
     if (git) {
       const [checkout, gitDir, common] = git;
+      checkoutRoot = checkout;
       let main = gitDir === common ? checkout : null;
       if (!main) {
         // Git worktree-list can invent a metadata-parent checkout for --separate-git-dir.
@@ -57,9 +58,12 @@ function makeProjectResolver({ execute, now }) {
       if (checkout !== root) worktree = path.basename(checkout);
     }
     const projectFolder = kind === 'repository' ? path.dirname(root) : root;
+    // Sub-folder inside the checkout the pane is working in ('' at the root): a display label only.
+    let folder = '';
+    try { const here = await fs.realpath(cwd), rel = path.relative(checkoutRoot, here); if (rel && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel)) folder = rel.split(path.sep).map(clean).filter(Boolean).join('/'); } catch (_) { folder = ''; }
     const value = { projectId: opaque('prj_', 'folder\0' + projectFolder), project: clean(path.basename(projectFolder)) || 'Local folder', projectKind: 'group',
       repoId: opaque(kind === 'repository' ? 'repo_' : 'dir_', identity), repo: clean(path.basename(root)) || 'Local folder', repoKind: kind,
-      worktree: worktree ? clean(worktree) : null };
+      worktree: worktree ? clean(worktree) : null, folder: folder.slice(0, 120) };
     cache.set(cwd, { at: now(), value, mainRoot, repositoryIdentity: kind === 'repository' ? identity : null });
     if (cache.size > 256) cache.delete(cache.keys().next().value);
     return value;
