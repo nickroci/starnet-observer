@@ -5,3 +5,12 @@ node_modules/
 .env.*
 coverage/
 observer.config.json
+
+# Local private theme references and installed packs
+.planning/sketches/
+docs/handover-reference/MAMA_PALETTE_DRAFT.json
+docs/handover-reference/mama-source/
+frontend/assets/themes/mama/
+frontend/assets/themes/mama-classic/
+themes/mama.json
+themes/mama-classic.json

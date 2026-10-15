@@ -57,22 +57,22 @@ function recorder(log, extents, padRows = 20, canvas = null) {
 }
 
 /* load({ source? }) → { SPRITES, ready, context(log) }. `source` swaps in another copy of assets.js (a baseline). */
-async function load({ source, set = 'tester', padRows = 20 } = {}) {
+async function load({ source, set = 'tester', padRows = 20, data, sprites, image, initOptions, waitForSkin = true } = {}) {
   const offscreen = [];
   let canvasId = 0;
   const sandbox = vm.createContext({
     console, Promise, Map, Set, WeakMap, Math, Number, Object, Array, JSON, Uint8ClampedArray,
     SpriteLoadPlan: Plan,
-    DATA: { SKINS: { tester: { set, sourceStandingHeight: 64 }, ghost: { set: 'ghost' } }, DEFAULT_SKIN: 'tester' },
+    DATA: data || { SKINS: { tester: { set, sourceStandingHeight: 64 }, ghost: { set: 'ghost' } }, DEFAULT_SKIN: 'tester' },
     document: { createElement: () => { const log = []; offscreen.push(log); return { __id: 'canvas' + (++canvasId), width: 0, height: 0, addEventListener() {}, getContext: () => recorder(log, null, padRows) }; } },
     // Sit masters are shorter, so a pose change crossfades between two different footprints.
-    Image: class { constructor() { this.width = 92; this.height = 92; this.__id = 'img'; } set src(value) { this.__id = 'img:' + value; if (/\/(sit|type)_/.test(value)) this.height = 70; Promise.resolve().then(() => this.onload && this.onload()); } },
-    fetch: async () => ({ ok: true, json: async () => manifest(set) })
+    Image: class { constructor() { this.width = 92; this.height = 92; this.__id = 'img'; } set src(value) { this.__id = 'img:' + value; if (/\/(sit|type)_/.test(value)) this.height = 70; Promise.resolve().then(() => image ? image(this, value) : this.onload && this.onload()); } },
+    fetch: async () => ({ ok: true, json: async () => sprites || manifest(set) })
   });
   vm.runInContext(source || fs.readFileSync(ASSETS, 'utf8'), sandbox, { filename: 'assets.js' });
   const SPRITES = vm.runInContext('SPRITES', sandbox);
-  await SPRITES.init();
-  await SPRITES.ensureSkin('tester');
+  await SPRITES.init(initOptions);
+  if (waitForSkin) await SPRITES.ensureSkin(data ? data.DEFAULT_SKIN : 'tester');
   // context(log, extents?, canvas?) — pass `canvas` ({width,height}) to give the context a destination bitmap.
   return { SPRITES, offscreen, context: (log, extents, canvas) => recorder(log, extents, padRows, canvas) };
 }

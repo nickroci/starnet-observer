@@ -14,6 +14,9 @@ const SPRITES = (() => {
   let tracksBySet = null;
   const setJobs = {};
   const loadedSets = new Set();
+  const replacements = {};
+  const setMetadata = {};
+  let onDegraded = null;
   let meta = { minion: { fw: 0, fh: 0 }, ultron: { fw: 0, fh: 0 } };
 
   /* the crew base is a white space-suit astronaut with glowing CYAN visor eyes
@@ -50,20 +53,29 @@ const SPRITES = (() => {
      ultron keeps more of his source size so he towers over the crew. */
   const SCALE = { ultron: 0.60 };   // skins read their scale from DATA.SKINS; ULTRON is special
   function drawScaleFor(setName) {
-    const skin = DATA.SKINS[setName] || Object.values(DATA.SKINS).find(s => s.set === setName);
+    const skin = metadataFor(setName);
     return (skin && skin.scale) || SCALE[setName] || 2 / 3;
   }
   /* The set drawBody will resolve for this body, and the scale it will draw at. Exported (bodyScale)
      because a surface that wants the master at its NATIVE resolution — the dossier portrait, which is a
      still, not a floor body — has to cancel this scale out exactly. Re-deriving it in the UI would drift
      the moment ULTRON, a new set, or the DATA.SKINS fallback changed; asking the engine cannot. */
-  function setForBody(b) {
-    const study=typeof SkinStudy!=='undefined'&&SkinStudy.setFor(b);if(study)return study;
+  function defaultSetForBody(b, canonical) {
+    const study=!canonical&&typeof SkinStudy!=='undefined'&&SkinStudy.setFor(b);if(study)return study;
     return (b && b.id === 'ULTRON') ? (DATA.SKINS.ultron?.set || 'ultron')
       : ((DATA.SKINS[b && b.skin] && DATA.SKINS[b.skin].set) || DATA.SKINS[DATA.DEFAULT_SKIN].set);
   }
+  function setForBody(b, group) {
+    const fallback = defaultSetForBody(b, group === 'default');
+    if (group === 'default' || (b && b.id === 'ULTRON')) return fallback;
+    const replacement = replacements[b && b.skin];
+    return replacement && replacement.state === 'ready' ? replacement.set : fallback;
+  }
+  function metadataFor(set) {
+    return setMetadata[set] || DATA.SKINS[set] || Object.values(DATA.SKINS).find(s => s.set === set) || {};
+  }
   function bodyScale(b) { return drawScaleFor(setForBody(b)); }
-  function isReviewSet(set) { return /^(approved|readability|industrial)_/.test(set); }
+  function isReviewSet(set) { return metadataFor(set).presentation === 'review'; }
 
   /* foot-line measurement — every PixelLab master leaves transparent padding BELOW the feet
      (the crew sets all sit ~23px up from the 92px canvas bottom). The contact shadow is drawn
@@ -133,7 +145,7 @@ const SPRITES = (() => {
     const cacheKey = set + ':' + sc;
     if (cycleCache[cacheKey] != null) return cycleCache[cacheKey];
     // Approved masters contain 68 rows of transparent packing. They are not leg length.
-    const visibleHeight = isReviewSet(set) ? 76 : (DATA.SKINS[set]?.sourceStandingHeight || frameH);
+    const visibleHeight = metadataFor(set).sourceStandingHeight || frameH;
     const fallback = visibleHeight * sc * CYCLE_PER_HEIGHT;
     const side = frames[set + '.walk.east'] || frames[set + '.walk.west'];
     const idleFr = frames[set + '.rot.east'] || frames[set + '.rot.west'];
@@ -518,7 +530,7 @@ const SPRITES = (() => {
   }
   function drawBody(ctx, b, nowMs, appearance) {
     const reduced = !!(appearance && appearance.reducedMotion);
-    const set = setForBody(b);
+    const set = setForBody(b, appearance && appearance.group);
     if (!loadedSets.has(set)) { loadSet(set); return null; }
     const glancing = b.state !== 'walk' && b.glance && b.glance.until > nowMs;   // brief look-up: overrides facing & typing
     const meeting = b.meet && b.meet.until > nowMs;        // hallway chat: stand still, face partner
@@ -688,7 +700,7 @@ const SPRITES = (() => {
     const x = snap(b.px - dw / 2);
     // Keep the approved boots against the floor contact. The legacy three-world-pixel
     // lift separated an 18px body from its shadow by one sixth of its visible height.
-    const sourceHeight = isReviewSet(set) ? 76 : DATA.SKINS[set]?.sourceStandingHeight;
+    const sourceHeight = metadataFor(set).sourceStandingHeight;
     const GROUND_BITE = sourceHeight ? -0.25 : -3;
     b._renderStandingHeight = sourceHeight ? sourceHeight * sc : null;
     // SEAT LIFT: a body seated on a raised single-tile seat (stool/chair) draws its pixels this many px
@@ -735,6 +747,7 @@ const SPRITES = (() => {
     const shR = Math.max(4.5, dw * 0.21);
     // POSE DISSOLVE state is decided before any pixel work, so a culled body leaves its next frame exactly as a
     // painted one would (see the dissolve note at the draw below).
+    if (b._spriteGroup !== set) { b._poseLast = null; b._poseFade = null; b._spriteGroup = set; }
     const prev = b._poseLast, fadeable = !reduced && !b.noShadow && prev && prev.key !== key
       && nowMs - prev.at < 200 && Math.hypot(b.px - prev.px, b.py - prev.py) < 6;
     if (fadeable) b._poseFade = { f: prev.f, ox: prev.x - prev.px, oy: prev.y - prev.py, w: prev.w, h: prev.h, at: nowMs };
@@ -840,7 +853,12 @@ const SPRITES = (() => {
   function loadImage(path) {
     return new Promise(res => {
       const img = new Image();
-      img.onload = () => res(img);
+      img.onload = async () => {
+        try {
+          if (typeof img.decode === 'function') await img.decode();
+          res(img);
+        } catch (_) { res(null); }
+      };
       img.onerror = () => res(null);
       img.src = path;
     });
@@ -878,10 +896,65 @@ const SPRITES = (() => {
     return picked && picked.set ? picked.set : '';
   }
 
-  function ensureSkin(skin) { return loadSet(setForSkin(skin)); }
-  function isSkinReady(skin) { return loadedSets.has(setForSkin(skin)); }
+  function replacementState(skin) { return replacements[skin]?.state || 'inherited'; }
 
-  async function init() {
+  function ensureSkin(skin) {
+    const fallback = loadSet(setForSkin(skin));
+    const replacement = replacements[skin];
+    if (!replacement) return fallback;
+    if (!replacement.ensureJob) {
+      // A complete replacement can paint even while unrelated canonical frames are still loading.
+      replacement.ensureJob = replacement.job.then(ok => ok || fallback);
+    }
+    return replacement.ensureJob;
+  }
+  function isSkinReady(skin) {
+    return replacementState(skin) === 'ready' || loadedSets.has(setForSkin(skin));
+  }
+
+  function planReplacements(crew) {
+    for (const [skin, group] of Object.entries(crew || {})) {
+      const canonical = tracksBySet[setForSkin(skin)] || [];
+      const requested = Object.entries(group.tracks || {});
+      const inherited = group.set === setForSkin(skin) && requested.length === canonical.length
+        && requested.every(([track, paths]) => {
+          const row = canonical.find(([key]) => key === group.set + '.' + track);
+          return row && JSON.stringify(paths.map(path => path.replace(/^\//, ''))) === JSON.stringify(row[1].map(path => 'assets/sprites/' + path));
+        });
+      if (inherited) continue;
+      // Internal identity isolates staging and all derived caches from canonical sets, even when
+      // a manifest reuses the default set name for different resource paths.
+      const set = '@replacement:' + skin;
+      setMetadata[set] = group;
+      const replacement = replacements[skin] = { set, state: 'loading', job: null };
+      replacement.job = loadReplacement(skin, requested, replacement);
+    }
+  }
+
+  async function loadReplacement(skin, tracks, replacement) {
+    const staged = await Promise.all(tracks.map(async ([track, paths]) => {
+      const images = await Promise.all(paths.map(loadImage));
+      return [replacement.set + '.' + track, images];
+    }));
+    const images = staged.flatMap(([, frames]) => frames);
+    const reason = images.some(image => !image) ? 'image-load'
+      : images.some(image => image.width !== 144 || image.height !== 144) ? 'image-dimensions' : null;
+    if (reason) {
+      replacement.state = 'failed';
+      // Failed images have never entered frame, tint, foot, track or cycle caches.
+      staged.length = 0;
+      images.length = 0;
+      if (onDegraded) { try { onDegraded({ skin, reason }); } catch (_) { /* consumer errors cannot poison settlement */ } }
+      return false;
+    }
+    for (const [track, framesForTrack] of staged) frames[track] = framesForTrack;
+    loadedSets.add(replacement.set);
+    replacement.state = 'ready';
+    return true;
+  }
+
+  async function init({ crew, onDegraded: notifyDegraded } = {}) {
+    onDegraded = typeof notifyDegraded === 'function' ? notifyDegraded : null;
     loading = true;
     try {
       const resp = await fetch('assets/sprites/manifest.json', { cache: 'no-cache' });
@@ -889,6 +962,7 @@ const SPRITES = (() => {
       const man = await resp.json();
       if(typeof SkinStudy!=='undefined')await SkinStudy.install(man);
       tracksBySet = SpriteLoadPlan.groupTracks(man.sprites);
+      planReplacements(crew);
       // ready when the DEFAULT skin's base pose loaded (the old `minion` astronaut set
       // was retired in favour of DATA.SKINS — gating on it left ready=false forever, so
       // every body fell through to the procedural fallback regardless of picked skin).
@@ -914,6 +988,6 @@ const SPRITES = (() => {
     finally { loading = false; }
   }
 
-  return { init, drawBody, groundShadow, ensureSkin, isSkinReady, bodyScale, bodyAppearanceStats, setForBody,
+  return { init, drawBody, groundShadow, ensureSkin, isSkinReady, replacementState, bodyScale, bodyAppearanceStats, setForBody,
     get ready() { return ready; }, get loading() { return loading; } };
 })();

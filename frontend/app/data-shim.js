@@ -1,21 +1,9 @@
 'use strict';
-const DATA = { AGENT: {}, DEFAULT_SKIN: 'blank', SKINS: {
-  "blank": {
-    "name": "Cadet",
-    "set": "approved_android",
-    "scale": 0.25,
-    "sourceStandingHeight": 76
-  },
-  "blank_blue": {
-    "name": "Codex",
-    "set": "approved_blank_blue",
-    "scale": 0.25,
-    "sourceStandingHeight": 76
-  },
-  "blank_amber": {
-    "name": "Claude",
-    "set": "approved_blank_amber",
-    "scale": 0.25,
-    "sourceStandingHeight": 76
-  }
-} };
+const DATA = (() => {
+  const crew = (typeof ThemePack !== 'undefined' ? ThemePack : require('./theme-pack.js')).getDefault().crew;
+  // Logical IDs and provider labels belong to the application; appearance belongs to the canonical pack.
+  return { AGENT: {}, DEFAULT_SKIN: 'blank', SKINS: Object.fromEntries(
+    Object.entries({ blank: 'Cadet', blank_blue: 'Codex', blank_amber: 'Claude' })
+      .map(([skin, name]) => [skin, { ...crew[skin], name }])
+  ) };
+})();
