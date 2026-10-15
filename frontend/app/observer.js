@@ -44,12 +44,15 @@
   /* Repository highlight: one exact repository id, never a label or the parent-folder project. It selects, never
      filters or moves the camera, and asks for nothing: the list and the floor just repaint. */
   let selectedRepoId = null;
+  /* Multi-host: the panel lists one host's crew at a time (null = this machine). Chosen by a host tab, a ship click
+     or selecting an agent; only meaningful when the hub reports remote hosts. */
+  let selectedHost = null, hostList = [], pendingSpawn = null;
   function toggleRepository(repoId) {
     if (typeof repoId !== 'string' || !(latest?.data?.sessions || []).some(row => row.repoId === repoId)) return;
     selectedRepoId = selectedRepoId === repoId ? null : repoId;
     if (latest) render(latest, true);
   }
-  const view = ObserverView.create({ canvas: get('world'), reducedMotion, onSelect: id => select(id, true), onObservatory: () => observatoryClicked(), onShip: window.__OBSERVER_CONTROL__ ? host => shipClicked(host) : null,
+  const view = ObserverView.create({ canvas: get('world'), reducedMotion, onSelect: id => select(id, true), onObservatory: () => observatoryClicked(), onShip: host => hostClicked(host), hostSelection: () => (hostList.length ? selectedHost : undefined),
     // A worker's canvas title toggles the same exact panel as its list title and magnifier; focus returns to the station.
     onTitleToggle: id => { const row = rowFor(id); if (row) togglePanel(agentTarget(row), get('world')); },
     // Platform zoom never selects a worker; it only clears a previous worker selection.
@@ -78,6 +81,8 @@
   function select(id, scroll = false) {
     if (!byId.has(id)) return;
     selected = id;
+    const row = byId.get(id);
+    if (hostList.length && (row.host || null) !== selectedHost) selectedHost = row.host || null;
     const target = layout.pageFor(id); if (Number.isInteger(target)) setPage(target);   // the overseer sits on every page
     render(latest, true);
     view.focus(id);
@@ -413,16 +418,67 @@
     button.disabled = true; notice(pending);
     try {
       const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? {} : action === 'spawn-host' ? { host: paneId === 'local' ? null : paneId } : { paneId });
-      notice(action === 'spawn-host' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.folder + ' · ' + result.paneId + ' · terminal opening' : action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · terminal opening · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · terminal opening' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
+      // Spawning never opens a terminal: the new agent is selected in the panel when it appears; ⇱ attaches.
+      if (['spawn', 'spawn-host', 'overseer'].includes(action) && typeof result.paneId === 'string') pendingSpawn = { paneId: result.paneId, until: Date.now() + 90000 };
+      notice(action === 'spawn-host' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.folder + ' · ' + result.paneId + ' · selecting it when it appears' : action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · selecting it when it appears' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
     } catch (error) { notice((action === 'spawn-host' ? 'Could not start an agent on that host: ' : action === 'overseer' ? 'Could not start the overseer: ' : action === 'spawn' ? 'Could not start an agent: ' : action === 'attach' ? 'Could not open a terminal: ' : 'Could not close the agent: ') + error.message, true); }
     finally { button.disabled = false; }
   }
-  /* Ship hull click (control on): start Claude in that host's home folder, even on a host with no agents yet. */
-  function shipClicked(host) {
-    if (!CONTROL) return;
-    const name = host || 'this machine';
-    if (!window.confirm('Start a new Claude agent on ' + name + '?\n\nThis opens a Herdr workspace in the home folder there, starts Claude in it, and opens a terminal attached to it.')) return;
-    controlAction(get('world'), 'spawn-host', host || 'local', 'Starting an agent on ' + name + '…');
+  /* Ship click or host tab: the panel switches to that host's crew. Acting (spawn, attach) happens from the panel. */
+  function hostClicked(host) {
+    if (!hostList.length) return;
+    const next = host && hostList.some(entry => entry.id === host) ? host : null;
+    if (next === selectedHost) return;
+    selectedHost = next; selectedRepoId = null;
+    if (selected && (byId.get(selected)?.host || null) !== next) selected = null;
+    if (latest) render(latest, true);
+  }
+  const hostName = host => host || 'This machine';
+  function hostHealthText(host, sources, count) {
+    const source = host ? sources?.[host] : sources?.local, agents = count + ' agent' + (count === 1 ? '' : 's');
+    if (!source || source.health === 'available') return { text: 'Live · ' + agents, live: true };
+    if (source.health === 'stale') return { text: 'Stale · last seen ' + (source.observedAt ? ObserverModel.age(source.observedAt) : 'never') + ' · ' + agents, live: false };
+    return { text: 'Unreachable · ' + (source.reason || 'no connection') + (count ? ' · last known ' + agents : ''), live: false };
+  }
+  const hostTabNodes = new Map();
+  function renderHosts(hosts, sources, rows, panelRows) {
+    const tabs = get('host-tabs'), health = get('host-health'), title = get('crew-title'), spawnBox = get('host-spawn');
+    if (!hosts.length) {
+      if (tabs) tabs.hidden = true; if (health) health.hidden = true; if (spawnBox) spawnBox.hidden = true;
+      if (title) setText(title, 'Your local crew');
+      return;
+    }
+    const all = [null, ...hosts.map(host => host.id)];
+    for (const key of hostTabNodes.keys()) if (!all.includes(key)) hostTabNodes.delete(key);
+    const nodes = all.map(host => {
+      let tab = hostTabNodes.get(host);
+      if (!tab) {
+        tab = text('button', 'host-tab', ''); tab.type = 'button'; tab.setAttribute('role', 'tab'); tab.dataset.host = host || '';
+        tab.addEventListener('click', () => hostClicked(host)); hostTabNodes.set(host, tab);
+      }
+      const source = host ? sources?.[host] : sources?.local, live = !source || source.health === 'available';
+      tab.className = 'host-tab' + (host ? ' remote' : '') + (live ? ' live' : '');
+      const label = hostName(host), count = rows.filter(row => (row.host || null) === host).length;
+      if (tab.dataset.label !== label + ' · ' + count) { tab.replaceChildren(text('span', 'host-dot', ''), text('span', 'host-label', label + ' · ' + count)); tab.dataset.label = label + ' · ' + count; }
+      tab.setAttribute('aria-selected', String(host === selectedHost));
+      return tab;
+    });
+    if (tabs) { tabs.replaceChildren(...nodes); tabs.hidden = false; }
+    if (title) setText(title, hostName(selectedHost) + ' crew');
+    const state = hostHealthText(selectedHost, sources, panelRows.length);
+    if (health) { setText(health, state.text); health.className = 'host-health ' + (state.live ? 'live' : 'down'); health.hidden = false; }
+    // "New agent in ~": always offered on a remote host (and on this machine when it has no agents), control on.
+    if (spawnBox) {
+      const offer = CONTROL && state.live && (selectedHost !== null || !panelRows.length);
+      spawnBox.hidden = !offer;
+      if (offer && spawnBox.dataset.host !== (selectedHost || '')) {
+        const plus = text('button', 'project-spawn', '+'); plus.type = 'button';
+        plus.title = 'Start a new Claude agent in the home folder on ' + hostName(selectedHost); plus.setAttribute('aria-label', plus.title);
+        const host = selectedHost;
+        plus.addEventListener('click', () => controlAction(plus, 'spawn-host', host || 'local', 'Starting an agent on ' + hostName(host) + '…'));
+        spawnBox.replaceChildren(text('span', 'host-spawn-label', 'New agent in ~'), plus); spawnBox.dataset.host = selectedHost || '';
+      }
+    }
   }
   /* Observatory click: select the seated overseer, or (with control on) offer to start one. */
   function observatoryClicked() {
@@ -441,7 +497,7 @@
     const zoom = text('button', 'project-zoom', '⤢'); zoom.type = 'button'; zoom.addEventListener('click', () => zoomProject(key));
     heading.append(text('span', 'project-swatch', ''), label, kind, total, zoom);
     if (CONTROL) {
-      const spawn = text('button', 'project-spawn', '+'); spawn.type = 'button'; spawn.title = 'Start a new Claude agent in this project (new Herdr tab, terminal opens)';
+      const spawn = text('button', 'project-spawn', '+'); spawn.type = 'button'; spawn.title = 'Start a new Claude agent in this project (new Herdr tab; select it and press ⇱ to attach)';
       spawn.setAttribute('aria-label', 'Start a new Claude agent in this project');
       spawn.addEventListener('click', () => {
         const seed = (lastGroups.get(key) || []).find(row => row.source === 'herdr' && row.paneId);
@@ -507,16 +563,23 @@
     const stale = rowStale(row), helper = isHelper(row), chip = row.source === 'desktop' ? 'APP' : helper ? 'HELPER' : '';
     // Working emphasis is the row's own fresh status; a stale "was working" row is only highlighted.
     const inRepo = selectedRepoId !== null && row.repoId === selectedRepoId, working = inRepo && !stale && row.status === 'working';
-    const itemClass = 'session-item' + (helper ? ' helper' : '') + (inRepo ? ' repo-selected' : '') + (working ? ' repo-working' : '');
+    const needsInput = !stale && row.status === 'blocked' && row.source === 'herdr';
+    const itemClass = 'session-item' + (helper ? ' helper' : '') + (inRepo ? ' repo-selected' : '') + (working ? ' repo-working' : '') + (needsInput ? ' needs-input' : '');
     if (entry.item.className !== itemClass) entry.item.className = itemClass;
     entry.mark.hidden = !inRepo; setText(entry.mark, working ? '◆◆' : inRepo ? '◆' : '');
     setText(entry.markText, working ? 'Highlighted repository, working now' : inRepo ? 'Highlighted repository' : '');
     entry.item.style.setProperty('--depth', String(Math.min(depth, 4)));
     entry.button.setAttribute('aria-pressed', String(selected === row.id));
     entry.provider.className = 'provider ' + row.provider; setText(entry.provider, workerName(row)); if (entry.provider.title !== workerName(row)) entry.provider.title = workerName(row);
-    entry.status.className = 'status ' + row.status; setText(entry.status, (stale ? 'was ' : '') + (row.status === 'blocked' ? 'waiting' : row.status));
+    entry.status.className = 'status ' + row.status; setText(entry.status, (stale ? 'was ' : '') + (row.status === 'blocked' ? (needsInput ? 'waiting for input' : 'waiting') : row.status));
+    const hint = needsInput ? 'Waiting for input — press ⇱ to attach' : '';
+    if ((entry.item.title || '') !== hint) entry.item.title = hint;
     entry.source.hidden = !chip; setText(entry.source, chip);
-    if (entry.attach) { const can = row.source === 'herdr' && !!row.paneId && !stale; entry.attach.hidden = !can; entry.close.hidden = !can; }
+    if (entry.attach) {
+      const can = row.source === 'herdr' && !!row.paneId && !stale; entry.attach.hidden = !can; entry.close.hidden = !can;
+      const attachClass = 'row-attach' + (needsInput ? ' prominent' : ''); if (entry.attach.className !== attachClass) entry.attach.className = attachClass;
+      entry.attach.title = needsInput ? 'Waiting for input — open a terminal attached to this agent' : 'Open a terminal attached to this agent';
+    }
     setText(entry.title, composedTask(row) ? taskText(row) : row.title);
     const toolLive = !Number.isFinite(row.tool?.observedAt) || fresh(row.tool.observedAt);
     const last = toolLive && row.tool?.available && row.tool.last;
@@ -730,6 +793,15 @@
     const hostSources = data?.sources?.hosts || null;
     const hosts = hostSources ? Object.keys(hostSources).filter(id => id !== 'local').sort().map(id => ({ id, health: hostSources[id].health,
       observedAt: hostSources[id].observedAt ?? null, reason: hostSources[id].reason || null, agents: hostSources[id].agents ?? 0 })) : [];
+    hostList = hosts;
+    if (selectedHost !== null && !hosts.some(host => host.id === selectedHost)) selectedHost = null;
+    // A just-spawned agent is selected once it appears in the roster.
+    if (pendingSpawn) {
+      const spawned = rows.find(row => row.paneId === pendingSpawn.paneId);
+      if (spawned) { pendingSpawn = null; Promise.resolve().then(() => select(spawned.id, true)); }
+      else if (Date.now() > pendingSpawn.until) pendingSpawn = null;
+    }
+    const panelRows = hosts.length ? rows.filter(row => (row.host || null) === selectedHost) : rows;
     layout.reconcile(rows.filter(row => row !== overseerRow));
     if (selected && !byId.has(selected)) { overview(); }
     if (page >= layout.pages()) setPage(layout.pages() - 1);
@@ -758,11 +830,13 @@
     const projects = new Set(rows.map(ObserverModel.projectKey));
     setText(get('room-count'), projects.size + ' projects · ' + onFloor.length + ' workers on this deck');
     // Working and waiting count only rows whose own source is live; the rest are reported as last known.
-    const current = stale ? rows : rows.filter(row => !rowStale(row, state)), behind = rows.length - current.length;
+    const current = stale ? panelRows : panelRows.filter(row => !rowStale(row, state)), behind = panelRows.length - current.length;
     const working = current.filter(row => row.status === 'working').length, blocked = current.filter(row => row.status === 'blocked').length;
-    setText(get('counts'), (stale ? 'Last known: ' : '') + working + ' working · ' + blocked + ' waiting · ' + rows.length + ' total' + (behind ? ' · ' + behind + ' last known' : ''));
+    setText(get('counts'), (stale ? 'Last known: ' : '') + working + ' working · ' + blocked + ' waiting · ' + panelRows.length + ' total' + (behind ? ' · ' + behind + ' last known' : ''));
+    renderHosts(hosts, hostSources, rows, panelRows);
     renderMail(bus);
-    renderSessions(rows, stale, messages, bus);
+    renderSessions(panelRows, stale, messages, bus);
+    if (hosts.length && !panelRows.length && !stale) setText(get('empty'), 'No sessions on ' + (selectedHost || 'this machine') + '.');
     for (const entry of panels) if (entry.target.kind === 'agent') entry.view.roster();
   }
   // Never awaited: stalled or failed sprite assets must not hold back the inventory. Crew paint the fallback silhouette until sets load.

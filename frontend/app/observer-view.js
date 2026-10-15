@@ -22,6 +22,21 @@ const ObserverView = (() => {
   const P = Scene.project;
 
   // ---------- pure helpers (exported for tests) ----------
+  // An agent needs attention when its own fresh status is blocked: Herdr's state for a prompt or dialog awaiting input.
+  const needsAttention = (worker, stale) => !stale && !!worker && !!worker.row && worker.row.status === 'blocked';
+  /* Pixel-art attention badge centred on (x, bottom): an amber plate with a dark rim and a white "!" built from
+     rectangles, with a small pointer toward the head. Screen space; returns its box for hit/test bookkeeping. */
+  function paintAttention(ctx, x, bottom) {
+    const w = 14, h = 18, left = Math.round(x - w / 2), top = Math.round(bottom - h - 4);
+    ctx.save();
+    ctx.fillStyle = '#1a0e04'; ctx.fillRect(left - 2, top - 2, w + 4, h + 4);
+    ctx.fillStyle = '#ff5a3a'; ctx.fillRect(left - 1, top - 1, w + 2, h + 2);
+    ctx.fillStyle = STATUS.blocked; ctx.fillRect(left, top, w, h);
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(left + 5, top + 3, 4, 8); ctx.fillRect(left + 5, top + 13, 4, 3);
+    ctx.fillStyle = '#ff5a3a'; ctx.fillRect(left + 5, top + h + 1, 4, 2); ctx.fillRect(left + 6, top + h + 3, 2, 2);
+    ctx.restore();
+    return { left: left - 2, top: top - 2, width: w + 4, height: h + 7 };
+  }
   /* Idle age tint for a crew body: level 0 is untouched; full age is mostly greyscale and 55% darker, still readable
      against the deck. Quantised levels come from the model, so the filter string changes only a handful of times. */
   function idleFilter(level) {
@@ -246,6 +261,19 @@ const ObserverView = (() => {
       isoEllipse(ctx, { x: ship.dock.x + ship.dock.w / 2, y: ship.dock.y + ship.dock.h / 2, z: 0.32 }, 0.8, rim, null, 2);
     }
   }
+  /* A docking bridge between ships: the station's grate walkway on a deeper truss, with side light strips that are
+     lit amber while the far ship is reachable and dark and dashed while it is stale or unreachable. The running
+     lights that travel along it are painted per frame (paintBridgeLights). */
+  function paintBridge(ctx, bridge) {
+    const r = bridge.rect; if (!(r.h > 0)) return;
+    const live = bridge.health === 'available';
+    prism(ctx, corners(r), -0.35, -1.6, { top: '#0c0f12', left: '#080a0c', right: '#0e1114' });
+    paintWalkway(ctx, { kind: 'bridge', rect: r });
+    for (let y = r.y + 1; y < r.y + r.h; y += 3) for (const x of [r.x, r.x + r.w]) line(ctx, { x, y, z: 0 }, { x, y: y + 1.5, z: -1.6 }, '#1a2026', 1, 0.8);
+    ctx.save(); ctx.lineWidth = 2; ctx.globalAlpha = live ? 0.85 : 0.45; if (!live) ctx.setLineDash([4, 4]);
+    for (const x of [r.x, r.x + r.w]) line(ctx, { x, y: r.y, z: 0.32 }, { x, y: r.y + r.h, z: 0.32 }, live ? PALETTE.amber : STATUS.unknown, 2);
+    ctx.restore();
+  }
   function paintStatic(ctx, scene) {
     const hub = scene.mail.rect;
     for (const ship of scene.ships || []) paintHull(ctx, ship);
@@ -257,6 +285,7 @@ const ObserverView = (() => {
         return { key: center(rect).x + center(rect).y + (walkway.kind === 'connector' ? 40 : 0), paint: () => rect.w > 0 && paintWalkway(ctx, { ...walkway, rect }) };
       }),
       { key: center(hub).x + center(hub).y + 0.01, paint: () => paintHub(ctx, scene.mail) },
+      ...(scene.bridges || []).map(bridge => ({ key: center(bridge.rect).x + center(bridge.rect).y, paint: () => paintBridge(ctx, bridge) })),
       ...(scene.observatory ? [{ key: middle(scene.observatory.rect), paint: () => paintObservatoryDeck(ctx, scene.observatory) }] : [])
     ].sort((a, b) => a.key - b.key);
     for (const piece of pieces) piece.paint();
@@ -386,7 +415,7 @@ const ObserverView = (() => {
   }
 
   // ---------- the view ----------
-  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onObservatory = () => {}, onShip = null, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, idleVigour = () => 1, onCamera = () => {}, env = {} }) {
+  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onObservatory = () => {}, onShip = null, hostSelection = () => undefined, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, idleVigour = () => 1, onCamera = () => {}, env = {} }) {
     const win = env.window || (typeof window !== 'undefined' ? window : {});
     const raf = env.raf || (fn => win.requestAnimationFrame(fn)), caf = env.caf || (id => win.cancelAnimationFrame(id));
     const dprOf = env.dpr || (() => win.devicePixelRatio || 1);
@@ -416,9 +445,19 @@ const ObserverView = (() => {
        screen boxes for the scene and camera they were drawn with; after any change to either they hit nothing until
        the next paint, so a stale box can never toggle whichever repository the moved view now shows there. */
     let signRegions = [], plateFrame = null, repositories = new Set(), repositorySelection = () => null, onRepositoryToggle = () => {};
-    let observatoryRegion = null, shipRegions = [];
-    // Ship hull labels are spawn targets only when the page passes onShip (control actions on).
-    const shipAt = point => paintedFrameCurrent() && shipRegions.find(r => point.x >= r.left && point.x <= r.left + r.width && point.y >= r.top && point.y <= r.top + r.height) || null;
+    let observatoryRegion = null, shipRegions = [], attentionRegions = [];
+    /* A ship is a selection target (its label, or anywhere on its hull floor) when the page passes onShip. The
+       panel then lists that host's crew; nothing is started from the canvas. */
+    const shipAt = point => {
+      if (!onShip || !paintedFrameCurrent()) return null;
+      const label = shipRegions.find(r => point.x >= r.left && point.x <= r.left + r.width && point.y >= r.top && point.y <= r.top + r.height);
+      if (label) return label;
+      const floor = Scene.fromScreen(point, camera);
+      // Remote ships first: the flagship hull is large and must not swallow a click on a docked ship's floor.
+      const ships = (scene && scene.ships || []).slice().sort((a, b) => Number(a.local) - Number(b.local));
+      const hit = ships.find(ship => floor.x >= ship.rect.x && floor.x <= ship.rect.x + ship.rect.w && floor.y >= ship.rect.y && floor.y <= ship.rect.y + ship.rect.h);
+      return hit ? { host: hit.local ? null : hit.id } : null;
+    };
     const observatoryAt = point => paintedFrameCurrent() && observatoryRegion && point.x >= observatoryRegion.left && point.x <= observatoryRegion.left + observatoryRegion.width && point.y >= observatoryRegion.top && point.y <= observatoryRegion.top + observatoryRegion.height;
     const paintedFrameCurrent = () => !!plateFrame && plateFrame.scene === scene && plateFrame.zoom === camera.zoom && plateFrame.tx === camera.tx && plateFrame.ty === camera.ty;
     const signAt = point => {
@@ -720,6 +759,22 @@ const ObserverView = (() => {
       if (animate) { paintShootingStars(now); paintShuttle(now); }
     }
 
+    /* Bridge running lights: pulses travel from the far dock toward the mailroom while the host is reachable (the
+       direction mail and crew take); a dead link shows a single dim, still lamp at each end. FX adds sparks. */
+    function paintBridgeLights(bridge, now, animate) {
+      const r = bridge.rect; if (!(r.h > 0)) return;
+      if (bridge.health !== 'available') {
+        for (const y of [r.y + 0.5, r.y + r.h - 0.5]) isoEllipse(ctx, { x: r.x + r.w / 2, y, z: 0.35 }, 0.12, null, STATUS.unknown);
+        return;
+      }
+      const spacing = 6, phase = animate ? (now / 900) % 1 : 0.4;
+      for (let k = 0; k * spacing < r.h + spacing; k++) {
+        const y = r.y + r.h - ((k + phase) * spacing) % (r.h + 0.001); if (y < r.y || y > r.y + r.h) continue;
+        for (const x of [r.x, r.x + r.w]) glow(ctx, { x, y, z: 0.4 }, 10, PALETTE.amber, 0.55);
+        isoEllipse(ctx, { x: r.x + r.w / 2, y, z: 0.36 }, 0.1, null, PALETTE.window);
+      }
+      if (fx && animate) for (const end of [bridge.from, bridge.to]) { const a = P({ x: end.x, y: end.y, z: 0.5 }); sparks(a.x, a.y, 'bridge' + bridge.host + end.y, now, { count: 6, color: PALETTE.amber, alt: '#ffffff', rise: 22, spread: 18, life: 1300, size: 2 }); }
+    }
     // ---------- FX: glow and sparks on the station itself (world space, deterministic) ----------
     // A burst of rising pixel sparks around a screen point. Each spark loops on its own phase so there is no state.
     function sparks(x, y, key, now, { count = 6, color = '#ffffff', alt = null, rise = 18, spread = 14, life = 1400, size = 2, gravity = 0 } = {}) {
@@ -1031,7 +1086,7 @@ const ObserverView = (() => {
       return text.slice(0, cut).trimEnd() + '…';
     }
     const signSize = base => Math.max(12, Math.min(22, base * camera.zoom));
-    function paintPlates(isStale, staleKeys) {
+    function paintPlates(isStale, staleKeys, now = 0, animate = false) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       const tier = lodFor(camera.zoom), plates = [], screen = point => Scene.toScreen(point, camera), selectedRepo = repositorySelection();
       for (const platform of scene.platforms) {
@@ -1050,10 +1105,10 @@ const ObserverView = (() => {
         const r = ship.rect, at = screen({ x: r.x + r.w / 2, y: r.y, z: 4 }), live = shipLive(ship);
         const seen = !live && ship.observedAt ? ' · last seen ' + Model.age(ship.observedAt) : '';
         const label = ship.local ? '● THIS MACHINE' : (live ? '● ' : '○ ') + String(ship.id).toUpperCase() + ' · ' + (ship.agents || 0) + ' agent' + (ship.agents === 1 ? '' : 's') +
-          (live ? '' : ship.health === 'stale' ? ' · STALE' + seen : ' · ' + (ship.reason || 'unreachable')) + (onShip && (ship.local || live) ? '  ＋ agent' : '');
+          (live ? '' : ship.health === 'stale' ? ' · STALE' + seen : ' · ' + (ship.reason || 'unreachable'));
         const color = ship.local ? PALETTE.cyan : live ? PALETTE.amber : STATUS.unknown;
         plates.push({ ...textPlate(clipText(label, viewport.width * 0.5, signSize(20)), at.x, at.y, { accent: color, size: signSize(20), color, priority: 48, dash: live ? null : [3, 3] }),
-          ...(onShip && (ship.local || live) ? { ship: { host: ship.local ? null : ship.id } } : {}) });
+          ...(onShip ? { ship: { host: ship.local ? null : ship.id } } : {}) });
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
       plates.push(textPlate('MAILROOM · llm-bus', hubAt.x, hubAt.y, { accent: PALETTE.amber, size: signSize(18), color: PALETTE.window, priority: 45 }));
@@ -1085,6 +1140,16 @@ const ObserverView = (() => {
       // Repository hits are likewise only accepted, drawn section signs; platform headings and dropped signs have none.
       signRegions = accepted.filter(plate => plate.repo).map(plate => ({ repo: plate.repo, left: plate.x, top: plate.y, width: plate.w, height: plate.h }));
       shipRegions = accepted.filter(plate => plate.ship).map(plate => ({ host: plate.ship.host, left: plate.x, top: plate.y, width: plate.w, height: plate.h }));
+      /* Needs attention: a fresh blocked agent (startup dialog, permission prompt) carries a "!" badge above its head,
+         drawn in screen pixels so it reads at every zoom, overview included. Per-frame like the body; never cached. */
+      attentionRegions = [];
+      for (const region of anchors) {
+        const worker = workerIndex.get(region.id);
+        if (!worker || !needsAttention(worker, workerStale(worker))) continue;
+        const bob = animate && !reducedMotion() ? Math.round(Math.sin(now / 380 + hash(worker.id) % 7) * 2) : 0;
+        const box = paintAttention(ctx, region.head.x, region.head.y - (tier === 'overview' ? 14 : 34) + bob);
+        attentionRegions.push({ id: region.id, ...box });
+      }
       const obsPlate = accepted.find(plate => plate.observatory); observatoryRegion = obsPlate ? { left: obsPlate.x, top: obsPlate.y, width: obsPlate.w, height: obsPlate.h } : null;
       plateFrame = { scene, zoom: camera.zoom, tx: camera.tx, ty: camera.ty };
       // Hover brackets around the real painted extent.
@@ -1127,6 +1192,7 @@ const ObserverView = (() => {
       ctx.strokeStyle = PALETTE.rail; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(at.x, at.y); ctx.lineTo(at.x, at.y - 14); ctx.stroke(); ctx.lineWidth = 1;
       ctx.fillStyle = '#3a444e'; ctx.beginPath(); ctx.ellipse(at.x, at.y - 16, 14 * Math.abs(Math.cos(sweep)) + 3, 6, 0, 0, Math.PI * 2); ctx.fill();
       glow(ctx, { ...top, z: 3.9 }, 22, PALETTE.amber, animate ? 0.35 + 0.3 * Math.max(0, Math.sin(now / 4000 * Math.PI * 2)) : 0.35);
+      for (const bridge of scene.bridges || []) paintBridgeLights(bridge, now, animate);
       // Depth-sorted solid furniture, apron posts and crew. Wholly offscreen furniture is never submitted; every crew
       // body is submitted so its sprite state advances, and the shared sprite seam skips its pixels when off stage.
       const items = [], zoom = camera.zoom;
@@ -1190,11 +1256,18 @@ const ObserverView = (() => {
       // A zoomed platform keeps a thin outline in its accent, so platform focus reads as a mode.
       const zoomed = mode === 'platform' && scene.platforms.find(value => value.key === platform);
       if (zoomed) { ctx.save(); ctx.lineWidth = 2 / zoom; poly(ctx, rectPoly(zoomed.rect, 0.02), null, zoomed.accent); ctx.restore(); }
+      // The host whose crew the panel lists: its hull rim is drawn solid and bright over the dashed static rim.
+      const chosenHost = scene.ships ? hostSelection() : undefined;
+      const chosenShip = chosenHost !== undefined && scene.ships.find(ship => (ship.local ? null : ship.id) === chosenHost);
+      if (chosenShip) {
+        ctx.save(); ctx.lineWidth = 2.5 / Math.max(zoom, 0.25); ctx.globalAlpha = animate ? 0.75 + 0.2 * Math.sin(now / 700) : 0.9;
+        poly(ctx, rectPoly(chosenShip.rect, -2.4), null, chosenShip.local ? PALETTE.cyan : shipLive(chosenShip) ? PALETTE.amber : STATUS.unknown); ctx.restore();
+      }
       paintMail(mail, now, animate);
       if (isStale) { ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.save(); ctx.globalCompositeOperation = 'saturation'; ctx.fillStyle = 'rgba(128,128,128,0.45)'; ctx.fillRect(0, 0, viewport.width, viewport.height); ctx.restore(); }
       // Hovering a worker's own name plate keeps it hovered, so the plate stays put to be clicked.
       if (pointer) { hovered = Scene.hitTest(pointer, regions) || titleAt(pointer); canvas.style.cursor = drag && drag.moved ? 'grabbing' : hovered || signAt(pointer) ? 'pointer' : 'grab'; }
-      paintPlates(isStale, staleKeys);
+      paintPlates(isStale, staleKeys, now, animate);
       return animate;
     }
     // Live scenes keep animating; a frozen scene stops after this paint until something invalidates it.
@@ -1308,14 +1381,14 @@ const ObserverView = (() => {
       if (observer) { observer.disconnect(); observer = null; }
       while (watchers.length) watchers.pop()();
       readiness.clear();
-      pointers.clear(); drag = null; pinch = null; pointer = null; hovered = null; tap = null; titleRegions = []; signRegions = []; shipRegions = []; plateFrame = null;
+      pointers.clear(); drag = null; pinch = null; pointer = null; hovered = null; tap = null; titleRegions = []; signRegions = []; shipRegions = []; attentionRegions = []; plateFrame = null;
     }
     function setFx(on) { on = !!on; if (on === fx) return fx; fx = on; invalidate(); return fx; }
     return { update, focus, focusPlatform, overview, zoomBy, start, stop, paint, limits, invalidate, setFx, fx: () => fx,
       camera: () => ({ ...camera }), mode: () => mode, platform: () => platform, hitRegions: () => regions.map(region => ({ ...region })), hovered: () => hovered,
       cacheBuilds: () => (staticLayer ? staticLayer.builds : 0), running: () => running, titleRegions: () => titleRegions.map(region => ({ ...region })),
-      signRegions: () => signRegions.map(region => ({ ...region })) };
+      signRegions: () => signRegions.map(region => ({ ...region })), attentionRegions: () => attentionRegions.map(region => ({ ...region })) };
   }
-  return { create, idleFilter, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
+  return { create, needsAttention, paintAttention, idleFilter, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverView;

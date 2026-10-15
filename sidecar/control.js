@@ -2,10 +2,11 @@
 /* sidecar/control.js — the only place the observer mutates anything, and only when OBSERVER_CONTROL=1.
 
    Three actions, each targeting a Herdr pane id the page already shows:
-     attach(paneId)  open a macOS Terminal window running `herdr agent attach <pane>`
-     spawn(paneId)   new tab in that pane's workspace and cwd, start Claude there, then attach a Terminal to it
+     attach(paneId)  open a macOS Terminal window running `herdr agent attach <pane>` (the only action that opens one)
+     spawn(paneId)   new tab in that pane's workspace and cwd, start Claude there; no Terminal (the page selects it)
      close(paneId)   close the pane (ends the agent); the page asks the user to confirm first
      spawnHost(host, cwd) start Claude in a folder on a host (local or remote) even if it has no agents yet
+   Spawned agents run unattended; one stopped at a startup dialog shows as blocked until someone attaches.
    Every target is validated against the same pane-id shape the reader accepts, and attach/close additionally
    require Herdr to report an agent in that pane, so an arbitrary pane id cannot be closed through here.
 
@@ -143,7 +144,6 @@ function makeControl(options = {}) {
     const target = created && created.root_pane && created.root_pane.pane_id;
     if (!validPane(target)) throw new Error('tab create returned no pane');
     await startIn(target, name, host);
-    await openTerminal(target, host);
     return { ok: true, action: 'spawn', paneId: shown(host, target), name, project: path.posix.basename(pane.cwd) };
   }
   /* Start Claude in a folder on any configured host, even one with no agents yet. The folder is home unless the page
@@ -166,7 +166,6 @@ function makeControl(options = {}) {
     const target = created && created.root_pane && created.root_pane.pane_id;
     if (!validPane(target)) throw new Error((existing ? 'tab' : 'workspace') + ' create returned no pane');
     await startIn(target, name, host);
-    await openTerminal(target, host);
     return { ok: true, action: 'spawn-host', host, paneId: shown(host, target), name, folder: cwd };
   }
   // Start Claude in that pane, tolerating a startup dialog (trust folder, resume picker), which makes `agent start`
@@ -194,7 +193,6 @@ function makeControl(options = {}) {
     const target = created && created.root_pane && created.root_pane.pane_id;
     if (!validPane(target)) throw new Error('workspace create returned no pane');
     await startIn(target, 'overseer');
-    await openTerminal(target);
     return { ok: true, action: 'overseer', paneId: target, name: 'overseer', home: overseerHome };
   }
   async function close(id) {

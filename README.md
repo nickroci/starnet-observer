@@ -185,7 +185,7 @@ OBSERVER_CONTROL=1 bun run start
 
 | Button | Where | What it does |
 | --- | --- | --- |
-| `+` | project heading | Opens a new Herdr tab in that project's folder, starts `claude` in it, and opens a Terminal window attached to it. |
+| `+` | project heading | Opens a new Herdr tab in that project's folder and starts `claude` in it. No terminal opens; the new agent is selected in the panel when it appears. Use `⇱` to attach. A new agent stopped at a startup dialog (for example "trust this folder") shows as blocked until you attach and answer it. |
 | `⇱` | session row | Opens a Terminal window attached to that pane with `herdr agent attach --takeover`, so it takes input even if another terminal was attached. Detach with `ctrl+b q`; the agent keeps running. |
 | `✕` | session row | Closes the Herdr pane, ending that agent. The page asks you to confirm first. |
 
@@ -193,7 +193,7 @@ Agents are grouped on the station by project (one deck), then by repository and 
 
 Clicking the **OBSERVATORY** sign on the station selects the overseer if one is running, or offers to start one. The overseer is an ordinary Claude session in a Herdr workspace named `overseer`, started in `~/.local/share/starnet-observer/overseer` with a `CLAUDE.md` brief on using Herdr and llm-bus to watch and coordinate the other agents (edit that file to change its standing orders; it is written once). Any Herdr agent named `overseer` takes the observatory chair instead of a project deck.
 
-Set `OBSERVER_CLAUDE_ARGS` to pass flags to the spawned `claude`, for example `OBSERVER_CLAUDE_ARGS="--dangerously-skip-permissions"`. Terminal launching uses macOS Terminal.app.
+Set `OBSERVER_CLAUDE_ARGS` to pass flags to the spawned `claude`, for example `OBSERVER_CLAUDE_ARGS="--dangerously-skip-permissions"`. Only `⇱` opens a terminal (macOS Terminal.app); spawning runs the agent unattended.
 
 The control routes are `POST`-only, require the same per-launch token and local origin as the read routes, validate the pane id shape, and ask Herdr to confirm an agent exists in the pane before attaching to or closing it. Without `OBSERVER_CONTROL=1` the server still rejects every non-GET request, and the buttons are not rendered.
 
@@ -214,8 +214,13 @@ inspection never reaches a remote, and llm-bus mail is shown for this machine on
 With `OBSERVER_CONTROL=1`, control actions also work on remote agents: `⇱`, `✕` and the project `+` run `herdr` on
 that host over the same non-interactive ssh (every argument validated and single-quoted; hosts not listed in
 `remotes` are refused), and attaching opens a Terminal running `ssh -t <host> 'herdr agent attach <pane> --takeover'`.
-Clicking a ship's hull label (`＋ agent`) starts Claude in that host's home folder, even on a host with no agents yet,
-reusing the Herdr workspace named after the folder or creating it.
+Remote ships dock in a line below this machine's station, each joined to the mailroom by a bridge that is lit while
+the host is reachable and dark when it is not; remote crew route over it. Clicking a ship (or a host tab above the
+Live sessions list) switches the list to that host's crew. On a remote host the list starts with a "New agent in ~"
+row whose `+` starts Claude in that host's home folder, even on a host with no agents yet, reusing the Herdr
+workspace named after the folder or creating it. Starting an agent never opens a terminal: the new agent is selected
+when it appears. An agent waiting for input (for example Claude's "trust this folder" dialog) shows a "!" badge on
+the station and "waiting for input" in its row; press `⇱` to attach and answer it.
 
 ## Privacy and limits
 

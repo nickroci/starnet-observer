@@ -67,13 +67,50 @@ function element() {
   assert.equal(remoteItem.children[3].hidden, false, 'a live remote pane gets attach');
   remoteItem.children[3].handlers.click(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(lastPost(), JSON.stringify(['/api/control/attach', { paneId: 'herdr-dev-2/w1:p2' }]));
-  // A ship hull click confirms, then asks the host to start an agent in its home folder; "no" sends nothing.
-  assert.equal(typeof viewOptions.onShip, 'function', 'ship hulls are spawn targets with control on');
-  const before = posts.length; confirmAnswer = false; viewOptions.onShip('herdr-dev-2'); await new Promise(resolve => setImmediate(resolve));
-  assert.equal(posts.length, before); assert.match(confirms.at(-1), /Start a new Claude agent on herdr-dev-2\?/);
-  confirmAnswer = true; viewOptions.onShip('herdr-dev-2'); await new Promise(resolve => setImmediate(resolve));
+  // ── Multi-host panel: host tabs and ship clicks choose whose crew is listed; nothing starts from the canvas.
+  assert.equal(typeof viewOptions.onShip, 'function', 'ship clicks are selection targets');
+  const hosts = { local: { health: 'available', observedAt: Date.now(), reason: null, agents: 1 }, 'herdr-dev-2': { health: 'available', observedAt: Date.now(), reason: null, agents: 1 }, empty: { health: 'available', observedAt: Date.now(), reason: null, agents: 0 } };
+  const blocked = { ...remote, status: 'blocked' };
+  const multi = () => listener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: Date.now(), sources: { hosts } } });
+  multi();
+  const tabs = elements['host-tabs'];
+  assert.equal(tabs.hidden, false); assert.deepEqual(tabs.children.map(tab => tab.dataset.host), ['', 'empty', 'herdr-dev-2'], 'one tab per host, this machine first');
+  assert.equal(tabs.children[0].attributes['aria-selected'], 'true'); assert.equal(elements['crew-title'].textContent, 'This machine crew');
+  const listed = () => elements.sessions.children.flatMap(section => section.children[2].children).map(item => item.children[0].dataset.sessionId);
+  assert.deepEqual(listed(), [sessions[0].id], 'this machine lists only local rows');
+  assert.equal(elements['host-spawn'].hidden, true, 'no "New agent in ~" row for a local host that has agents');
+  const confirmsBefore = confirms.length, postsBefore = posts.length;
+  viewOptions.onShip('herdr-dev-2');
+  assert.equal(posts.length, postsBefore, 'a ship click starts nothing'); assert.equal(confirms.length, confirmsBefore, 'and asks nothing');
+  assert.equal(elements['crew-title'].textContent, 'herdr-dev-2 crew'); assert.equal(viewOptions.hostSelection(), 'herdr-dev-2');
+  assert.deepEqual(listed(), [remote.id], 'the panel switches to that host');
+  assert.match(elements['host-health'].textContent, /^Live · 1 agent$/);
+  // Blocked: the row reads "waiting for input", carries the attach hint and a prominent attach button.
+  const blockedItem = elements.sessions.children.flatMap(section => section.children[2].children)[0];
+  assert.equal(blockedItem.title, 'Waiting for input — press ⇱ to attach'); assert.match(blockedItem.className, /needs-input/);
+  assert.match(blockedItem.children[3].className, /prominent/);
+  const walk = node => [node, ...(node.children || []).flatMap(walk)], statusNode = walk(blockedItem).find(node => /^status /.test(node.className || ''));
+  assert.ok(statusNode, 'fixture: the row has a status chip'); assert.equal(statusNode.textContent, 'waiting for input');
+  // "New agent in ~" on a remote host posts spawn-host for that host; the panel then selects the agent when it appears.
+  const spawnRow = elements['host-spawn']; assert.equal(spawnRow.hidden, false); assert.equal(spawnRow.children[0].textContent, 'New agent in ~');
+  spawnRow.children[1].handlers.click(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(lastPost(), JSON.stringify(['/api/control/spawn-host', { host: 'herdr-dev-2' }]));
-  viewOptions.onShip(null); await new Promise(resolve => setImmediate(resolve));
-  assert.equal(lastPost(), JSON.stringify(['/api/control/spawn-host', { host: null }]), 'the local ship spawns on this machine');
-  console.log('control UI: buttons only on live Herdr panes, close confirms first, attach/close/spawn post the shown pane id, remote rows and ship spawn OK');
+  assert.doesNotMatch(elements['control-notice']?.textContent || document.body.children.at(-1).textContent, /terminal/i, 'spawn never says a terminal is opening');
+  // The fake returns paneId 'w1:pX': once a row with that pane appears, it is selected (and the panel follows its host).
+  const spawned = { ...sessions[0], id: 'obs_' + 'd'.repeat(24), paneId: 'w1:pX', title: 'Spawned', observedAt: Date.now() };
+  listener({ data: { sessions: [sessions[0], blocked, spawned], health: 'available', observedAt: Date.now(), sources: { hosts } } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(elements['crew-title'].textContent, 'This machine crew', 'selecting the spawned local agent switches the panel to its host');
+  // Host tab click and an empty host: its "New agent in ~" row is the way in.
+  tabs.children.find(tab => tab.dataset.host === 'empty').handlers.click();
+  assert.equal(elements['crew-title'].textContent, 'empty crew'); assert.deepEqual(listed(), []);
+  assert.equal(elements['host-spawn'].hidden, false); assert.equal(elements.empty.textContent, 'No sessions on empty.');
+  // A host that disappears falls back to this machine.
+  listener({ data: { sessions: [sessions[0]], health: 'available', observedAt: Date.now(), sources: { hosts: { local: hosts.local, 'herdr-dev-2': hosts['herdr-dev-2'] } } } });
+  assert.equal(elements['crew-title'].textContent, 'This machine crew');
+  // Selecting a remote agent on the canvas switches the panel to its host.
+  listener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: Date.now(), sources: { hosts: { local: hosts.local, 'herdr-dev-2': hosts['herdr-dev-2'] } } } });
+  viewOptions.onSelect(blocked.id);
+  assert.equal(elements['crew-title'].textContent, 'herdr-dev-2 crew');
+  console.log('control UI: buttons only on live Herdr panes, close confirms first, attach/close/spawn post the shown pane id, remote rows, host tabs/ship selection, blocked hint, New agent in ~ and spawn-then-select OK');
 })().catch(error => { console.error(error); process.exit(1); });
