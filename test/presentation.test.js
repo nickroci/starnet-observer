@@ -9,7 +9,7 @@ const { createServer } = require('../server.js');
   const secret = 'PRIVATE-COMPANY-CANARY';
   const parent = { id: 'obs_' + 'a'.repeat(24), provider: 'codex', source: 'herdr', status: 'working', projectId: 'prj_1', project: secret,
     repoId: 'repo_1', repo: secret, worktree: secret, paneId: 'w1:p2', role: 'overseer', title: secret, sessionId: secret, inspectionIdentity: secret,
-    inventoryHealth: 'available', observedAt: 1000, presence: 'pane', tool: { available: true, observedAt: 1000, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: 1000, text: secret }, raw: secret }, unexpected: secret };
+    inventoryHealth: 'available', observedAt: 1000, arrangement: { roomId: 'room_1', room: secret, sectionId: 'sec_1', section: secret }, presence: 'pane', tool: { available: true, observedAt: 1000, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: 1000, text: secret }, raw: secret }, unexpected: secret };
   const helper = { ...parent, id: 'obs_' + 'b'.repeat(24), source: 'helper', parentId: parent.id, status: 'idle', lineageState: 'open',
     taskEvidence: { state: 'available', summary: secret, source: secret }, taskStatusEvidence: { status: 'completed', source: secret },
     lifecycleEvidence: { state: 'closed', reason: 'killed' }, tool: { available: true, last: { name: secret, phase: 'started', outcome: 'unknown', at: 1000 } } };
@@ -38,6 +38,8 @@ const { createServer } = require('../server.js');
     assert.equal(JSON.stringify(projected).includes(secret), false, 'malformed timestamps cannot expose private strings or objects');
   }
   assert.equal(first.sessions[1].inspectionIdentity, null);
+  assert.deepEqual(first.sessions.map(row => row.arrangement), [{ roomId: 'room_1', room: 'Bay 1', sectionId: 'sec_1', section: 'Section 1' }, { roomId: 'room_1', room: 'Bay 1', sectionId: 'sec_1', section: 'Section 1' }],
+    'dynamic arrangement keeps opaque ids and gets fictional bay/section labels');
   assert.deepEqual(first.bus.messages[0], { id: 1, from: parent.id, to: helper.id, sentAt: '2026-01-01T00:00:00.000Z', acknowledgedAt: null, wake: 'requested' });
   const byId = new Map(first.sessions.map(row => [row.id, row]));
   inventory = { ...inventory, sessions: [parent, helper] };
