@@ -1162,7 +1162,7 @@ const ObserverView = (() => {
       if (live && blocked) sparks(foot.x, chestY, 'ember' + worker.id, now, { count: 3, color, rise: 26 * size, spread: 12 * size, life: 2600, size: 2 });
       // Resting agents keep a crackle that dies away with idle age: plenty after a fresh turn, none after days.
       const rest = Math.round(7 * vigour);
-      if (live && !working && !blocked && rest) sparks(foot.x, chestY - 8 * size, 'rest' + worker.id, now, { count: rest, color: worker.accent, alt: C['star-white'], rise: (14 + 14 * vigour) * size, spread: 18 * size, life: 1500, size: 2 });
+      if (live && !working && !blocked && rest) sparks(foot.x, chestY - 8 * size, 'rest' + worker.id, now, { count: rest, color: worker.accent, alt: C['aura-spark'], rise: (14 + 14 * vigour) * size, spread: 18 * size, life: 1500, size: 2 });
     }
 
     // ---------- crew ----------
@@ -1209,7 +1209,9 @@ const ObserverView = (() => {
       if (!extent && art === 'office') {
         // Original procedural human at the existing fallback bounds; a ready group's missing frames still repaint.
         if (replacementReady(body.skin)) watchSkin(body.skin);
+        ctx.save(); if (tint !== 'none' && 'filter' in ctx) ctx.filter = tint;
         extent = office.composition.human(ctx, foot, { size, sitting: body.sitting, accent: worker.accent, skin: body.skin });
+        ctx.restore();
       } else if (!extent) {
         watchSkin(body.skin);
         // Visible upright fallback silhouette while sprites load or are unavailable.
