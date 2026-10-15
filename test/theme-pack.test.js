@@ -222,7 +222,29 @@ assert.ok(!/https?:|@import/.test(stylesheet), 'no remote stylesheet resources')
 for (const rule of ['#page-label { min-width:3.6em; text-align:center; font:24px/1 var(--term);', '.station-stats { margin-top:5px; font:15px/1.2 var(--term);',
   'font:15px/1.2 var(--term); letter-spacing:.04em; font-variant-numeric:tabular-nums; }', '#counts { color:var(--dim); font:16px/1.2 var(--term);',
   '.stat dd { margin:0; font:12px/1.3 ui-monospace,monospace;', '#observed { color:var(--dim); font:17px var(--term);']) assert.ok(stylesheet.includes(rule), 'fixed readout: ' + rule);
-for (const fixed of ['#page-label', '.station-stats', '.station-totals', '#counts', '.mail-counts', '.stat dd', '#observed', 'canvas']) {
+// Each numeric readout declares its own fixed font shorthand and tracking, so a profile or scaled rule on an
+// ancestor (e.g. .project-heading, .turn-head, .connection) cannot restyle it through inheritance.
+function ownDeclarations(css, selector) {
+  const merged = {};
+  for (const [, selectors, body] of css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (selectors.includes('@') || !selectors.split(/,(?![^()]*\))/).some(part => part.trim() === selector)) continue;
+    for (const declaration of body.split(';')) {
+      const at = declaration.indexOf(':');
+      if (at > 0) merged[declaration.slice(0, at).trim()] = declaration.slice(at + 1).trim();
+    }
+  }
+  return merged;
+}
+const numericReadouts = ['#page-label', '.station-stats', '.station-totals', '#counts', '.mail-counts', '.stat dd', '#observed', '.project-total', '.turn-time'];
+const fixedNumericFont = /^\d+px(\/[\d.]+)? (var\(--term\)|ui-monospace,monospace)$/;
+function numericReadoutGaps(css) {
+  return numericReadouts.filter(selector => {
+    const own = ownDeclarations(css, selector);
+    return !fixedNumericFont.test(own.font || '') || !own['letter-spacing'];
+  });
+}
+assert.deepEqual(numericReadoutGaps(stylesheet), [], 'numeric readouts declare a fixed unscaled font and letter-spacing');
+for (const fixed of [...numericReadouts, 'canvas']) {
   assert.ok(!stylesheet.split('\n').filter(line => line.includes('data-type-profile')).some(line => line.includes(fixed)), fixed + ' has no profile override');
 }
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'observer-theme-test-'));

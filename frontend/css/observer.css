@@ -20,7 +20,7 @@ p,h1,h2,h3 { margin:0; }
 h1 { font:calc(30px * var(--type-scale))/1 var(--term); letter-spacing:.08em; color:var(--phosphor); text-shadow:0 0 8px var(--glow); text-transform:uppercase; }
 .read-only { font:calc(14px * var(--type-scale))/1.2 var(--term); letter-spacing:.12em; color:var(--tab-ink); background:var(--chrome); padding:1px 9px; white-space:nowrap; border-radius:var(--shape-tag); clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px); }
 .glyph-strip { font:calc(16px * var(--type-scale))/1 ui-monospace,monospace; letter-spacing:.35em; color:var(--alien); opacity:.45; white-space:nowrap; user-select:none; }
-.connection { font:calc(17px * var(--type-scale)) var(--term); letter-spacing:.05em; } #health { color:var(--working); overflow-wrap:anywhere; } #health::before { content:'●'; margin-right:7px; font-size:11px; text-shadow:0 0 6px currentColor; } #observed { color:var(--dim); font:17px var(--term); font-variant-numeric:tabular-nums; }
+.connection { font:calc(17px * var(--type-scale)) var(--term); letter-spacing:.05em; } #health { color:var(--working); overflow-wrap:anywhere; } #health::before { content:'●'; margin-right:7px; font-size:11px; text-shadow:0 0 6px currentColor; } #observed { color:var(--dim); font:17px var(--term); letter-spacing:.05em; font-variant-numeric:tabular-nums; }
 .workspace { display:grid; grid-template-columns:minmax(0,1fr) 370px; gap:16px; padding:18px 16px 16px; min-width:0; min-height:0; }
 /* Thin outlined telemetry bezels: sharp bracketed corners top-left/bottom-right, swept corners on the other two. Decorative only. */
 .station-panel,#console { position:relative; min-width:0; border:1px solid var(--chrome); border-radius:var(--shape-panel); overflow:hidden; box-shadow:0 0 0 1px var(--panel-outline), 0 0 16px var(--glow), inset 0 0 0 1px var(--panel-inset); }
@@ -33,7 +33,7 @@ h1 { font:calc(30px * var(--type-scale))/1 var(--term); letter-spacing:.08em; co
 #room-count { margin-top:6px; font-size:calc(14px * var(--type-scale)); color:var(--ink); }
 /* Station totals: a terminal readout of the sidecar's aggregate. Each state says itself in words; colour only repeats it. */
 .station-heading { min-width:0; }
-.station-stats { margin-top:5px; font:15px/1.2 var(--term); font-variant-numeric:tabular-nums; color:var(--totals-ink); }
+.station-stats { margin-top:5px; font:15px/1.2 var(--term); letter-spacing:normal; font-variant-numeric:tabular-nums; color:var(--totals-ink); }
 .station-stats summary { cursor:pointer; width:fit-content; max-width:100%; padding:3px 0; overflow-wrap:anywhere; }
 .station-stats summary::marker { color:var(--dim); }
 .station-stats summary:focus-visible { outline:2px solid var(--focus); outline-offset:3px; }
@@ -73,7 +73,7 @@ input { width:100%; min-width:0; padding:9px 11px; color:var(--ink); background:
 .filters button[aria-pressed=true]:not(:disabled):hover { background:var(--selected-hover); }
 .session-groups { flex:1; min-height:0; overflow-y:auto; padding:4px 10px 14px; scrollbar-width:thin; scrollbar-color:var(--chrome) transparent; }
 .project-group { margin-top:10px; } .project-heading { display:flex; align-items:center; gap:8px; padding:4px 6px 6px; font:calc(17px * var(--type-scale))/1.1 var(--term); letter-spacing:.04em; color:var(--heading-ink); font-weight:400; }
-.project-swatch { flex:none; width:8px; height:8px; border-radius:1px; background:var(--room); box-shadow:0 0 6px var(--room); transform:rotate(45deg); } .project-total { margin-left:auto; color:var(--dim); white-space:nowrap; }
+.project-swatch { flex:none; width:8px; height:8px; border-radius:1px; background:var(--room); box-shadow:0 0 6px var(--room); transform:rotate(45deg); } .project-total { margin-left:auto; color:var(--dim); white-space:nowrap; font:17px/1.1 var(--term); letter-spacing:.04em; }
 /* The project name wraps rather than pushing the total and zoom button out of the console. */
 .project-heading > span:nth-child(2) { min-width:0; overflow-wrap:anywhere; }
 /* Repository toggles: exact repositories of this project; the pressed one highlights its crew in the list and on the floor. */
@@ -147,7 +147,7 @@ body.is-stale .station-panel::before,body.is-stale .station-panel::after,body.is
 .inspector-stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px; margin:0; background:var(--line); border-bottom:1px solid var(--line); }
 .stat { min-width:0; padding:6px 10px 7px 12px; background:var(--footer-bg); }
 .stat dt { margin-bottom:2px; font:calc(14px * var(--type-scale))/1 var(--term); letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
-.stat dd { margin:0; font:12px/1.3 ui-monospace,monospace; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.stat dd { margin:0; font:12px/1.3 ui-monospace,monospace; letter-spacing:normal; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
 .stat-unavailable dd { color:var(--dim); font-style:italic; } .stat-partial dd { color:var(--blocked); }
 .inspector-conversation { flex:1; min-height:0; display:flex; flex-direction:column; }
 .inspector-log-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; padding:8px 14px 4px 16px; }
@@ -157,6 +157,7 @@ body.is-stale .station-panel::before,body.is-stale .station-panel::after,body.is
 .turn { padding:6px 9px 7px; background:var(--row); border:1px solid var(--line); border-left:3px solid var(--chrome); border-radius:2px 10px 2px 2px; }
 .turn-user { border-left-color:var(--alien); } .turn-tool { border-left-color:var(--blocked); background:var(--tool-bg); }
 .turn-head { display:flex; justify-content:space-between; gap:8px; font:calc(15px * var(--type-scale))/1 var(--term); letter-spacing:.08em; color:var(--dim); } .turn-user .turn-role { color:var(--alien); } .turn-assistant .turn-role { color:var(--working); } .turn-tool .turn-role { color:var(--blocked); }
+.turn-time { font:15px/1 var(--term); letter-spacing:.08em; }
 .turn-text { margin-top:4px; font-size:calc(13px * var(--type-scale)); line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
 details.turn-tool { margin-top:3px; padding:0; border:0; background:none; } details.turn-tool summary { cursor:pointer; font:calc(12px * var(--type-scale))/1.4 ui-monospace,monospace; color:var(--summary-ink); overflow-wrap:anywhere; }
 details.turn-tool summary:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
@@ -203,7 +204,8 @@ body.is-stale .inspector { border-style:dashed; }
 :where(:root[data-decor-glow=off]) button:where(:not(:disabled)):hover { box-shadow:none; }
 :where(:root[data-decor-glow=off]) :is(.station-panel,#console,.controls-popover) { box-shadow:0 0 0 1px var(--panel-outline), inset 0 0 0 1px var(--panel-inset); }
 :where(:root[data-decor-glow=off]) .inspector { box-shadow:0 0 0 1px var(--panel-outline), inset 0 0 0 1px var(--panel-inset); }
-/* DM Sans profile: fixed chrome metrics. Canvas text, #page-label, totals, counts and stat values keep VT323 (no rule here). */
+/* DM Sans profile: fixed chrome metrics. Canvas text and numeric readouts (#page-label, totals, counts, .project-total, .turn-time, stat values)
+   declare their own fixed font and tracking, so these rules and inherited ancestor styles never restyle them. */
 :where(:root[data-type-profile=dm-sans]) body { font-family:'DM Sans',system-ui,sans-serif; }
 :where(:root[data-type-profile=dm-sans]) h1 { font:500 calc(20px * var(--type-scale))/1 'DM Sans',system-ui,sans-serif; letter-spacing:.01em; text-transform:none; }
 :where(:root[data-type-profile=dm-sans]) h2,:where(:root[data-type-profile=dm-sans]) .inspector h2 { font:600 calc(24px * var(--type-scale))/1.1 'DM Sans',system-ui,sans-serif; letter-spacing:normal; }
