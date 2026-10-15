@@ -1,24 +1,11 @@
 # Approved decisions and discovery
 
-# PR4 additions discovery
+Revision4 was approved and independently gated before execution. PR #4 merged first; this additions branch starts at b4247e46a7dd04d37f73e26153030566ae818096. The unfinished theme is not a prerequisite and was not imported. The exact approved plan remains verbatim in PLAN.md. Private draft: .planning/drafts/pr4-additions.
 
-Shared source facts, original user decisions and scope split are recorded in .planning/drafts/pr4-merge-readiness/DISCOVERY.md; do not duplicate that decision log.
+A1 extends the existing single persisted overseer with an explicit Claude/Codex enum, Claude default, and a labeled Start/Cancel chooser. Provider choice applies only to the overseer; project + stays Claude. One shared brief exclusively initializes each missing AGENTS.md/CLAUDE.md, preserving all existing edits. The unchanged brief passed independent content review, then the user approved it with “Approve this exact text”. Approved source-declaration SHA-256: 2b966add49a7381ce3d9ed7742e2acead793a44b3e982d72925c594131eaf168.
 
-This ticket executes only after mandatory merge readiness ships and this additions plan is approved. Owns two additive deliverables: explicit Codex/Claude overseer selection with equivalent initial briefs preserving edits, then actual-checkout sections in station and Live sessions. No project '+' provider expansion, auto-stop, opaque action target mapping, name/config-based detection or unfinished theme import.
+A2 extends canonical checkout identity through the existing resolver/cache, inventory/helper allowlist, presentation maps and frontend. Repository ownership remains shared; sections use the tuple(repoId, checkoutId, folder). Existing scene plates and keyed row reconciliation show checkout then folder while preserving focus, selection, privacy and stable allocation. A shared pure suffix helper corrects demonstrated short-ID collisions; station clipping reserves that suffix.
 
-Revalidate merged mandatory server/identity/projection/checkout interfaces and fresh main before dispatch. The additional public provider enum and checkout UI are proposals in .planning/drafts/pr4-additions/PLAN.md. Initial brief content requires independent review and explicit user approval before freeze. Drafting created no branch/worktree/GSD record and ran no live mutation.
+Execution used fresh sequential task implementers and independent leaf code reviewers, selected gpt-6.1-sol with medium effort. Exact resolved identity/effort unavailable. No parallel implementation, new provider framework, second resolver/cache or live/paid run. Native browser navigation was attempted against injected fake controls and blocked by ERR_BLOCKED_BY_CLIENT; automated DOM/VM/canvas/HTTP coverage is recorded in SUMMARY.md.
 
-Planner policy selected gpt-6.1-sol medium; native resolved identity/effort unavailable. Simplicity and independent plan gate remain PENDING; implementation approval null.
-
-## Delivery amendment — revision3
-
-User execution instruction: "after first plan push to existing PR and then merge after review, the secon plan you can work in a sub agnt and a separate PR". Execution approval covers these precise delivery amendments, subject to the fresh revision3 independent gate and unresolved theme ordering. Existing M1 theme-reviewed/merged dependency is unchanged until the user answers the pending ordering question. Prior planning-only statements above describe historical approval state.
-
-After mandatory merge, delegated controller/subagent owns a separate feature worktree and opens a new separate PR. Complete review/check loops and stop at review-ready PR; second merge awaits later explicit approval. No implementation or registration occurred while recording this amendment.
-
-## Order clarification — revision4
-
-User answered "before": mandatory PR4 merges before unfinished theme work. This replaces the earlier theme-merge prerequisite and resolves that pending question. Use fresh origin/main (inspected 3dbf16a with loading PR7), never copy partial theme code/assets. Mandatory QA exercises shipped default; future theme compatibility is source/diff evidence and concrete follow-on integration notes. Theme controller owns later integration onto merged PR4; additions may execute after PR4 independently of theme, preserving any theme already merged in then-main. Existing delivery authorization remains: update/review/merge existing fork PR4; delegate additions into separate worktree/new review-ready PR, no second merge authorization. Revision4 independent gate remains PENDING.
-
-
-Execution baseline: b4247e46a7dd04d37f73e26153030566ae818096 (merged PR #4). Approved revision4 and gate reused. Sequential A1 then A2; stop at a review-ready separate PR. No live launches. Private draft: .planning/drafts/pr4-additions.
+Delivery authorization ends at a separate review-ready PR. PR #12 remains open; its merge requires later explicit user approval. GSD work remains registered and in progress; no completion/merge record is implied.

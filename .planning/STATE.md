@@ -17,14 +17,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-14)
 
 **Core value:** Show local agent activity truthfully without changing observed sessions or exposing private content beyond the local observation boundary.
-**Current focus:** PR #4 mandatory fixes reviewed; authorized merge and delegated additions follow. No active milestone or phase.
+**Current focus:** Overseer provider and checkout additions are review ready in PR #12; merge awaits explicit approval. No active milestone or phase.
 
 ## Current Position
 
 Phase: None (0 planned)
 Plan: None
-Status: PR #4 mandatory implementation and review complete; merge ready
-Last activity: 2026-10-15 — PR #4 mandatory fixes passed task, aggregate, and two pushed PR review loops; all 24 test files passed on Bun 1.3.13. Final tracking commit prepared before authorized merge.
+Status: PR #12 additions implemented and reviewed; separate PR open, merge approval pending
+Last activity: 2026-10-15 — PR #12 passed independent task, aggregate and pushed PR review; all 24 test files passed on Bun 1.3.13. Native browser navigation remains blocked.
 
 
 ## Quick Tasks Completed
@@ -56,12 +56,12 @@ No blocker to initialization. Browser visuals and live desktop permissions were 
 ## Session Continuity
 
 Last session: 2026-10-15
-Stopped at: PR #4 final tracking commit after review; authorized merge next
+Stopped at: PR #12 review-ready handoff; no merge authorization
 Resume file: None
-Next action: Merge reviewed PR #4, then delegate approved additions in a separate worktree and PR. Second merge requires later approval.
+Next action: Await explicit merge approval for PR #12; then record its merge and complete the registered quick task.
 
 ## Registered Work
 
 | # | Description | Status | Directory |
 | --- | --- | --- | --- |
-| 261015-mjy | Overseer providers and checkout sections | A1/A2 reviewed; aggregate review and PR pending | [261015-mjy](./quick/261015-mjy-overseer-providers-and-checkout-sections/) |
+| 261015-mjy | Overseer providers and checkout sections | [PR #12](https://github.com/wnz99/starnet-observer/pull/12) review ready; all reviews/checks passed; merge approval pending | [261015-mjy](./quick/261015-mjy-overseer-providers-and-checkout-sections/) |
