@@ -222,3 +222,57 @@ body.control .session-row .row-top { padding-right:98px; } body.control .session
 .project-spawn { min-width:28px; min-height:28px; padding:0 6px; font:19px/1 var(--term); letter-spacing:0; text-transform:none; flex:none; }
 .control-notice { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:60; max-width:min(80vw,720px); padding:8px 14px; font:14px/1.3 var(--term); color:var(--ink); background:var(--inspect-control-bg); border:1px solid var(--phosphor); border-radius:4px; box-shadow:0 0 14px var(--glow); }
 .control-notice.error { color:var(--danger-notice-ink); border-color:var(--danger); box-shadow:0 0 14px var(--danger-notice-glow); }
+/* Pixel profile: Jersey 10 for interface text and Silkscreen for small tags, both regular 400 from the selected pack and never
+   synthesized. Fixed numeric readouts, tool/code text and the station drawing keep their own fonts; only interface metrics scale. */
+:where(:root[data-type-profile=pixel]) body { font:400 calc(21px * var(--type-scale))/1.25 'Jersey 10',system-ui,sans-serif; }
+:where(:root[data-type-profile=pixel]) :is(body,body *) { font-synthesis:none; font-variant-ligatures:none; }
+:where(:root[data-type-profile=pixel]) :is(strong,b,h1,h2,h3,dt) { font-weight:400; }
+:where(:root[data-type-profile=pixel]) h1 { font:400 calc(29px * var(--type-scale))/1 'Jersey 10',system-ui,sans-serif; font-variant-ligatures:none; letter-spacing:0; text-transform:none; }
+:where(:root[data-type-profile=pixel]) h2 { font:400 calc(39px * var(--type-scale))/1 'Jersey 10',system-ui,sans-serif; font-variant-ligatures:none; letter-spacing:0; }
+:where(:root[data-type-profile=pixel]) .inspector h2 { font:400 calc(34px * var(--type-scale))/1.1 'Jersey 10',system-ui,sans-serif; font-variant-ligatures:none; }
+:where(:root[data-type-profile=pixel]) :is(.controls-popover,.mail-heading,.inspector-log-head,.inspector-helpers) h3,:where(:root[data-type-profile=pixel]) .project-heading { font:400 calc(22px * var(--type-scale))/1.1 'Jersey 10',system-ui,sans-serif; font-variant-ligatures:none; letter-spacing:0; text-transform:none; }
+:where(:root[data-type-profile=pixel]) :is(button,.repo-toggle) { font:400 calc(20px * var(--type-scale))/1 'Jersey 10',system-ui,sans-serif; font-variant-ligatures:none; letter-spacing:0; text-transform:none; }
+:where(:root[data-type-profile=pixel]) input { font-size:calc(20px * var(--type-scale)); } :where(:root[data-type-profile=pixel]) input::placeholder { font-size:inherit; }
+:where(:root[data-type-profile=pixel]) :is(.eyebrow,.read-only) { font:400 calc(12px * var(--type-scale))/1 Silkscreen,ui-monospace,monospace; font-variant-ligatures:none; letter-spacing:.06em; }
+:where(:root[data-type-profile=pixel]) :is(.status,.inspector-health) { font:400 calc(12px * var(--type-scale))/1.4 Silkscreen,ui-monospace,monospace; font-variant-ligatures:none; letter-spacing:.04em; }
+:where(:root[data-type-profile=pixel]) :is(.source-chip,.project-kind,.stat dt,.inspector-provenance,.turn-head) { font:400 calc(11px * var(--type-scale))/1.4 Silkscreen,ui-monospace,monospace; font-variant-ligatures:none; letter-spacing:.04em; }
+:where(:root[data-type-profile=pixel]) .provider { font:400 calc(19px * var(--type-scale))/1 'Jersey 10',system-ui,sans-serif; font-variant-ligatures:none; letter-spacing:0; }
+:where(:root[data-type-profile=pixel]) :is(.connection,.poll-label,#mail-health,.row-meta,.repo-mark,.panel-stack,.inspector-window,.inspector-buffer,.empty,.mail-row) { font:400 calc(19px * var(--type-scale))/1.2 'Jersey 10',system-ui,sans-serif; font-variant-ligatures:none; letter-spacing:0; }
+:where(:root[data-type-profile=pixel]) :is(#room-count,.inspector-task) { font-size:calc(20px * var(--type-scale)); font-weight:400; line-height:1.25; }
+:where(:root[data-type-profile=pixel]) :is(.row-summary,.station-legend,.controls-popover,.inspector-note,.inspector-footnote,.mail-empty,.mail-detail,.mail-state,.row-mail,.turn-cut,.source-health,.theme-status) { font-size:calc(18px * var(--type-scale)); line-height:1.25; }
+:where(:root[data-type-profile=pixel]) .turn-text { font-size:calc(19px * var(--type-scale)); line-height:1.3; }
+/* The row title is laid over a reserved line under the one-line provider row, so both move together. */
+:where(:root[data-type-profile=pixel]) .row-title-space { height:24px; }
+:where(:root[data-type-profile=pixel]) .session-item .row-title { top:33px; height:24px; font-weight:400; font-size:calc(22px * var(--type-scale)); line-height:24px; }
+@media (max-width:500px) { :where(:root[data-type-profile=pixel]) h1 { font-size:calc(25px * var(--type-scale)); } :where(:root[data-type-profile=pixel]) h2 { font-size:calc(32px * var(--type-scale)); } }
+/* Pixel chrome: square 2px frames with stepped corners and hard bevels from existing tokens. The steps are painted by
+   pointer-transparent pseudo-elements (frame ring and corner fill); frames, controls, dialogs and scrolling regions are never
+   clipped, so focus outlines and scrolling stay intact. Stale panels keep their dashed frame. */
+:where(:root[data-chrome=pixel]) {
+  --px-outer:0 6px,2px 6px,2px 4px,4px 4px,4px 2px,6px 2px,6px 0,calc(100% - 6px) 0,calc(100% - 6px) 2px,calc(100% - 4px) 2px,calc(100% - 4px) 4px,calc(100% - 2px) 4px,calc(100% - 2px) 6px,100% 6px,100% calc(100% - 6px),calc(100% - 2px) calc(100% - 6px),calc(100% - 2px) calc(100% - 4px),calc(100% - 4px) calc(100% - 4px),calc(100% - 4px) calc(100% - 2px),calc(100% - 6px) calc(100% - 2px),calc(100% - 6px) 100%,6px 100%,6px calc(100% - 2px),4px calc(100% - 2px),4px calc(100% - 4px),2px calc(100% - 4px),2px calc(100% - 6px),0 calc(100% - 6px);
+  --px-inner:2px 8px,4px 8px,4px 6px,6px 6px,6px 4px,8px 4px,8px 2px,calc(100% - 8px) 2px,calc(100% - 8px) 4px,calc(100% - 6px) 4px,calc(100% - 6px) 6px,calc(100% - 4px) 6px,calc(100% - 4px) 8px,calc(100% - 2px) 8px,calc(100% - 2px) calc(100% - 8px),calc(100% - 4px) calc(100% - 8px),calc(100% - 4px) calc(100% - 6px),calc(100% - 6px) calc(100% - 6px),calc(100% - 6px) calc(100% - 4px),calc(100% - 8px) calc(100% - 4px),calc(100% - 8px) calc(100% - 2px),8px calc(100% - 2px),8px calc(100% - 4px),6px calc(100% - 4px),6px calc(100% - 6px),4px calc(100% - 6px),4px calc(100% - 8px),2px calc(100% - 8px);
+}
+:where(:root[data-chrome=pixel]) body { background:radial-gradient(circle at 1px 1px,var(--line) 1px,transparent 1.5px) 0 0/12px 12px,var(--bg); }
+:where(:root[data-chrome=pixel]) :is(.topbar,.station-panel,#console,.inspector) { border:0; border-radius:0; box-shadow:3px 3px 0 var(--selected-inset); }
+:where(:root[data-chrome=pixel]) :is(.station-panel,#console,.inspector) { padding:2px; }
+:where(:root[data-chrome=pixel]) .topbar { margin:10px 16px 0; }
+:where(:root[data-chrome=pixel]) :is(.topbar,.station-panel,#console,.inspector)::before,:where(:root[data-chrome=pixel]) :is(.topbar,.station-panel,#console,.inspector)::after {
+  content:''; display:block; position:absolute; inset:0; z-index:3; width:auto; height:auto; border:0; pointer-events:none; }
+:where(:root[data-chrome=pixel]) :is(.topbar,.station-panel,#console,.inspector)::before { background:var(--chrome); clip-path:polygon(evenodd,var(--px-outer),0 6px,var(--px-inner),2px 8px,0 6px); }
+:where(:root[data-chrome=pixel]) :is(.topbar,.station-panel,#console,.inspector)::after { background:var(--bg); clip-path:polygon(evenodd,0 0,100% 0,100% 100%,0 100%,0 6px,var(--px-outer),0 6px); }
+:where(:root[data-chrome=pixel]) body.is-stale :is(#console,.inspector)::before { background:repeating-linear-gradient(45deg,var(--chrome) 0 6px,transparent 6px 10px); }
+:where(:root[data-chrome=pixel]) #controls-help-popover { border-width:2px; box-shadow:3px 3px 0 var(--selected-inset); }
+:where(:root[data-chrome=pixel]) button { border-width:2px; box-shadow:inset 2px 2px 0 var(--control-bg),inset -2px -2px 0 var(--line); }
+:where(:root[data-chrome=pixel]) input { border-width:2px; background:var(--control-bg); box-shadow:inset 2px 2px 0 var(--line); }
+:where(:root[data-chrome=pixel]) .session-row { border-width:2px 2px 2px 6px; box-shadow:inset -2px -2px 0 var(--line); }
+:where(:root[data-chrome=pixel]) .turn { border-width:2px 2px 2px 4px; border-radius:0; }
+:where(:root[data-chrome=pixel]) .inspector-stats { gap:2px; }
+:where(:root[data-chrome=pixel]) :is(.eyebrow,.read-only) { padding:5px 8px 4px; box-shadow:inset 0 -2px 0 var(--selected-hover); }
+:where(:root[data-chrome=pixel]) h1,:where(:root[data-chrome=pixel]) .inspector h2 { color:var(--ink); }
+:where(:root[data-chrome=pixel]) #console .console-heading h2 { color:var(--chrome); text-shadow:2px 2px 0 var(--line); }
+/* An integer 3x pixel logo; other chromes keep the default logo box above. */
+:where(:root[data-chrome=pixel]) .brand-logo { width:auto; max-width:312px; height:42px; image-rendering:pixelated; }
+/* The desktop drawer keeps its top aligned with the panels below the inset top frame; the stacked layout stays full-screen. */
+@media (min-width:1101px) { :where(:root[data-chrome=pixel]) .inspector { top:90px; } }
+@media (min-width:851px) and (max-width:1100px) { :where(:root[data-chrome=pixel]) .inspector { top:84px; } }
+@media (max-width:500px) { :where(:root[data-chrome=pixel]) .topbar { margin:8px 8px 0; } }

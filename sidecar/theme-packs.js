@@ -62,11 +62,12 @@ function validatePack(pack, defaults) {
   if (isDefault && ['ui', 'scene', 'crew'].some(key => !Object.hasOwn(pack, key))) invalid('default-incomplete');
   if (Object.hasOwn(pack, 'ui')) {
     const ui = pack.ui;
-    fields(ui, ['colors', 'typography', 'shapes', 'decor', 'logo'], 'ui', isDefault);
+    fields(ui, ['colors', 'typography', 'chrome', 'shapes', 'decor', 'logo'], 'ui', isDefault);
+    if (Object.hasOwn(ui, 'chrome') && !['classic', 'pixel'].includes(ui.chrome)) invalid('ui-chrome');
     if (Object.hasOwn(ui, 'colors')) colors(ui.colors, defaults.ui.colors, 'ui-colors', isDefault);
     if (Object.hasOwn(ui, 'typography')) {
       fields(ui.typography, ['profile', 'scale'], 'typography', isDefault);
-      if (Object.hasOwn(ui.typography, 'profile') && !['classic', 'dm-sans'].includes(ui.typography.profile)) invalid('typography-profile');
+      if (Object.hasOwn(ui.typography, 'profile') && !['classic', 'dm-sans', 'pixel'].includes(ui.typography.profile)) invalid('typography-profile');
       if (Object.hasOwn(ui.typography, 'scale') && (!Number.isFinite(ui.typography.scale) || ui.typography.scale < 0.9 || ui.typography.scale > 1.1)) invalid('typography-scale');
     }
     if (Object.hasOwn(ui, 'shapes')) {
@@ -201,13 +202,20 @@ function resources(snapshot, pack, defaults, frontend, selectedRoot) {
     png(data, null, null, 1024, 256);
     snapshot.ui.logo.image = publicUrl(frontend, selectedRoot, snapshot.ui.logo.image);
   }
-  if (snapshot.ui.typography.profile === 'dm-sans') {
-    const font = readBounded(selectedRoot, 'fonts/dm-sans.woff2', LIMITS.font);
+  const typography = snapshot.ui.typography;
+  const fontResources = typography.profile === 'dm-sans' ? [['font', 'dm-sans', 'DM-Sans-OFL.txt']]
+    : typography.profile === 'pixel' ? [['jersey10', 'jersey-10', 'Jersey-10-OFL.txt'], ['silkscreen', 'silkscreen', 'Silkscreen-OFL.txt']] : [];
+  const urls = {};
+  for (const [key, filename, licenseName] of fontResources) {
+    const relative = 'fonts/' + filename + '.woff2';
+    const font = readBounded(selectedRoot, relative, LIMITS.font);
     if (font.length < 48 || font.toString('ascii', 0, 4) !== 'wOF2' || font.readUInt32BE(8) !== font.length) invalid('font-header');
-    const license = readBounded(selectedRoot, 'fonts/DM-Sans-OFL.txt', LIMITS.manifest).toString('utf8');
+    const license = readBounded(selectedRoot, 'fonts/' + licenseName, LIMITS.manifest).toString('utf8');
     if (!license.includes('SIL OPEN FONT LICENSE') || !license.includes('Version 1.1')) invalid('font-license');
-    snapshot.ui.typography.font = publicUrl(frontend, selectedRoot, 'fonts/dm-sans.woff2');
+    urls[key] = publicUrl(frontend, selectedRoot, relative);
   }
+  if (typography.profile === 'dm-sans') typography.font = urls.font;
+  else if (typography.profile === 'pixel') typography.fonts = urls;
   return snapshot;
 }
 function loadDefaults(frontendRoot) {
