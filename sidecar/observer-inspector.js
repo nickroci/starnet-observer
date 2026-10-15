@@ -266,4 +266,4 @@ function snapshot(state, provider, now) {
   return { health: 'available', reason: null, stats, turns: Array.from(state.turns.values()),
     truncated: state.truncated, window: WINDOW, generation: state.generation };
 }
-module.exports = { createProjection, consumeMetadata, metadata, consume, snapshot, unavailable, recordBelongsToSession, redactText };
+module.exports = { createProjection, consumeMetadata, consumeHelperMetadata, metadata, consume, snapshot, unavailable, recordBelongsToSession, redactText };

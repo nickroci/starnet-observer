@@ -23,9 +23,15 @@ function lifecycle(provider, relationship, task) {
     source: task.source, observedAt: task.observedAt };
   return { state: 'unknown', reason: null, source: null, observedAt: null };
 }
-function ownStatus(task, at) {
+// Background Claude helpers rarely emit a fresh 'running' task event, so a conversation row the helper itself wrote
+// in the last 20s also counts as working. That is evidence of activity, not process liveness: with no recent row and
+// no terminal event the helper stays unknown.
+const ACTIVE_ROW_MS = 20000;
+function ownStatus(task, at, lastActivityAt = null) {
+  if (['completed', 'failed', 'killed', 'stopped'].includes(task?.status)) return 'done';
   if (task?.status === 'running' && Number.isFinite(task.observedAt) && at >= task.observedAt && at - task.observedAt <= 6000) return 'working';
-  return ['completed', 'failed', 'killed', 'stopped'].includes(task?.status) ? 'done' : 'unknown';
+  const active = typeof lastActivityAt === 'string' ? Date.parse(lastActivityAt) : NaN;
+  return Number.isFinite(active) && at >= active && at - active <= ACTIVE_ROW_MS ? 'working' : 'unknown';
 }
 
 // Shared bounded selector: production runs this in the SQLite worker; direct fixtures can inject SQLite.
@@ -142,7 +148,7 @@ function makeHelperObserver(options = {}) {
           task: taskEvidence.summary || 'Task unavailable.' };
         const child = existing ? { ...existing, ...lineage } : {
           id, provider: parent.provider, sessionId: candidate.child, title: binding.nickname || 'Helper',
-          source: 'helper', presence: 'verified-lineage', status: ownStatus(taskStatus, now()), tool: { available: false },
+          source: 'helper', presence: 'verified-lineage', status: ownStatus(taskStatus, now(), parent.provider === 'claude' ? projection?.lastActivityAt : null), tool: { available: false },
           observedAt: now(), inventoryHealth: 'available', inspectionIdentity: 'helper:' + id, ...lineage
         };
         if (existing) annotations.set(id, lineage); else rows.push(child);
