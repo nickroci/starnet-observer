@@ -62,4 +62,4 @@ Next action: Continue registered theme work after runtime integration.
 
 | Work | Status | Directory |
 | --- | --- | --- |
-| Standalone theme framework and local appearance comparisons | Task 3 complete; Task 4 office composition next | .planning/quick/261014-wv3-standalone-theme-framework-and-local-app |
+| Standalone theme framework and local appearance comparisons | Task 4 complete; local content drafting and approval next | .planning/quick/261014-wv3-standalone-theme-framework-and-local-app |
