@@ -21,6 +21,12 @@ const ObserverView = (() => {
   const P = Scene.project;
 
   // ---------- pure helpers (exported for tests) ----------
+  /* Idle age tint for a crew body: level 0 is untouched; full age is mostly greyscale and 55% darker, still readable
+     against the deck. Quantised levels come from the model, so the filter string changes only a handful of times. */
+  function idleFilter(level) {
+    const t = Math.max(0, Math.min(1, Number(level) || 0));
+    return t ? 'grayscale(' + (0.85 * t).toFixed(2) + ') brightness(' + (1 - 0.55 * t).toFixed(2) + ')' : 'none';
+  }
   const lodFor = zoom => zoom < LOD.overview ? 'overview' : zoom < LOD.detail ? 'sections' : 'detail';
   // One static-layer resolution per zoom bucket, capped by the pixel budget so huge decks never allocate unbounded canvases.
   function cacheResolution(bounds, zoom, dpr) {
@@ -364,7 +370,7 @@ const ObserverView = (() => {
   }
 
   // ---------- the view ----------
-  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, onCamera = () => {}, env = {} }) {
+  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, onCamera = () => {}, env = {} }) {
     const win = env.window || (typeof window !== 'undefined' ? window : {});
     const raf = env.raf || (fn => win.requestAnimationFrame(fn)), caf = env.caf || (id => win.cancelAnimationFrame(id));
     const dprOf = env.dpr || (() => win.devicePixelRatio || 1);
@@ -923,13 +929,16 @@ const ObserverView = (() => {
         const top = toScreen(bounds.y, foot.y, camera.ty), bottom = toScreen(bounds.y + bounds.h, foot.y, camera.ty);
         return right >= -1 && left <= viewport.width + 1 && bottom >= -1 && top <= viewport.height + 1;
       };
+      // Long-idle agents fade toward grey (canvas filter where supported; elsewhere the hover text still says so).
+      let tint = 'none'; try { tint = idleFilter(idleLevel(worker.id)); } catch (_) {}
+      if (tint !== 'none' && 'filter' in ctx) ctx.filter = tint;
       try { extent = sprites && sprites.drawBody ? sprites.drawBody(ctx, body, now, { reducedMotion: reduced, skipGroundShadow: true, shouldPaint }) : null; } catch (_) { extent = null; }
       ctx.restore();
       if (!extent) {
         watchSkin(body.skin);
         // Visible upright fallback silhouette while sprites load or are unavailable.
         const h = CREW_HEIGHT * size, w = 16 * size;
-        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = worker.accent; ctx.strokeStyle = '#05080a';
+        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = worker.accent; ctx.strokeStyle = '#05080a'; if (tint !== 'none' && 'filter' in ctx) ctx.filter = tint;
         ctx.beginPath(); ctx.roundRect ? ctx.roundRect(foot.x - w / 2, foot.y - h * 0.72, w, h * 0.72, 6 * size) : ctx.rect(foot.x - w / 2, foot.y - h * 0.72, w, h * 0.72); ctx.fill(); ctx.stroke();
         ctx.beginPath(); ctx.arc(foot.x, foot.y - h * 0.84, 6 * size, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore();
         extent = { top: foot.y - h, w, h, fallback: true };
@@ -1266,6 +1275,6 @@ const ObserverView = (() => {
       cacheBuilds: () => (staticLayer ? staticLayer.builds : 0), running: () => running, titleRegions: () => titleRegions.map(region => ({ ...region })),
       signRegions: () => signRegions.map(region => ({ ...region })) };
   }
-  return { create, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
+  return { create, idleFilter, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverView;

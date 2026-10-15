@@ -151,7 +151,7 @@ function consumeHelperMetadata(state, record, provider, sessionId, binding) {
 function createProjection() {
   return { generation: crypto.randomUUID(), turns: new Map(), usage: new Map(), totals: null, model: null,
     helperCalls: new Map(), helperSpawns: new Map(), helperEvents: new Map(), ownTask: null,
-    startedAt: null, lastActivityAt: null, truncated: false, bounded: false, usagePartial: false, modelPartial: false };
+    startedAt: null, lastActivityAt: null, lastEntryAt: null, truncated: false, bounded: false, usagePartial: false, modelPartial: false };
 }
 function unavailable(id, reason, now) {
   return { id, health: 'unavailable', asOf: new Date(now).toISOString(), reason,
@@ -184,6 +184,10 @@ function consumeMetadata(state, record, provider, position, sessionId, binding, 
   const ordinary = ordinaryMessage(record, provider, p);
   if (!options.header && at && (ordinary || record.type === 'response_item' || record.type === 'event_msg' || record.type === 'token_usage_record') &&
     (!state.lastActivityAt || at > state.lastActivityAt)) state.lastActivityAt = at;
+  // Idle age: only timestamped conversation rows count. Claude rewrites and appends untimestamped bookkeeping rows
+  // (and touches files on startup), so neither file mtime nor non-conversation rows are evidence of activity.
+  const entry = provider === 'claude' ? ['user', 'assistant'].includes(record.type) : ['response_item', 'event_msg'].includes(record.type);
+  if (!options.header && at && entry && (!state.lastEntryAt || at > state.lastEntryAt)) state.lastEntryAt = at;
   if (provider === 'codex' && record.type === 'session_meta') state.startedAt = timestamp(p.timestamp) || at;
   if (provider === 'claude' && !state.startedAt && (options.beginning || position === 0)) state.startedAt = at;
   if ((provider === 'codex' && record.type === 'turn_context') || (provider === 'claude' && record.type === 'assistant')) {

@@ -20,6 +20,15 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const freshObservation = (at, now) => Number.isFinite(at) && now - at <= 6000;
 const usageObservation = row => row.usage?.observedAt ?? (row.source === 'helper' ? row.observedAt : null);
 const emptyCoverage = () => ({ eligible: 0, available: 0, partial: 0, unavailable: 0, stale: 0 });
+// Last sign of life for idle-age shading: a working pane is active now; otherwise the newest timestamped conversation
+// entry or tool event. File mtime is not evidence (Claude touches transcripts without activity). Clamped to the
+// inventory clock, so a skewed row time cannot read as the future.
+function lastActivity(status, tool, now) {
+  if (status === 'working') return now;
+  const times = [tool?.lastEntryAt, Date.parse(tool?.last?.at || '')].filter(Number.isFinite);
+  return times.length ? Math.min(now, Math.max(...times)) : null;
+}
+
 function aggregateRows(rows, now) {
   const groups = new Map();
   for (const row of rows) {
@@ -380,7 +389,9 @@ function makeObserver(options = {}) {
     const at = now();
     const sessions = lastGood.map(row => {
       const observedAt = row.usage?.observedAt ?? (row.source === 'herdr' ? summaries.get(row.id)?.observedAt : row.observedAt);
-      return row.tool?.available ? { ...row, tool: { ...row.tool, observedAt, available: freshObservation(observedAt, at) } } : row;
+      // Idle age is derived here, after enrichment has attached the transcript summary to the row.
+      const aged = row.source === 'herdr' ? { ...row, lastActivityAt: lastActivity(row.status, row.tool, Math.min(at, row.observedAt ?? at)) } : row;
+      return aged.tool?.available ? { ...aged, tool: { ...aged.tool, observedAt, available: freshObservation(observedAt, at) } } : aged;
     });
     return { sessions, aggregate: aggregateRows(sessions, at), observedAt: times.length ? Math.max(...times) : null,
       health: available ? 'available' : 'unavailable', error: available ? null : sources.herdr.reason,
@@ -467,4 +478,4 @@ function makeObserver(options = {}) {
   }
   return { get, inspect: (id, expectedIdentity) => inspect(id, expectedIdentity), inspectMessage: (id, expectedIdentity) => closed ? Promise.resolve({ id, health: 'unavailable', reason: 'unreadable', text: null }) : bus.inspect(id, expectedIdentity), close };
 }
-module.exports = { makeObserver };
+module.exports = { makeObserver, lastActivity };

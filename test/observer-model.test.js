@@ -157,3 +157,19 @@ assert.equal(Model.hoverLabel({ source: 'helper', provider: 'codex', title: 'Ada
   assert.equal(layout.seatFor('group-only-pane'), 0, 'authoritative group-only pane beyond represented lineage remains an ordinary root');
   assert.equal(layout.onPage(0)[0].rows[0].kind, 'session');
 }
+
+{
+  // Idle age: fresh under ten minutes, log-eased, quantised, capped at eight hours; working and untimed rows never age.
+  const now = 100 * 3600000, minutes = m => now - m * 60000, idle = (m, extra = {}) => Model.idleAge({ status: 'idle', lastActivityAt: minutes(m), ...extra }, now);
+  assert.deepEqual(idle(9), { ms: 9 * 60000, level: 0, label: '' }, 'under ten minutes is fresh');
+  assert.equal(idle(11).label, 'idle 11m'); assert.equal(idle(192).label, 'idle 3h 12m'); assert.equal(idle(26 * 60).label, 'idle 1d 2h');
+  const levels = [11, 30, 60, 120, 240, 480, 2000].map(m => idle(m).level);
+  assert.deepEqual(levels, [...levels].sort((a, b) => a - b), 'age only darkens with time');
+  assert.equal(idle(480).level, 1); assert.equal(idle(5000).level, 1, 'capped at eight hours');
+  assert.ok(levels.every(level => Number.isInteger(level * 6)), 'levels are quantised to sixths');
+  assert.equal(Model.idleAge({ status: 'working', lastActivityAt: minutes(600) }, now).level, 0, 'a working pane is active now');
+  assert.equal(Model.idleAge({ status: 'idle' }, now).level, 0, 'no timestamp, no age');
+  assert.equal(Model.idleAge({ status: 'idle', lastActivityAt: now + 60000 }, now).level, 0, 'a future time is fresh');
+  assert.equal(Model.hoverLabel({ provider: 'claude', source: 'herdr', status: 'idle', title: 'Ship it', lastActivityAt: minutes(192) }, false, now), 'Claude — Ship it · idle 3h 12m');
+  assert.equal(Model.hoverLabel({ provider: 'claude', source: 'herdr', status: 'idle', title: 'Ship it', lastActivityAt: minutes(2) }, false, now), 'Claude — Ship it');
+}
