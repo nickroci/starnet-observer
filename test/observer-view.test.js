@@ -774,20 +774,26 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   const theme = ThemePack.freezeSnapshot({ version: 1, requestedId: 'office', effectiveId: 'office', warnings: [],
     scene: { ...base.scene, art: { style: 'home-office', assets }, backgroundFx: 'none', ambientFx: 'none' } });
   // Synthetic decode gate: every image waits for release(); `outcome` decides load failure or a wrong-size role.
-  function harness({ outcome = 'ready', replacement = 'inherited', withTheme = theme } = {}) {
-    let release; const gate = new Promise(resolve => { release = resolve; });
+  /* `hold` keeps one role's decode on its own gate (releaseHeld; `heldFails` rejects it then); `providers` and
+     `statuses` shape the root rows. */
+  function harness({ outcome = 'ready', replacement = 'inherited', withTheme = theme, hold = null, heldFails = false,
+    providers = ['claude', 'codex', 'claude'], statuses = ['working', 'idle', 'blocked'] } = {}) {
+    let release, releaseHeld; const gate = new Promise(resolve => { release = resolve; }), heldGate = new Promise(resolve => { releaseHeld = resolve; });
     const counts = { constructed: 0 };
     class FakeImage {
       constructor() { counts.constructed++; }
       set src(url) { this._src = url; const role = Object.keys(assets).find(key => assets[key] === url), size = SCENE_ART_ROLES[role].source;
         this.naturalWidth = outcome === 'wrong-size' && role === 'chair' ? size.width + 1 : size.width; this.naturalHeight = size.height; }
       get src() { return this._src; }
-      decode() { return gate.then(() => { if (outcome === 'fail' && this._src === assets.desk) throw new Error('/private/scene/desk.png'); }); }
+      decode() {
+        if (hold && this._src === assets[hold]) return heldGate.then(() => { if (heldFails) throw new Error('/private/scene/held.png'); });
+        return gate.then(() => { if (outcome === 'fail' && this._src === assets.desk) throw new Error('/private/scene/desk.png'); });
+      }
     }
     const status = ThemePack.createStatus(withTheme, {}), warnings = [];
     const sprite = { ...sprites(), replacementState: () => replacement, ensureSkin: () => new Promise(() => {}) };
-    const layout = Model.createLayout(), rows = ['working', 'idle', 'blocked'].map((value, index) => ({ id: 'o' + index, project: 'P', projectId: 'p', projectKind: 'group', repo: 'r', repoId: 'r',
-      provider: index % 2 ? 'codex' : 'claude', status: value, worktree: 'wt' }));
+    const layout = Model.createLayout(), rows = statuses.map((value, index) => ({ id: 'o' + index, project: 'P', projectId: 'p', projectKind: 'group', repo: 'r', repoId: 'r',
+      provider: providers[index], status: value, worktree: 'wt' }));
     rows.push({ id: 'oh', parentId: 'o0', source: 'helper', project: 'P', projectId: 'p', projectKind: 'group', repo: 'r', repoId: 'r', provider: 'claude', status: 'working' });
     layout.reconcile(rows);
     const scene = Scene.build(layout.onPage(0), 0), node = canvas(), frames = [];
@@ -797,7 +803,7 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
     view.start();
     view.update(scene, { stale: () => false, mailFrame: () => ({ drones: [], envelopes: [] }), inspected: () => null });
     const run = () => { let t = 0; for (let i = 0; i < 50 && frames.length; i++) frames.shift()(t += 16); };
-    return { view, scene, frames, run, sprite, counts, status, warnings, node, release };
+    return { view, scene, frames, run, sprite, counts, status, warnings, node, release, releaseHeld };
   }
   const groups = h => h.sprite.appearances.map(appearance => appearance.group);
   const workers = h => h.scene.workers.length;
@@ -869,6 +875,42 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
     assert.equal(h.warnings.length, 1); assert.deepEqual([h.warnings[0].code, h.warnings[0].pack], [code, 'office']);
     assert.deepEqual(h.status.lines(), ['Theme pack office office art ' + text + '; showing station art.']);
     assert(!/[\\/]|Error/.test(h.warnings[0].message), outcome + ': no path or raw error');
+  }
+  for (const [outcome, code, text, heldFails] of [['fail', 'scene-art-load', 'did not load', true], ['wrong-size', 'scene-art-dimensions', 'has the wrong image sizes', false]]) {
+    // A known failure leaves pending at once while an unrelated role is still decoding; the held role settling later
+    // (rejecting or resolving) neither reactivates, repaints nor warns again.
+    const h = harness({ outcome, replacement: 'ready', hold: 'floor', heldFails });
+    h.run(); h.release(); await flush();
+    assert.equal(h.warnings.length, 1, outcome + ': failed before the held role decodes');
+    assert.equal(h.warnings[0].code, code);
+    assert.deepEqual(h.status.lines(), ['Theme pack office office art ' + text + '; showing station art.'], outcome + ': the loading notice is replaced once');
+    h.releaseHeld(); await flush();
+    assert.equal(h.warnings.length, 1, outcome + ': no extra warning after the late settlement');
+    assert.equal(h.frames.length, 0, outcome + ': no repaint or activation');
+    h.view.invalidate(); h.sprite.appearances.length = 0; h.run();
+    assert.deepEqual(groups(h), Array(workers(h)).fill('default'), outcome + ': canonical station crew stays');
+    assert.equal(h.view.cacheBuilds(), 1);
+    assert.deepEqual(h.status.lines(), ['Theme pack office office art ' + text + '; showing station art.']);
+  }
+  {
+    // Procedural humans keep the provider visible: in one project with one status, swapping a Claude worker for a
+    // Codex one changes its hair tone (amber to cyan) while hits, heights and foot anchors stay identical.
+    const amber = base.scene.colors.amber, cyan = base.scene.colors.cyan;
+    for (const replacement of ['inherited', 'loading', 'failed']) {
+      const paint = providers => {
+        const h = harness({ replacement, providers, statuses: ['working', 'working'] });
+        return h;
+      };
+      const same = paint(['claude', 'claude']), mixed = paint(['claude', 'codex']);
+      for (const h of [same, mixed]) { h.release(); }
+      await flush();
+      for (const h of [same, mixed]) { h.sprite.appearances.length = 0; h.node.ctx.calls.fills = {}; h.run(); }
+      assert.equal(mixed.sprite.appearances.length, 0, replacement + ': procedural humans');
+      const tones = h => [h.node.ctx.calls.fills[amber] || 0, h.node.ctx.calls.fills[cyan] || 0];
+      const [sameAmber, sameCyan] = tones(same), [mixedAmber, mixedCyan] = tones(mixed);
+      assert(mixedCyan > sameCyan && mixedAmber < sameAmber, replacement + ': Claude and Codex humans draw differently');
+      assert.deepEqual(mixed.view.hitRegions(), same.view.hitRegions(), replacement + ': hits, heights and foot anchors unchanged');
+    }
   }
   {
     // A station theme never loads office art or changes its crew appearance.

@@ -74,10 +74,45 @@ const art = (assets = Object.fromEntries(ROLES.map(role => [role, '/assets/theme
     const given = art(), fake = images({ sizes: { [given.assets.helperChair]: [30, 37] } }), result = await OfficeArt.load(given, { Image: fake.Image });
     assert.deepEqual({ ...result }, { state: 'failed', reason: 'scene-art-dimensions' }, 'a root chair PNG cannot stand in for the helper chair');
   }
+  // The first known failure settles at once, even while an unrelated decode is still held; late settlements change nothing.
   {
-    // Decode failure outranks dimensions when both occur.
-    const given = art(), fake = images({ fail: new Set([given.assets.floor]), sizes: { [given.assets.lamp]: [1, 1] } });
-    assert.equal((await OfficeArt.load(given, { Image: fake.Image })).reason, 'scene-art-load');
+    const unhandled = []; const onUnhandled = reason => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    for (const [label, options, reason] of [
+      ['failed decode', given => ({ fail: new Set([given.assets.desk, given.assets.floor]) }), 'scene-art-load'],
+      ['wrong size', given => ({ sizes: { [given.assets.helperChair]: [30, 37] }, fail: new Set([given.assets.floor]) }), 'scene-art-dimensions']]) {
+      const given = art(), held = given.assets.floor, fake = images({ ...options(given), hold: new Set([held]) });
+      // The held floor also fails when it is finally released: its late rejection must be swallowed.
+      let result = null, settlements = 0;
+      OfficeArt.load(given, { Image: fake.Image }).then(value => { result = value; settlements++; });
+      await flush(); await flush();
+      assert.deepEqual(result && { ...result }, { state: 'failed', reason }, label + ': fails before the held role decodes');
+      fake.release(held); await flush(); await flush();
+      assert.equal(settlements, 1, label + ': the late settlement neither resolves again nor reactivates');
+      assert.deepEqual({ ...result }, { state: 'failed', reason }, label + ': no partial images');
+    }
+    {
+      // A held role that later resolves normally changes nothing either.
+      const given = art(), held = given.assets.carrier, fake = images({ fail: new Set([given.assets.desk]), hold: new Set([held]) });
+      let result = null;
+      OfficeArt.load(given, { Image: fake.Image }).then(value => { result = value; });
+      await flush(); assert.equal(result.reason, 'scene-art-load');
+      fake.release(held); await flush(); assert.deepEqual({ ...result }, { state: 'failed', reason: 'scene-art-load' });
+    }
+    {
+      // First known failure wins: a wrong size that settles first beats a decode failure still held, and vice versa.
+      const given = art(), fake = images({ fail: new Set([given.assets.floor]), sizes: { [given.assets.lamp]: [1, 1] }, hold: new Set([given.assets.floor]) });
+      const pending = OfficeArt.load(given, { Image: fake.Image }); await flush();
+      fake.release(given.assets.floor);
+      assert.equal((await pending).reason, 'scene-art-dimensions');
+      const other = art(), reverse = images({ fail: new Set([other.assets.floor]), sizes: { [other.assets.lamp]: [1, 1] }, hold: new Set([other.assets.lamp]) });
+      const first = OfficeArt.load(other, { Image: reverse.Image }); await flush();
+      reverse.release(other.assets.lamp);
+      assert.equal((await first).reason, 'scene-art-load');
+    }
+    await flush(); await flush();
+    process.off('unhandledRejection', onUnhandled);
+    assert.deepEqual(unhandled, [], 'late decode rejections are handled');
   }
   // Identical paths share one image; a shared path must still fit every role it serves.
   {
@@ -112,6 +147,16 @@ const art = (assets = Object.fromEntries(ROLES.map(role => [role, '/assets/theme
     assert.equal(draws.length, 2, 'y partitions repeat along x');
     const extent = composition.human(ctx, { x: 100, y: 200 }, { size: 0.72, sitting: true, accent: '#123456' });
     assert.deepEqual(extent, { top: 200 - 40 * 0.72, w: 16 * 0.72, h: 40 * 0.72, fallback: true }, 'the human keeps the existing fallback bounds');
+    // The logical skin (provider) shows as a steady hair tone from existing scene colours; bounds never change.
+    const fills = skin => {
+      const seen = [], c = new Proxy({}, { get: (t, key) => key in t ? t[key] : key === 'fill' ? () => seen.push(t.fillStyle) : () => {}, set: (t, key, value) => { t[key] = value; return true; } });
+      return { extent: composition.human(c, { x: 100, y: 200 }, { size: 1, accent: '#123456', skin }), seen };
+    };
+    const colors = require('../frontend/assets/themes/starnet/theme.json').scene.colors, claude = fills('blank_amber'), codex = fills('blank_blue'), plain = fills('blank');
+    assert.notDeepEqual(claude.seen, codex.seen, 'same accent, different providers: different fills');
+    assert(claude.seen.includes(colors.amber) && codex.seen.includes(colors.cyan) && !plain.seen.includes(colors.amber) && !plain.seen.includes(colors.cyan));
+    assert.deepEqual(claude.extent, codex.extent); assert.deepEqual(claude.extent, plain.extent);
+    assert.deepEqual(claude.extent, { top: 160, w: 16, h: 40, fallback: true });
   }
   console.log('office art: 34 required roles, URL guard, atomic delayed/failed/wrong-size group, path dedupe, native foot-anchored roles, tiles, edges and human bounds OK');
 })().catch(error => { console.error(error); process.exitCode = 1; });

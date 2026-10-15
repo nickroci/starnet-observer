@@ -1120,7 +1120,7 @@ const ObserverView = (() => {
       if (!extent && art === 'office') {
         // Original procedural human at the existing fallback bounds; a ready group's missing frames still repaint.
         if (replacementReady(body.skin)) watchSkin(body.skin);
-        extent = office.composition.human(ctx, foot, { size, sitting: body.sitting, accent: worker.accent });
+        extent = office.composition.human(ctx, foot, { size, sitting: body.sitting, accent: worker.accent, skin: body.skin });
       } else if (!extent) {
         watchSkin(body.skin);
         // Visible upright fallback silhouette while sprites load or are unavailable.
