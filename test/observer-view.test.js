@@ -704,7 +704,7 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   // additive passes only (no upstream entry changed or removed): the blocked-agent "!" marker and idle resting sparks.
   const HEAD_DEFAULT = '34af845124c658b747ab067c08f736f20dc396362025095406cefc32e3782953';
   const omitted = record(undefined).result;
-  assert.equal(digest(omitted), HEAD_DEFAULT, 'default paint colours, order and count equal the pre-theme painter');
+  assert.equal(digest(omitted), HEAD_DEFAULT, 'default paint colours, order and count match the idle-aging baseline');
   assert.equal(digest(record(require('../frontend/app/theme-pack.js').getDefault()).result), HEAD_DEFAULT, 'the canonical snapshot paints the same default');
   assert.equal(omitted['fx-on'].log.filter(entry => entry === 'f:' + base.colors['pixie-core']).length >= 26, true);
 
@@ -1108,4 +1108,33 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   // Procedural humans (no ready group) keep the same hit-tested bodies.
   assert.equal((await paintWith(officeTheme, { ready: false })).view.hitRegions().length, scene.workers.length);
   console.log('office art: all 34 roles at native size and whole pixels, native chairs, carriers at drone points, no station primitives or glow, two-tone outlined faces, steady statuses, depth and hits OK');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Idle tint composes with themed sprite selection and office fallback without leaking into other canvas work.
+(async () => {
+const { SCENE_ART_ROLES } = require('../frontend/app/scene-art-roles.js');
+const assets = Object.fromEntries(Object.keys(SCENE_ART_ROLES).map(role => [role, '/assets/themes/office/scene/' + role.toLowerCase() + '.png']));
+class RoleImage {
+  set src(url) { const role = Object.keys(assets).find(role => assets[role] === url); this.naturalWidth = SCENE_ART_ROLES[role].source.width; this.naturalHeight = SCENE_ART_ROLES[role].source.height; }
+  decode() { return Promise.resolve(); }
+}
+for (const office of [false, true]) {
+  const layout = Model.createLayout();
+  layout.reconcile([{ id: 'aged', projectId: 'p', project: 'P', repoId: 'r', repo: 'R', provider: 'claude', status: 'idle' }]);
+  const scene = Scene.build(layout.onPage(0), 0), node = canvas(1000, 700), stack = [], bodies = [], tintedFills = [];
+  node.ctx.filter = 'none';
+  node.ctx.save = () => stack.push(node.ctx.filter);
+  node.ctx.restore = () => { node.ctx.filter = stack.pop(); };
+  const fill = node.ctx.fill;
+  node.ctx.fill = (...args) => { if (node.ctx.filter === View.idleFilter(1)) tintedFills.push(node.ctx.fillStyle); fill(...args); };
+  const view = View.create({ canvas: node, theme: { scene: { art: { style: office ? 'home-office' : 'station', assets } } }, idleLevel: () => 1,
+    env: { raf: () => 1, caf() {}, now: () => 0, dpr: () => 1, createCanvas: () => canvas(), Image: RoleImage, themeStatus: { reportNotice() {}, reportWarning() {} },
+      sprites: { drawBody(ctx) { bodies.push(ctx.filter); return { top: 0, w: 30, h: 60 }; } } } });
+  for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve));
+  view.start(); view.update(scene, {}); view.focusPlatform(scene.platforms[0].key); view.paint(16);
+  if (office) { assert.equal(bodies.length, 0, 'unready office never substitutes station sprites'); assert(tintedFills.length > 0, 'procedural office body receives idle tint'); }
+  else assert.deepEqual(bodies, [View.idleFilter(1)], 'station sprite receives idle tint');
+  assert.equal(node.ctx.filter, 'none', 'body tint is restored after painting');
+  view.stop();
+}
 })().catch(error => { console.error(error); process.exitCode = 1; });
