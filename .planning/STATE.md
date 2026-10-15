@@ -22,13 +22,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-14)
 
 **Core value:** Show local agent activity truthfully without changing observed sessions or exposing private content beyond the local observation boundary.
-**Current focus:** PR #8 conflict resolution against merged theme PR #13; feature PR remains open. No active milestone or phase.
+**Current focus:** User-authorized merge of PR #8, followed by PR #12; no active milestone or phase.
 
 ## Current Position
 
 Phase: None (0 planned)
 Plan: None
-Status: PR #8 conflict repair verified and independently approved; feature PR remains open
+Status: PR #8 integration complete; final merge verification in progress
 Last activity: 2026-10-15 — PR #8 main integration 27353b2; all 27 test files passed on Bun 1.3.13; independent integration review approved.
 
 ## Quick Tasks Completed
@@ -65,7 +65,7 @@ No blocking theme issue remains. Synthetic-source browser verification passed; n
 Last session: 2026-10-15
 Stopped at: PR #8 conflict repair complete; publication verification
 Resume file: None
-Next action: Verify fast-forward push and GitHub mergeability for PR #8; leave the PR open for user merge decision.
+Next action: Merge PR #8 with a merge commit after final checks, then integrate and merge PR #12.
 
 ### Registered Work
 
