@@ -796,6 +796,7 @@
     if (arrangeButton) arrangeButton.setAttribute('aria-pressed', arrangeOn ? 'true' : 'false');
     if (persist) prefs.set('arrange', arrangeOn ? 1 : 0);
     layout = ObserverModel.createLayout({ projectAccents: pack.scene?.projectAccents }); sceneKey = null; selectedRepoId = null;
+    courier.reset(); ingested = null;
     if (rawLatest) render(arrangedState(rawLatest), true);
   }
   if (arrangeButton) { arrangeButton.setAttribute('aria-pressed', arrangeOn ? 'true' : 'false'); arrangeButton.addEventListener('click', () => applyArrange(!arrangeOn, true)); }

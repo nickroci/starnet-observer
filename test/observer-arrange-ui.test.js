@@ -31,15 +31,16 @@ function boot({ theme = {}, saved = null } = {}) {
   const elements = new Map(), stored = [];
   const get = id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); };
   const filters = get('filters'); filters.children = ['all', 'working', 'blocked'].map(value => { const button = element(); button.dataset.filter = value; return button; });
-  const updates = []; let listener;
+  const updates = [], couriers = []; let listener;
+  const mail = { ...ObserverMail, createCourier(options) { const courier = ObserverMail.createCourier(options); couriers.push(courier); return courier; } };
   document = { documentElement: element(), body: element(), activeElement: null, hidden: false, getElementById: get, createElement: element, addEventListener() {}, querySelector: () => null };
   const ObserverView = { create() { return { setFx() {}, fx() { return false; }, update(scene) { updates.push(scene); }, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate() {} }; } };
-  const context = { console, Date, Set, Map, document, setTimeout: () => 0, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, ThemePack, encodeURIComponent,
+  const context = { console, Date, Set, Map, document, setTimeout: () => 0, clearTimeout() {}, ObserverModel, ObserverMail: mail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, ThemePack, encodeURIComponent,
     window: { __OBSERVER_THEME__: theme, localStorage: { getItem: key => key === 'observer.arrange' ? saved : null, setItem: (key, value) => stored.push([key, value]) }, addEventListener() {} },
     SPRITES: { init: async () => {} }, Harness: { api: { get: () => new Promise(() => {}) } },
     QuerySpine: { define() {}, invalidate: () => Promise.resolve(), subscribe(key, fn) { if (key === 'observer.sessions') listener = fn; return () => {}; } } };
   vm.runInNewContext(fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8'), context);
-  return { get, updates, stored, poll: data => listener({ data }) };
+  return { get, updates, stored, courier: () => couriers[0], poll: data => listener({ data }) };
 }
 const row = (id, projectId, repoId, room, section) => ({ id, paneId: 'w1:' + id.slice(-2), provider: 'claude', source: 'herdr', sessionId: 'session-' + id, status: 'idle', title: 't', tool: { available: false },
   projectId, project: projectId, projectKind: 'group', repoId, repo: repoId, folder: '', observedAt: Date.now(), inventoryHealth: 'available',
@@ -62,6 +63,13 @@ const data = () => ({ health: 'available', observedAt: Date.now(), sessions: [ro
   assert.deepEqual(page.updates.at(-1).workers.map(worker => worker.chair.x + ',' + worker.chair.y), chairs, 'desks hold between polls while arranged');
   page.get('arrange-toggle').handlers.click();
   assert.equal(page.updates.at(-1).platforms.length, 2, 'off again: folder grouping is back'); assert.deepEqual(page.stored.at(-1), ['observer.arrange', '0']);
+  const flying = boot(); await new Promise(resolve => setImmediate(resolve));
+  const beforeMail = data(), sender = beforeMail.sessions[0].id, recipient = beforeMail.sessions[1].id;
+  flying.poll({ ...beforeMail, bus: { health: 'available', messages: [] } });
+  flying.poll({ ...data(), bus: { health: 'available', messages: [{ id: 1, from: sender, to: recipient, sentAt: Date.now(), acknowledgedAt: null }] } });
+  assert(flying.courier().frame(Date.now()).drones.length > 0, 'a newly observed message starts a flight');
+  flying.get('arrange-toggle').handlers.click();
+  assert.equal(flying.courier().frame(Date.now()).drones.length, 0, 'changing the floor layout discards old flight coordinates without replaying mail');
   const themed = boot({ theme: { arrange: true } }); await new Promise(resolve => setImmediate(resolve)); themed.poll(data());
   assert.equal(themed.get('arrange-toggle').attributes['aria-pressed'], 'true', 'theme.arrange sets the default');
   assert.equal(themed.updates.at(-1).platforms.length, 1);
