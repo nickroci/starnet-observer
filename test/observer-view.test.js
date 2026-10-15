@@ -763,3 +763,119 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   }
   console.log('theme view: loading replacement crew watch and settled repaint OK');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+// ---------- Home-office art: atomic activation, canonical station crew while pending/failed, resumable load ----------
+(async () => {
+  const { SCENE_ART_ROLES } = require('../frontend/app/scene-art-roles.js');
+  const ThemePack = require('../frontend/app/theme-pack.js');
+  const flush = async () => { for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve)); };
+  const base = ThemePack.getDefault();
+  const assets = Object.fromEntries(Object.keys(SCENE_ART_ROLES).map(role => [role, '/assets/themes/office/scene/' + role.toLowerCase() + '.png']));
+  const theme = ThemePack.freezeSnapshot({ version: 1, requestedId: 'office', effectiveId: 'office', warnings: [],
+    scene: { ...base.scene, art: { style: 'home-office', assets }, backgroundFx: 'none', ambientFx: 'none' } });
+  // Synthetic decode gate: every image waits for release(); `outcome` decides load failure or a wrong-size role.
+  function harness({ outcome = 'ready', replacement = 'inherited', withTheme = theme } = {}) {
+    let release; const gate = new Promise(resolve => { release = resolve; });
+    const counts = { constructed: 0 };
+    class FakeImage {
+      constructor() { counts.constructed++; }
+      set src(url) { this._src = url; const role = Object.keys(assets).find(key => assets[key] === url), size = SCENE_ART_ROLES[role].source;
+        this.naturalWidth = outcome === 'wrong-size' && role === 'chair' ? size.width + 1 : size.width; this.naturalHeight = size.height; }
+      get src() { return this._src; }
+      decode() { return gate.then(() => { if (outcome === 'fail' && this._src === assets.desk) throw new Error('/private/scene/desk.png'); }); }
+    }
+    const status = ThemePack.createStatus(withTheme, {}), warnings = [];
+    const sprite = { ...sprites(), replacementState: () => replacement, ensureSkin: () => new Promise(() => {}) };
+    const layout = Model.createLayout(), rows = ['working', 'idle', 'blocked'].map((value, index) => ({ id: 'o' + index, project: 'P', projectId: 'p', projectKind: 'group', repo: 'r', repoId: 'r',
+      provider: index % 2 ? 'codex' : 'claude', status: value, worktree: 'wt' }));
+    rows.push({ id: 'oh', parentId: 'o0', source: 'helper', project: 'P', projectId: 'p', projectKind: 'group', repo: 'r', repoId: 'r', provider: 'claude', status: 'working' });
+    layout.reconcile(rows);
+    const scene = Scene.build(layout.onPage(0), 0), node = canvas(), frames = [];
+    const view = View.create({ theme: withTheme, canvas: node, nameFor: id => id, reducedMotion: () => true,
+      env: { raf: fn => { frames.push(fn); return frames.length; }, caf() {}, dpr: () => 1, createCanvas: () => canvas(), sprites: sprite, now: () => 0, Image: FakeImage,
+        themeStatus: { reportWarning: warning => { warnings.push(warning); status.report(warning); }, reportNotice: status.notice } } });
+    view.start();
+    view.update(scene, { stale: () => false, mailFrame: () => ({ drones: [], envelopes: [] }), inspected: () => null });
+    const run = () => { let t = 0; for (let i = 0; i < 50 && frames.length; i++) frames.shift()(t += 16); };
+    return { view, scene, frames, run, sprite, counts, status, warnings, node, release };
+  }
+  const groups = h => h.sprite.appearances.map(appearance => appearance.group);
+  const workers = h => h.scene.workers.length;
+
+  {
+    // Pending: complete station art, every body drawn by the sprite engine in its canonical default group, status truthful.
+    const h = harness({ replacement: 'ready' });
+    h.run();
+    assert.equal(h.counts.constructed, 34, 'one load of the 34 roles starts at create');
+    assert.deepEqual(groups(h), Array(workers(h)).fill('default'), 'pending office art forces canonical station crew even with ready humans');
+    assert.deepEqual(h.status.lines(), ['Theme pack office office art loading; showing station art.']);
+    assert.equal(h.view.cacheBuilds(), 1);
+    // Ready: one activation, one static rebuild through the existing scheduler; ready humans draw without the default group.
+    h.release(); await flush();
+    assert.equal(h.frames.length, 1, 'readiness schedules one paint');
+    h.sprite.appearances.length = 0; h.run();
+    assert.equal(h.view.cacheBuilds(), 2, 'activation invalidates the static cache once');
+    assert.deepEqual(groups(h), Array(workers(h)).fill(undefined), 'active office crew with a ready group uses its human sprites');
+    h.view.invalidate(); h.run(); h.view.invalidate(); h.run();
+    assert.equal(h.view.cacheBuilds(), 2, 'the rebuilt layer is reused');
+    assert.deepEqual(h.status.lines(), [], 'the pending notice clears on activation');
+    assert.equal(h.warnings.length, 0);
+    // Hiding and resuming ready art keeps the same images: nothing reloads, the office stays active.
+    h.view.stop(); h.view.start(); h.sprite.appearances.length = 0; h.run();
+    assert.equal(h.counts.constructed, 34, 'no reload across stop/start');
+    assert.deepEqual(groups(h), Array(workers(h)).fill(undefined)); assert.equal(h.view.cacheBuilds(), 2);
+  }
+  {
+    // Active office without a ready human group: original procedural human at the fallback bounds, never the android sprite.
+    for (const replacement of ['inherited', 'loading', 'failed']) {
+      const h = harness({ replacement });
+      h.release(); await flush(); h.sprite.appearances.length = 0; h.run();
+      assert.equal(h.sprite.appearances.length, 0, replacement + ': no sprite body is drawn in the office');
+      const regions = h.view.hitRegions(), zoom = h.view.camera().zoom;
+      assert.equal(regions.length, workers(h), replacement + ': every human is hit-testable');
+      const root = regions.find(region => region.id === 'o1');
+      assert(Math.abs(root.width - Math.max(20, 16 * zoom)) < 1e-6 && Math.abs(root.height - Math.max(20, 40 * zoom)) < 1e-6, replacement + ': fallback hit bounds');
+    }
+  }
+  {
+    // Settlement while stopped records readiness without painting; start() activates through the scheduler.
+    const h = harness();
+    h.run(); h.view.stop();
+    h.release(); await flush();
+    assert.equal(h.frames.length, 0, 'no paint is scheduled while stopped');
+    assert.equal(h.view.cacheBuilds(), 1);
+    h.view.start(); assert.equal(h.frames.length, 1);
+    h.sprite.appearances.length = 0; h.run();
+    assert.equal(h.view.cacheBuilds(), 2, 'start rebuilds the static layer once for the office');
+    assert.equal(h.sprite.appearances.length, 0, 'office humans after start');
+    assert.equal(h.counts.constructed, 34);
+  }
+  {
+    // Hide/resume while pending keeps the same load; it still activates afterwards.
+    const h = harness();
+    h.run(); h.view.stop(); h.view.start(); h.view.stop(); h.view.start(); h.run();
+    assert.equal(h.counts.constructed, 34, 'pending load survives suspension');
+    h.release(); await flush(); h.sprite.appearances.length = 0; h.run();
+    assert.equal(h.view.cacheBuilds(), 2); assert.equal(h.sprite.appearances.length, 0);
+  }
+  for (const [outcome, code, text] of [['fail', 'scene-art-load', 'did not load'], ['wrong-size', 'scene-art-dimensions', 'has the wrong image sizes']]) {
+    // Failure: one bounded warning, permanent station art with canonical crew, no extra rebuild.
+    const h = harness({ outcome, replacement: 'ready' });
+    h.run(); h.release(); await flush();
+    assert.equal(h.frames.length, 0, outcome + ': station art is unchanged, so nothing repaints');
+    h.view.stop(); h.view.start(); h.sprite.appearances.length = 0; h.run();
+    assert.deepEqual(groups(h), Array(workers(h)).fill('default'), outcome + ': failed office art keeps canonical station crew');
+    assert.equal(h.view.cacheBuilds(), 1);
+    assert.equal(h.warnings.length, 1); assert.deepEqual([h.warnings[0].code, h.warnings[0].pack], [code, 'office']);
+    assert.deepEqual(h.status.lines(), ['Theme pack office office art ' + text + '; showing station art.']);
+    assert(!/[\\/]|Error/.test(h.warnings[0].message), outcome + ': no path or raw error');
+  }
+  {
+    // A station theme never loads office art or changes its crew appearance.
+    const h = harness({ withTheme: null });
+    h.run();
+    assert.equal(h.counts.constructed, 0);
+    assert.deepEqual(groups(h), Array(workers(h)).fill(undefined), 'station crew appearance is unchanged');
+  }
+  console.log('office view: pending/failed station crew, single activation and cache rebuild, ready humans or procedural fallback, stopped settlement, pending/ready resume, bounded failure warnings OK');
+})().catch(error => { console.error(error); process.exitCode = 1; });

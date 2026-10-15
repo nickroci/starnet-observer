@@ -6,6 +6,7 @@
 const ObserverView = (() => {
   const Scene = typeof module !== 'undefined' && module.exports ? require('./observer-scene.js') : ObserverScene;
   const Themes = typeof module !== 'undefined' && module.exports ? require('./theme-pack.js') : ThemePack;
+  const OfficeArt = typeof module !== 'undefined' && module.exports ? require('./observer-office-art.js') : ObserverOfficeArt;
   /* Every scene colour comes from the canonical default pack, overlaid per view by a resolved snapshot. PALETTE and
      STATUS are read-only views of that default for helpers and tests; no view ever mutates them. */
   const DEFAULT_SCENE = Themes.getDefault().scene;
@@ -21,7 +22,9 @@ const ObserverView = (() => {
     const colors = Object.freeze(Object.fromEntries(Object.keys(DEFAULT_SCENE.colors).map(key => [key, Object.hasOwn(given, key) ? given[key] : DEFAULT_SCENE.colors[key]])));
     return Object.freeze({ colors, status: pick(colors, Object.keys(STATUS)),
       backgroundFx: BACKGROUND_FX.includes(scene.backgroundFx) ? scene.backgroundFx : DEFAULT_SCENE.backgroundFx,
-      ambientFx: AMBIENT_FX.includes(scene.ambientFx) ? scene.ambientFx : DEFAULT_SCENE.ambientFx });
+      ambientFx: AMBIENT_FX.includes(scene.ambientFx) ? scene.ambientFx : DEFAULT_SCENE.ambientFx,
+      // The declared art enum only; never a pack ID.
+      art: scene.art && scene.art.style === 'home-office' ? 'home-office' : 'station' });
   }
   // Six-digit hex or numeric rgba (the validated forms) as channels; dynamic opacity multiplies the colour's own alpha.
   function channels(color) {
@@ -441,6 +444,34 @@ const ObserverView = (() => {
     // Paint scheduling: a live scene keeps its RAF; a frozen (stale or reduced) one paints once per invalidation.
     let dirty = false, reported = null, workerIndex = new Map(), signature = '', platformCounts = new Map();
     const readiness = new Map(), watchers = [];
+    /* Home-office art: one view-owned load started here and kept across stop/start (page hiding is suspension, not
+       disposal). Until the complete group is ready, or after it fails, the complete station art and canonical station
+       crew paint; readiness activates office art once. A settlement while stopped only records it: invalidate()
+       schedules nothing until start(), and the cache key carries the art mode so the static layer rebuilds once. */
+    const status = env.themeStatus || Themes, packId = theme && typeof theme.effectiveId === 'string' ? theme.effectiveId : 'starnet';
+    const office = look.art === 'home-office' ? { state: 'pending', composition: null } : null;
+    if (office) {
+      status.reportNotice('scene-art', 'Theme pack ' + packId + ' office art loading; showing station art.');
+      OfficeArt.load(theme.scene.art, { Image: env.Image || win.Image }).then(settleOffice, () => settleOffice({ state: 'failed', reason: 'scene-art-load' }));
+    }
+    function settleOffice(result) {
+      if (office.state !== 'pending') return;
+      status.reportNotice('scene-art', null);
+      if (result.state === 'ready') {
+        office.composition = OfficeArt.create({ images: result.images, colors: C, project: P, crewHeight: CREW_HEIGHT });
+        office.state = 'ready';
+        invalidate();
+        return;
+      }
+      office.state = 'failed';
+      const reason = result.reason === 'scene-art-dimensions' ? 'scene-art-dimensions' : 'scene-art-load';
+      status.reportWarning({ code: reason, pack: packId, message: 'Theme pack ' + packId + (reason === 'scene-art-dimensions'
+        ? ' office art has the wrong image sizes; showing station art.' : ' office art did not load; showing station art.') });
+    }
+    /* The single art dispatch point: 'office' only once the complete group is ready. Slice 4b replaces the office
+       entry with the fixed role painters; until then office mode reuses the station static painter. */
+    const artMode = () => (office && office.state === 'ready' ? 'office' : 'station');
+    const artPainters = { station: { paintStatic }, office: { paintStatic } };
 
     function measure() {
       const width = canvas.clientWidth || canvas.width || 1, height = canvas.clientHeight || canvas.height || 1, ratio = dprOf();
@@ -529,14 +560,14 @@ const ObserverView = (() => {
     // ---------- static layer cache ----------
     function staticFor() {
       const resolution = cacheResolution(scene.bounds, camera.zoom, dpr);
-      const key = scene.revision + '#' + signature + '#' + resolution;
+      const key = scene.revision + '#' + signature + '#' + resolution + '#' + artMode();
       if (staticLayer && staticLayer.key === key) return staticLayer;
       // Floor, never ceil: the continuous budget holds for the integer backing store too (≤ 4 MP, ≤ 4096 per axis).
       const b = scene.bounds, spanX = Math.max(1, b.maxX - b.minX), spanY = Math.max(1, b.maxY - b.minY);
       const width = Math.max(1, Math.floor(spanX * resolution)), height = Math.max(1, Math.floor(spanY * resolution));
       const layer = makeCanvas(width, height), layerCtx = layer.getContext('2d'), sx = width / spanX, sy = height / spanY;
       layerCtx.setTransform(sx, 0, 0, sy, -b.minX * sx, -b.minY * sy);
-      paintStatic(layerCtx, scene);
+      artPainters[artMode()].paintStatic(layerCtx, scene);
       staticLayer = { key, canvas: layer, resolution, bounds: b, builds: (staticLayer ? staticLayer.builds : 0) + 1 };
       return staticLayer;
     }
@@ -957,11 +988,21 @@ const ObserverView = (() => {
         const top = toScreen(bounds.y, foot.y, camera.ty), bottom = toScreen(bounds.y + bounds.h, foot.y, camera.ty);
         return right >= -1 && left <= viewport.width + 1 && bottom >= -1 && top <= viewport.height + 1;
       };
-      try { extent = sprites && sprites.drawBody ? sprites.drawBody(ctx, body, now, { reducedMotion: reduced, skipGroundShadow: true, shouldPaint }) : null; } catch (_) { extent = null; }
+      /* Station art (and pending/failed office art) draws through the sprite engine; office art only with a ready
+         replacement group, since default android frames never stand in an office. */
+      const art = artMode(), appearance = { reducedMotion: reduced, skipGroundShadow: true, shouldPaint };
+      if (office && art === 'station') appearance.group = 'default';
+      if (art === 'station' || replacementReady(body.skin)) {
+        try { extent = sprites && sprites.drawBody ? sprites.drawBody(ctx, body, now, appearance) : null; } catch (_) { extent = null; }
+      }
       ctx.restore();
       // A replacement group still loading draws canonical frames now; repaint once it settles, ready or failed.
       if (replacementLoading(body.skin)) watchSkin(body.skin, true);
-      if (!extent) {
+      if (!extent && art === 'office') {
+        // Original procedural human at the existing fallback bounds; a ready group's missing frames still repaint.
+        if (replacementReady(body.skin)) watchSkin(body.skin);
+        extent = office.composition.human(ctx, foot, { size, sitting: body.sitting, accent: worker.accent });
+      } else if (!extent) {
         watchSkin(body.skin);
         // Visible upright fallback silhouette while sprites load or are unavailable.
         const h = CREW_HEIGHT * size, w = 16 * size;
@@ -983,10 +1024,11 @@ const ObserverView = (() => {
        that settles without frames (pre-init or missing set) never schedules work, so no loop is parked on assets.
        `settled` (a replacement group was loading) repaints on any settlement: the state has left 'loading', so the
        next paint never re-arms the same job. */
-    function replacementLoading(skin) {
+    function replacementIs(skin, state) {
       if (!sprites || typeof sprites.replacementState !== 'function') return false;
-      try { return sprites.replacementState(skin) === 'loading'; } catch (_) { return false; }
+      try { return sprites.replacementState(skin) === state; } catch (_) { return false; }
     }
+    const replacementLoading = skin => replacementIs(skin, 'loading'), replacementReady = skin => replacementIs(skin, 'ready');
     function watchSkin(skin, settled = false) {
       if (!sprites || typeof sprites.ensureSkin !== 'function') return;
       let job; try { job = sprites.ensureSkin(skin); } catch (_) { return; }

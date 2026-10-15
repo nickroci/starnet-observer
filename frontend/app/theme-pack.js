@@ -55,16 +55,18 @@ const ThemePack = (() => {
     for (const [key, attribute] of Object.entries(DECOR)) root.setAttribute(attribute, decor[key] === false ? 'off' : 'on');
     if (profile === 'dm-sans') installFont(snapshot, doc, report);
   }
-  // Theme status: requested/effective IDs plus snapshot and runtime asset warnings, rendered as text only.
+  /* Theme status: requested/effective IDs, transient non-warning notices (e.g. office art still loading) and snapshot
+     and runtime asset warnings, rendered as text only. A notice is replaced or removed by its code. */
   function createStatus(snapshot, doc) {
-    const warnings = [], seen = new Set();
+    const warnings = [], seen = new Set(), notices = new Map();
     let region = null;
     const clip = value => String(value).slice(0, MAX_TEXT);
     const lines = () => {
       const result = [];
       if (snapshot?.requestedId && snapshot.requestedId !== packId(snapshot)) result.push('Theme pack ' + snapshot.requestedId + ' requested; showing ' + packId(snapshot) + '.');
+      for (const message of notices.values()) result.push(message);
       for (const warning of warnings) result.push(warning.message);
-      return result.slice(0, MAX_WARNINGS + 1).map(clip);
+      return result.slice(0, MAX_WARNINGS + 1 + notices.size).map(clip);
     };
     function render() {
       if (!region) return;
@@ -80,8 +82,13 @@ const ThemePack = (() => {
       warnings.push({ code: warning.code, message: typeof warning.message === 'string' && warning.message ? warning.message : 'Theme ' + warning.code + ' warning.' });
       render();
     }
+    function notice(code, message) {
+      if (typeof code !== 'string') return;
+      if (typeof message === 'string' && message) notices.set(code, message); else notices.delete(code);
+      render();
+    }
     for (const warning of Array.isArray(snapshot?.warnings) ? snapshot.warnings : []) report(warning);
-    return { report, mount() { region = doc.getElementById('theme-status'); render(); }, lines };
+    return { report, notice, mount() { region = doc.getElementById('theme-status'); render(); }, lines };
   }
   // Optional brand logo: the decorative mark stays until the local image decodes; failure restores it.
   function applyLogo(snapshot, doc, report) {
@@ -110,7 +117,8 @@ const ThemePack = (() => {
   }
   // Later runtime consumers (crew/scene art) append bounded warnings to the same region.
   function reportWarning(warning) { if (active) active.report(warning); }
-  return Object.freeze({ freezeSnapshot, getDefault, applyInterface, createStatus, applyLogo, start, reportWarning });
+  function reportNotice(code, message) { if (active) active.notice(code, message); }
+  return Object.freeze({ freezeSnapshot, getDefault, applyInterface, createStatus, applyLogo, start, reportWarning, reportNotice });
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ThemePack;
 else if (typeof window !== 'undefined' && typeof document !== 'undefined') {

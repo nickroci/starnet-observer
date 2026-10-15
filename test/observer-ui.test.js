@@ -41,6 +41,12 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   assert.ok(page.indexOf('id="source-health"') > page.indexOf(status), 'console source health stays a separate region');
   const brand = page.match(/<div class="brand">.*?<\/div>/)[0];
   assert.ok(brand.includes('<span class="brand-mark" aria-hidden="true">✦</span><img id="brand-logo" class="brand-logo" alt="" hidden><h1>Local observer</h1><span class="read-only">READ ONLY</span>'), 'logo slot follows the mark without replacing heading or READ ONLY label');
+  // Office art: the role table, then the loader/composition, both before the view that owns the load.
+  const scripts = [...page.matchAll(/<script src="([^"]+)"><\/script>/g)].map(match => match[1]);
+  const at = name => scripts.indexOf(name);
+  assert.ok(at('app/scene-art-roles.js') >= 0 && at('app/scene-art-roles.js') < at('app/observer-office-art.js') && at('app/observer-office-art.js') < at('app/observer-view.js'),
+    'scene-art-roles.js and observer-office-art.js load once, before observer-view.js');
+  assert.equal(scripts.filter(name => name === 'app/observer-office-art.js' || name === 'app/scene-art-roles.js').length, 2);
   const controller = fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8');
   assert.ok(!controller.includes('theme-status') && !controller.includes('brand-logo'), 'the session controller never writes theme slots');
 }
