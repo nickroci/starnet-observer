@@ -157,3 +157,30 @@ assert.equal(Model.hoverLabel({ source: 'helper', provider: 'codex', title: 'Ada
   assert.equal(layout.seatFor('group-only-pane'), 0, 'authoritative group-only pane beyond represented lineage remains an ordinary root');
   assert.equal(layout.onPage(0)[0].rows[0].kind, 'session');
 }
+
+// Theme project accents recolour the ten slots only: same rooms, slots, floor names and desks as the default palette.
+{
+  const defaults = require('../frontend/assets/themes/starnet/theme.json').scene.projectAccents;
+  assert.deepEqual(Model.palette.map(([, accent]) => accent), defaults, 'omitted accents are the canonical default slots');
+  assert.deepEqual(Model.palette.map(([floor]) => floor), ['cobalt', 'teal', 'verdant', 'moss', 'amber', 'ember', 'crimson', 'orchid', 'violet', 'indigo']);
+  const custom = Array.from({ length: 10 }, (_, index) => '#a0' + String(index).padStart(2, '0') + '0' + index);
+  const rows = Array.from({ length: 30 }, (_, index) => worker('repo' + (index % 5), index, 'P' + (index % 12)));
+  const plain = Model.createLayout(), themed = Model.createLayout({ projectAccents: custom });
+  plain.reconcile(rows); themed.reconcile(rows);
+  assert.equal(themed.pages(), plain.pages());
+  for (let page = 0; page < plain.pages(); page++) {
+    const before = plain.onPage(page), after = themed.onPage(page);
+    assert.deepEqual(after.map(room => [room.key, room.slot, room.floor, room.blocks.map(block => block.repo)]), before.map(room => [room.key, room.slot, room.floor, room.blocks.map(block => block.repo)]), 'same rooms, slots and floor names');
+    for (const room of after) {
+      const slot = Model.palette.findIndex(([floor]) => floor === room.floor);
+      assert.equal(room.accent, custom[slot], room.floor + ' shows its themed slot colour');
+      assert.notEqual(room.accent, defaults[slot]);
+    }
+    assert.deepEqual(JSON.stringify(Scene.build(after, page).workers.map(w => [w.id, w.chair, w.desk])), JSON.stringify(Scene.build(before, page).workers.map(w => [w.id, w.chair, w.desk])), 'identical desk geometry');
+  }
+  for (const project of ['prj_P0', 'prj_P7', 'prj_unknown']) {
+    assert.equal(themed.colorFor(project).floor, plain.colorFor(project).floor);
+    assert.equal(themed.colorFor(project).accent, custom[Model.palette.findIndex(([floor]) => floor === plain.colorFor(project).floor)]);
+  }
+  console.log('theme project accents: slot colours only, same rooms, floor names and geometry OK');
+}

@@ -34,6 +34,10 @@ try {
   for (const bad of [{ theme: { arrange: 'yes' } }, { roomsFile: '' }, { roomsFile: 3 }, { roomsFile: 'a\u0000b' }]) assert.throws(() => validateConfig(bad));
   assert.throws(() => loadConfig(['--fx', '--no-fx'], missing));
   for (const theme of [null, [], { fx: 'false' }, { scripts: 'bad' }, { colors: { accent: 'red' } }, { colors: { accent: '#123' } }, { colors: { custom: '#123456' } }]) assert.throws(() => validateConfig({ theme }));
+  assert.deepEqual(validateConfig({ theme: { pack: 'starnet' } }), { theme: { pack: 'starnet' } });
+  write({ theme: { pack: 'sample', fx: false } });
+  assert.deepEqual(loadConfig(['--fx'], file).theme, { pack: 'sample', fx: true });
+  for (const pack of ['', '../sample', 'Sample', '-sample', 'a'.repeat(33), null, 1]) assert.throws(() => validateConfig({ theme: { pack } }), /theme.pack/);
   const basic = loadConfig(['--config', path.join(__dirname, '../themes/basic.json')], missing);
   assert.equal(basic.presentation, false); assert.equal(basic.theme.fx, false);
   const helio = loadConfig(['--config', path.join(__dirname, '../themes/helioforge.json')], missing);
@@ -59,6 +63,10 @@ try {
   const server = path.join(__dirname, '../server.js');
   const invalid = spawnSync(process.execPath, ['--no-env-file', server, '--config', file], { cwd: folder, encoding: 'utf8', timeout: 3000 });
   assert.equal(invalid.status, 1); assert.match(invalid.stderr, /config/); assert.doesNotMatch(invalid.stdout, /Local Observer:/);
+  write({ theme: { pack: 'uninstalled-test-pack' } });
+  const missingPack = spawnSync(process.execPath, ['--no-env-file', server, '--config', file], { cwd: folder, encoding: 'utf8', timeout: 3000 });
+  assert.equal(missingPack.status, 1); assert.match(missingPack.stderr, /Unknown or uninstalled theme pack/);
+  assert.doesNotMatch(missingPack.stdout, /Local Observer:/);
   const help = spawnSync(process.execPath, ['--no-env-file', server, '--help'], { cwd: folder, encoding: 'utf8', timeout: 3000 });
   assert.equal(help.status, 0); assert.match(help.stdout, /--no-presentation/);
   assert.match(help.stdout, /Usage: bun --no-env-file server\.js/);

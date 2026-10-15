@@ -1,8 +1,9 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#030705">
-<title>Local Observer</title><link rel="stylesheet" href="css/observer.css"></head>
-<body><header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span><h1>Local observer</h1><span class="read-only">READ ONLY</span><span class="glyph-strip" aria-hidden="true">⏃⟟⌇ ⍜⏚⌖</span></div>
-<div class="connection"><p id="health" role="status" aria-live="polite">Connecting…</p><span id="observed"></span></div></header>
+<title>Local Observer</title><link rel="stylesheet" href="css/observer.css"><!--observer-boot--><script src="app/theme-pack.js"></script></head>
+<body><header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span><img id="brand-logo" class="brand-logo" alt="" hidden><h1>Local observer</h1><span class="read-only">READ ONLY</span><span class="glyph-strip" aria-hidden="true">⏃⟟⌇ ⍜⏚⌖</span></div>
+<div class="connection"><p id="health" role="status" aria-live="polite">Connecting…</p><span id="observed"></span></div>
+<div id="theme-status" class="theme-status" role="status" aria-live="polite" aria-label="Theme status" hidden></div></header>
 <main class="workspace"><section class="station-panel" aria-label="Repository station">
 <div class="station-toolbar"><div class="station-heading"><span class="eyebrow">REPOSITORY STATION</span><p id="room-count">Finding local sessions</p><details id="station-stats" class="station-stats" hidden><summary id="station-stats-summary" title="Expand station statistics"></summary><dl id="station-totals" class="station-totals" aria-label="Station totals" hidden></dl></details></div><div class="station-actions"><button id="zoom-chip" class="zoom-chip" type="button" hidden></button><button id="overview" type="button">Overview</button><button id="zoom-out" type="button" aria-label="Zoom out">−</button><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="previous-page" type="button" aria-label="Previous station deck">‹</button><span id="page-label">Deck 1</span><button id="next-page" type="button" aria-label="Next station deck">›</button><button id="arrange-toggle" class="fx-toggle arrange-toggle" type="button" aria-pressed="false" title="Dynamic arrangement: group by project (repository, organisation, rooms file) instead of parent folder">ARRANGE</button><button id="fx-toggle" class="fx-toggle" type="button" aria-pressed="false" title="Toggle Matrix pixie sky">FX</button><button id="controls-help" class="controls-help" type="button" aria-label="Station controls" aria-expanded="false" aria-controls="controls-help-popover">?</button></div>
 <div id="controls-help-popover" class="controls-popover" role="group" aria-labelledby="controls-help-title" hidden><h3 id="controls-help-title">Station controls</h3><p class="keys-lead">With the station focused:</p><ul class="controls-list"><li><span><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd></span> pan</li><li><span><kbd>+</kbd><kbd>-</kbd></span> zoom</li><li><span><kbd>0</kbd></span> overview</li><li><span><kbd>O</kbd></span> open observatory / overseer controls</li></ul><p>Double-click a worker or platform to zoom to it. A repository name in Live sessions, or its sign on the station, highlights that repository's crew.</p></div></div>
@@ -28,6 +29,8 @@
 <script src="app/observer-mail.js"></script>
 <script src="app/observer-inspector.js"></script>
 <script src="app/observer-mail-inspector.js"></script>
+<script src="app/scene-art-roles.js"></script>
+<script src="app/observer-office-art.js"></script>
 <script src="app/observer-view.js"></script>
 <script src="app/observer.js"></script>
 </body></html>

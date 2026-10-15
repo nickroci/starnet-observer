@@ -75,8 +75,12 @@ function validateConfig(input) {
     result.roomsFile = input.roomsFile;
   }
   if (Object.hasOwn(input, 'theme')) {
-    object(input.theme, 'theme'); keys(input.theme, ['fx', 'arrange', 'colors'], 'theme');
+    object(input.theme, 'theme'); keys(input.theme, ['pack', 'fx', 'arrange', 'colors'], 'theme');
     result.theme = {};
+    if (Object.hasOwn(input.theme, 'pack')) {
+      if (typeof input.theme.pack !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(input.theme.pack)) throw new Error('theme.pack must be a lowercase pack ID of 1–32 characters');
+      result.theme.pack = input.theme.pack;
+    }
     if (Object.hasOwn(input.theme, 'fx')) {
       if (typeof input.theme.fx !== 'boolean') throw new Error('theme.fx must be a boolean');
       result.theme.fx = input.theme.fx;
