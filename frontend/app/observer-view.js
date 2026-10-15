@@ -406,7 +406,7 @@ const ObserverView = (() => {
       if (next === mode && key === platform) return;
       mode = next; platform = key; onMode({ mode, platform });
     }
-    let viewport = { width: 0, height: 0 }, dpr = 1, frame = null, running = false, staticLayer = null, stars = null, observer = null, fx = true;
+    let viewport = { width: 0, height: 0 }, dpr = 1, frame = null, running = false, staticLayer = null, stars = null, observer = null, fx = false;
     const pointers = new Map(); let drag = null, pinch = null;
     // Paint scheduling: a live scene keeps its RAF; a frozen (stale or reduced) one paints once per invalidation.
     let dirty = false, reported = null, workerIndex = new Map(), signature = '', platformCounts = new Map();

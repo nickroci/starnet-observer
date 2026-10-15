@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S bun --no-env-file
 'use strict';
 const http = require('node:http');
 const fs = require('node:fs/promises');

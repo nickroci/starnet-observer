@@ -60,6 +60,8 @@ function fixture() {
   assert.equal(await switched.resolver.revalidate(old.proof), false, 'in-TUI switch rejected without roster refresh');
   switched.fail(true); assert.equal(await switched.resolver.revalidate(old.proof), false);
   assert.equal((await fixture().resolver.resolve({ ...pane, terminal_id: null })).sessionId, null, 'missing terminal incarnation fails closed');
+  await boundedIdentityRefresh();
+  await concurrentSuppression();
   await configurationAndRpc();
   await sampledRaces();
   await processBirthBoundary();
@@ -133,7 +135,7 @@ async function processBirthBoundary() {
   const { spawn } = require('node:child_process');
   const { makeObserver } = require('../sidecar/observer.js');
   // Only this test owns the exited child; no Herdr pane or external process is read.
-  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  const child = spawn(process.execPath, ['--no-env-file', '-e', ''], { stdio: 'ignore' });
   await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', code => code === 0 ? resolve() : reject(Error('Owned child failed')));
@@ -243,4 +245,105 @@ async function sampledRaces() {
   assert.equal(await healthy.resolver.revalidateAll([result.proof, { ...result.proof, paneId: 'w1:p2' }]), false);
   assert.equal(healthy.methods.length, 9, 'multiple roots rejected before additional native work');
   assert.equal(await healthy.resolver.revalidateAll([result.proof, result.proof]), true, 'duplicate proof is one distinct root');
+}
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+async function drain() { for (let i = 0; i < 40; i++) await new Promise(resolve => setImmediate(resolve)); }
+function concurrentFixture(options = {}) {
+  const panes = Array.from({ length: 8 }, (_, i) => ({ ...pane, pane_id: 'w1:p' + i, terminal_id: 'term_' + i }));
+  const calls = [], births = [], counts = new Map();
+  const resolver = makeIdentityResolver({ now: () => 1000, readConfiguration: async () => 'configured',
+    readProcessBirth: async pid => {
+      const count = (counts.get(pid) || 0) + 1; counts.set(pid, count); births.push({ pid, count });
+      await options.birth?.(pid, count);
+      return { pid, startSeconds: options.fault === 'birth' && pid === 100 && count === 2 ? 2 : 1, startMicroseconds: 0 };
+    }, rpc: async (method, params) => {
+      const id = params.pane_id || params.target, index = panes.findIndex(row => row.pane_id === id);
+      assert(index >= 0); calls.push({ id, method, params });
+      await options.rpc?.(method, params, index);
+      if (method === 'agent.get') return { result: { agent: { ...panes[index], terminal_id: options.fault === 'terminal' && index === 0 && calls.filter(call => call.id === id && call.method === method).length === 2 ? 'replaced' : panes[index].terminal_id } } };
+      if (method === 'pane.process_info') return { result: { process_info: { pane_id: id, shell_pid: 100 + index } } };
+      if (method === 'pane.get') return { result: { pane: { pane_id: id, scroll: { max_offset_from_bottom: 0, viewport_rows: 20 } } } };
+      if (method === 'pane.copy_motion') {
+        if (options.fault === 'content' && index === 0 && params.content_revision !== undefined) throw Error('stale_content');
+        return { result: { pane_id: id, content_revision: 8 } };
+      }
+      assert.equal(method, 'pane.read');
+      const session = '00000000-0000-0000-0000-' + String(index + 1).padStart(12, '0');
+      return { result: { read: { pane_id: id, source: 'recent', format: 'text', text: '\n  ' + session + ' · model\n  ? for shortcuts\n' } } };
+    } });
+  return { panes, resolver, calls, births };
+}
+async function boundedIdentityRefresh() {
+  const hold = deferred(), f = concurrentFixture({ birth: async (_, count) => { if (count === 1) await hold.promise; } });
+  assert.equal(typeof f.resolver.resolveMany, 'function', 'roster resolver supports bounded captures');
+  let pending;
+  try {
+    pending = f.resolver.resolveMany(f.panes, {}); await drain();
+    assert.deepEqual(f.births.map(read => read.pid).sort(), [100, 101, 102, 103], 'four panes overlap at first birth');
+    assert.equal(new Set(f.calls.map(call => call.id)).size, 4, 'fifth pane cannot begin capture');
+  } finally { hold.resolve(); if (pending) await pending; }
+  const results = await pending;
+  assert.deepEqual(results.map(row => row.sessionId), f.panes.map((_, i) => '00000000-0000-0000-0000-' + String(i + 1).padStart(12, '0')));
+  for (const row of f.panes) {
+    const last = f.calls.filter(call => call.id === row.pane_id).at(-1);
+    assert.equal(last.method, 'pane.copy_motion'); assert.equal(last.params.content_revision, 8, 'each capture ends in its own conditional probe');
+  }
+  for (const fault of ['content', 'terminal', 'birth']) {
+    const raced = concurrentFixture({ fault });
+    const values = await raced.resolver.resolveMany(raced.panes, {});
+    assert.equal(values[0].sessionId, null, fault + ' fails only affected pane');
+    assert(values.slice(1).every(value => value.source === 'footer'));
+  }
+}
+async function concurrentSuppression() {
+  const admission = deferred(); let silent = true;
+  const f = concurrentFixture({ rpc: async () => { if (silent) await admission.promise; } });
+  const state = {}; let pending;
+  try {
+    pending = f.resolver.resolveMany(f.panes, state); await drain();
+    assert.equal(f.calls.length, 1, 'first actual RPC admits the refresh, without a probe');
+    admission.reject(Object.assign(Error('silent endpoint'), { code: 'IDENTITY_TIMEOUT' }));
+    const values = await pending;
+    assert(values.every(value => value.sessionId === null)); assert.equal(f.calls.length, 1); assert.equal(state.endpointTimedOut, true);
+  } finally { admission.resolve(); if (pending) await pending; }
+  silent = false; assert((await f.resolver.resolveMany(f.panes, {})).every(value => value.source === 'footer'));
+  const late = deferred(); let timeout = true;
+  const timed = concurrentFixture({ rpc: async (method, params, index) => {
+    if (method !== 'pane.get' || !timeout) return;
+    await late.promise;
+    if (index === 0) throw Object.assign(Error('late timeout'), { code: 'IDENTITY_TIMEOUT' });
+  } });
+  let work;
+  try {
+    work = timed.resolver.resolveMany(timed.panes, {}); await drain(); late.resolve();
+    assert((await work).every(value => value.sessionId === null));
+    assert.equal(timed.calls.filter(call => call.method === 'pane.copy_motion').length, 0, 'outstanding RPCs settle without starting further RPCs');
+  } finally { late.resolve(); if (work) await work; }
+  timeout = false; assert((await timed.resolver.resolveMany(timed.panes, {})).every(value => value.source === 'footer'));
+
+  const hold = deferred(); let capabilityUnavailable = true;
+  const live = concurrentFixture({ birth: async (pid, count) => {
+    if (count !== 1 || !capabilityUnavailable) return;
+    await hold.promise;
+    if (pid === 100) throw Object.assign(Error('capability'), { code: 'ENOENT' });
+  } });
+  try {
+    work = live.resolver.resolveMany(live.panes, {}); await drain(); hold.resolve();
+    assert((await work).every(value => value.sessionId === null)); assert.equal(live.births.length, 4);
+    assert.equal(live.calls.filter(call => call.method === 'pane.get').length, 0, 'capability suppression publishes before outstanding births continue');
+  } finally { hold.resolve(); if (work) await work; }
+  capabilityUnavailable = false; assert((await live.resolver.resolveMany(live.panes, {})).every(value => value.source === 'footer'));
+
+  const localFailure = true;
+  const local = concurrentFixture({ rpc: async (method, params, index) => {
+    if (localFailure && index === 0) throw Error('pane unavailable');
+  } });
+  const values = await local.resolver.resolveMany(local.panes, {});
+  assert.equal(values[0].sessionId, null);
+  assert(values.slice(1).every(value => value.source === 'footer'), 'non-timeout admission failure stays pane-local');
 }

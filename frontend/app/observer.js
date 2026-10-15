@@ -233,11 +233,10 @@
     if (next === page) return;
     setPage(next); overview(); if (latest) render(latest, true);
   }
-  // Ambient sky effects (Matrix rain, pixies, nebulae): on by default, remembered per browser.
-  const FX_KEY = 'observer.fx';
+  // Ambient sky effects (Matrix rain, pixies, nebulae): off on startup unless explicitly configured.
   const fxButton = get('fx-toggle');
-  function readFx() { if (typeof theme.fx === 'boolean') return theme.fx; try { return window.localStorage.getItem(FX_KEY) !== 'off'; } catch (_) { return true; } }
-  function applyFx(on) { view.setFx(on); fxButton.setAttribute('aria-pressed', on ? 'true' : 'false'); try { window.localStorage.setItem(FX_KEY, on ? 'on' : 'off'); } catch (_) {} }
+  function readFx() { return typeof theme.fx === 'boolean' ? theme.fx : false; }
+  function applyFx(on) { view.setFx(on); fxButton.setAttribute('aria-pressed', on ? 'true' : 'false'); }
   if (fxButton && typeof view.setFx === 'function') { applyFx(readFx()); fxButton.addEventListener('click', () => applyFx(!view.fx())); }
   get('zoom-in').addEventListener('click', () => view.zoomBy(1.25));
   get('zoom-out').addEventListener('click', () => view.zoomBy(0.8));
@@ -315,7 +314,7 @@
   function busHealth(bus) {
     if (!bus) return 'Bus not read yet';
     if (bus.health === 'available') return 'Live · llm-bus';
-    const reason = { missing: 'No bus database found', unsupported: 'Bus reader needs Node with node:sqlite', unreadable: 'Bus unreadable',
+    const reason = { missing: 'No bus database found', unsupported: 'Bus SQLite support unavailable; use the supported Bun runtime', unreadable: 'Bus unreadable',
       unstable: 'Bus busy while copying · retrying' }[bus.reason] || 'Bus unavailable';
     return reason + (bus.observedAt ? ' · last known ' + ObserverModel.age(bus.observedAt) : '');
   }

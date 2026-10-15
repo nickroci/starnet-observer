@@ -66,6 +66,9 @@ const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status:
   assert.equal((await observer.get()).health, 'unavailable');
   now = 18000; inventory = [];
   assert.deepEqual((await observer.get()).sessions, []);
+  await refreshStartCache();
+  await pollingFreshness();
+  await identityEnrichmentOrdering();
   await usageAggregate();
   await aggregateAgeAndOverflow();
   await claudeHelperNamespaces();
@@ -745,4 +748,192 @@ async function claudeHelperNamespaces() {
     assert.equal(result.aggregate.coverage.counters.inputTokens.available, 2);
     assert.equal(result.aggregate.coverage.counters.inputTokens.unavailable, 2);
   } finally { await fs.rm(folder, { recursive: true, force: true }); }
+}
+
+async function identityEnrichmentOrdering() {
+  let clock = 1000, inventory = [pane('a'), pane('b')];
+  const events = [];
+  const identities = { resolveMany: async panes => { events.push('identities:' + panes.length); return panes.map(row => ({ sessionId: row.agent_session.value, source: 'native' })); },
+    resolve: async row => { events.push('identity:' + row.pane_id); await new Promise(resolve => setImmediate(resolve)); return { sessionId: row.agent_session.value, source: 'native' }; }, retain() {} };
+  const observer = makeObserver({ now: () => clock, endpoint: 'ordering', identities,
+    execute: async () => ({ stdout: JSON.stringify({ result: { agents: inventory } }) }),
+    desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) }, bus: { read: () => ({ rows: [] }) },
+    transcripts: { retain() {}, read: async () => { events.push('transcript'); await new Promise(resolve => setImmediate(resolve)); return {}; } },
+    projects: { resolve: async () => { events.push('project'); await new Promise(resolve => setImmediate(resolve)); return {}; } },
+    helpers: { children: async parents => { events.push('helpers:' + parents.length); return { rows: [], annotations: new Map(), overflow: new Map() }; } } });
+  assert.equal((await observer.get()).sessions.length, 2);
+  assert.deepEqual(events, ['identities:2', 'transcript', 'project', 'transcript', 'project', 'helpers:2']);
+  events.length = 0; inventory = [pane('a'), pane('a')]; clock += 3000;
+  assert.equal((await observer.get()).sources.herdr.health, 'unavailable');
+  assert.deepEqual(events, ['helpers:2'], 'duplicate inventory rejected before any identity or enrichment calls');
+  events.length = 0; inventory = [pane('a'), pane('bad id')]; clock += 3000;
+  assert.equal((await observer.get()).sources.herdr.health, 'unavailable');
+  assert.deepEqual(events, ['helpers:2'], 'invalid pane ID rejected before any identity or enrichment calls');
+  events.length = 0; inventory = []; clock += 3000;
+  assert.deepEqual((await observer.get()).sessions, []); assert.deepEqual(events, ['identities:0', 'helpers:0']);
+  events.length = 0; delete identities.resolveMany; inventory = [pane('a'), pane('b')]; clock += 3000;
+  await observer.get();
+  assert.deepEqual(events, ['identity:a', 'identity:b', 'transcript', 'project', 'transcript', 'project', 'helpers:2'], 'supported injected resolver fallback remains serial');
+}
+
+async function refreshStartCache() {
+  for (const completionAt of [3000, 100]) {
+    let clock = 0, reads = 0, release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const observer = makeObserver({ now: () => clock,
+      readIdentityConfiguration: async () => 'unconfigured',
+      execute: async () => { reads++; return { stdout: JSON.stringify({ result: { agents: [] } }) }; },
+      desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) },
+      helpers: { children: async () => { await gate; return { rows: [], annotations: new Map(), overflow: new Map() }; } },
+      transcripts: { retain() {} }, bus: { read: () => ({ rows: [] }) }
+    });
+    const first = observer.get();
+    await new Promise(resolve => setImmediate(resolve));
+    try {
+      clock = completionAt;
+      assert.equal(observer.get(), first, 'pending refresh coalesces even after cache lifetime expires');
+    } finally { release(); await first; }
+    assert.equal((await first).sources.herdr.observedAt, 0, 'completion preserves inventory timestamp at zero');
+    if (completionAt < 2000) {
+      clock = 1999; await observer.get();
+      assert.equal(reads, 1, 'refresh starting at zero remains cached through 1999');
+      clock = 2000;
+    }
+    const next = await observer.get();
+    assert.equal(reads, 2, 'cache expires from refresh start, including slow completion at 3000');
+    assert.equal(next.sources.herdr.observedAt, clock, 'new inventory supplies its actual observation time');
+  }
+}
+
+async function pollingFreshness() {
+  const { QuerySpine: Q } = require('../frontend/app/queryspine.js');
+  const { makeIdentityResolver } = require('../sidecar/observer-identity.js');
+  let clock = 0, serial = 0, inventoryMode = 'healthy', holdHelpers = false, releaseHelpers;
+  const events = [], intervals = new Map(), starts = [], publications = [], rpcCounts = new Map(), birthCounts = new Map();
+  const panes = Array.from({ length: 20 }, (_, index) => ({ ...pane('timing:' + index), terminal_id: 'terminal_' + index }));
+  const helperGate = new Promise(resolve => { releaseHelpers = resolve; });
+  const delay = ms => new Promise(resolve => events.push({ at: clock + ms, run: resolve }));
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const herdrRows = data => data.sessions.filter(row => row.source === 'herdr');
+  function assertHealthyAge() {
+    const data = Q.state('observer.sessions').data;
+    if (!data || clock >= 8000) return;
+    assert(clock - data.sources.herdr.observedAt < 6000, 'healthy source never ages beyond six seconds while pending');
+    for (const row of herdrRows(data)) assert(clock - row.observedAt < 6000, 'healthy row never ages beyond six seconds while pending');
+  }
+  async function advance(target) {
+    await flush();
+    while (true) {
+      events.sort((a, b) => a.at - b.at);
+      if (!events.length || events[0].at > target) break;
+      clock = events[0].at; assertHealthyAge();
+      while (events[0]?.at === clock) events.shift().run();
+      await flush(); assertHealthyAge();
+    }
+    clock = target; await flush(); assertHealthyAge();
+  }
+  const identities = makeIdentityResolver({ now: () => clock, readConfiguration: async () => 'configured',
+    readProcessBirth: async pid => {
+      birthCounts.set(pid, (birthCounts.get(pid) || 0) + 1);
+      await delay(25);
+      return { pid, startSeconds: 1, startMicroseconds: 2 };
+    }, rpc: async (method, params) => {
+      const id = params.pane_id || params.target, index = Number(id.split(':')[1]);
+      const count = (rpcCounts.get(id) || 0) + 1; rpcCounts.set(id, count);
+      // Synthetic workload only: nine RPCs total 250 ms; two birth reads total 50 ms.
+      // First footer costs 30 ms; remaining eight RPCs each cost 27.5 ms.
+      await delay(count === 1 ? 30 : 27.5);
+      if (method === 'agent.get') return { result: { agent: panes[index] } };
+      if (method === 'pane.process_info') return { result: { process_info: { pane_id: id, shell_pid: index + 100 } } };
+      if (method === 'pane.get') return { result: { pane: { pane_id: id, scroll: { max_offset_from_bottom: 0, viewport_rows: 20 } } } };
+      if (method === 'pane.copy_motion') return { result: { pane_id: id, content_revision: 8 } };
+      assert.equal(method, 'pane.read');
+      return { result: { read: { pane_id: id, source: 'recent', format: 'text', text: '\n  ' + ID + ' · model\n  ? for shortcuts\n' } } };
+    }
+  });
+  const observer = makeObserver({ now: () => clock, identities,
+    execute: async () => {
+      starts.push(clock); rpcCounts.clear(); birthCounts.clear();
+      if (inventoryMode === 'failed') throw Error('synthetic outage');
+      return { stdout: JSON.stringify({ result: { agents: inventoryMode === 'empty' ? [] : panes } }) };
+    }, projects: { resolve: async () => ({ projectId: 'fixture' }) },
+    transcripts: { read: async () => ({ available: false }), retain() {} },
+    helpers: { children: async () => {
+      if (holdHelpers) { await helperGate; throw Error('synthetic helper failure'); }
+      await delay(100); return { rows: [], annotations: new Map(), overflow: new Map() };
+    } }, bus: { read: () => ({ rows: [] }) },
+    desktop: { inventory: async () => ({ health: 'available', observedAt: -7000,
+      windows: [{ id: 'old-desktop', status: 'idle' }] }) }
+  });
+  Q._resetForTest();
+  Q.define('observer.sessions', { path: '/api/observer/sessions', ttlMs: 2000, pollMs: 2000,
+    timeoutMs: 10000, validate: data => Array.isArray(data.sessions) });
+  Q._setClockForTest(() => clock);
+  Q._setGetForTest(() => observer.get());
+  Q._setTimersForTest((fn, ms) => {
+    const id = ++serial; intervals.set(id, true);
+    const tick = () => { if (!intervals.has(id)) return; fn(); events.push({ at: clock + ms, run: tick }); };
+    events.push({ at: clock + ms, run: tick }); return id;
+  }, id => intervals.delete(id));
+  let unsubscribe;
+  try {
+    unsubscribe = Q.subscribe('observer.sessions', state => {
+      if (state.hasData && !state.pending) publications.push({ at: clock, data: state.data });
+    });
+    for (const start of [0, 2000, 4000, 6000]) {
+      await advance(start + 1700);
+      assert.deepEqual(starts, [0, 2000, 4000, 6000].filter(time => time <= start), 'actual poll callback starts inventory every two seconds');
+      const publication = publications.at(-1);
+      assert.equal(publication.data.sources.herdr.observedAt, start);
+      assert(publication.at - start <= 1700, 'four capture workers plus first admission and downstream fit synthetic budget');
+      assert.equal(herdrRows(publication.data).length, 20);
+      assert(herdrRows(publication.data).every(row => row.identitySource === 'footer' && row.observedAt === start));
+      assert.deepEqual([...rpcCounts.values()], Array(20).fill(9));
+      assert.deepEqual([...birthCounts.values()], Array(20).fill(2));
+      assert.equal(publication.data.sources.desktop.observedAt, -7000);
+      assert.equal(publication.data.sessions.find(row => row.source === 'desktop').observedAt, -7000);
+      assert(clock - publication.data.sources.desktop.observedAt > 6000, 'fresh Herdr never renews old Desktop');
+    }
+    const beforeDelay = Q.state('observer.sessions').data;
+    holdHelpers = true;
+    await advance(14001);
+    assert.equal(Q.state('observer.sessions').pending, true);
+    assert.equal(Q.state('observer.sessions').data, beforeDelay, 'pending refresh preserves last published observation');
+    assert.equal(beforeDelay.sources.herdr.observedAt, 6000);
+    assert(herdrRows(beforeDelay).every(row => row.observedAt === 6000 && clock - row.observedAt > 6000));
+    assert(clock - beforeDelay.sources.herdr.observedAt > 6000, 'slow work remains truthfully stale beyond deadline');
+    holdHelpers = false; releaseHelpers(); await advance(14100);
+    assert.equal(Q.state('observer.sessions').data.sources.herdr.observedAt, 8000, 'late completion never substitutes completion time');
+    inventoryMode = 'failed'; await advance(16100);
+    const unavailable = Q.state('observer.sessions').data;
+    assert.equal(unavailable.sources.herdr.health, 'unavailable');
+    assert.equal(unavailable.sources.herdr.observedAt, 8000);
+    assert.equal(herdrRows(unavailable).length, 20);
+    assert(herdrRows(unavailable).every(row => row.observedAt === 8000 && row.inventoryHealth === 'unavailable'));
+    inventoryMode = 'empty'; await advance(18100);
+    assert.equal(Q.state('observer.sessions').data.sources.herdr.health, 'available');
+    assert.equal(Q.state('observer.sessions').data.sources.herdr.observedAt, 18000);
+    assert.deepEqual(herdrRows(Q.state('observer.sessions').data), [], 'authoritative empty inventory removes retained rows');
+    inventoryMode = 'healthy'; await advance(21700);
+    const recovered = Q.state('observer.sessions').data;
+    assert.equal(recovered.sources.herdr.observedAt, 20000);
+    assert.equal(herdrRows(recovered).length, 20);
+    assert(herdrRows(recovered).every(row => row.observedAt === 20000 && row.inventoryHealth === 'available'));
+    assert.equal(recovered.sources.desktop.observedAt, -7000);
+  } finally {
+    holdHelpers = false; releaseHelpers();
+    unsubscribe?.();
+    // Settle any deferred transport before resetting: QuerySpine clears its request timeout on settlement.
+    try {
+      await advance(clock + 1700);
+      assert.equal(Q._debug('observer.sessions').inFlight, false);
+      assert.equal(intervals.size, 0);
+    } finally {
+      Q._resetForTest();
+      Q._setClockForTest(() => Date.now());
+      Q._setTimersForTest((fn, ms) => setInterval(fn, ms), id => clearInterval(id));
+      Q._setGetForTest((url, options) => typeof Harness !== 'undefined' && Harness.api ? Harness.api.get(url, options) : Promise.reject(Error('Harness.api.get unavailable')));
+      events.length = 0;
+    }
+  }
 }

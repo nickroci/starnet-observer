@@ -4,7 +4,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { makeBusReader, publicBus, defaultBusPath } = require('../sidecar/observer-bus.js');
+const sqlite = require('bun:sqlite');
+const { makeBusReader, publicBus, defaultBusPath, makePrivateSnapshotQuery } = require('../sidecar/observer-bus.js');
 const failopen = require('../sidecar/failopen.js');
 
 assert.throws(() => makeBusReader(), /requires an injected now clock/);
@@ -36,21 +37,21 @@ try {
   const absent = makeBusReader({ now: () => 1000, file: missing, tempRoot: scratch, loadSqlite: () => { throw new Error('must not load'); } }).read();
   assert.deepEqual([absent.health, absent.reason, absent.rows, absent.observedAt], ['unavailable', 'missing', [], null]);
   assert(!fs.existsSync(path.dirname(missing)));
-  // A Node without node:sqlite loses only the optional bus view, and copies nothing.
+  // An unavailable SQLite loader loses only the optional bus view, and copies nothing.
   fs.writeFileSync(path.join(temp, 'placeholder.sqlite3'), '');
-  const unsupported = makeBusReader({ now: () => 1000, file: path.join(temp, 'placeholder.sqlite3'), tempRoot: scratch, loadSqlite: () => { throw new Error('No such built-in module: node:sqlite'); } }).read();
+  const unsupported = makeBusReader({ now: () => 1000, file: path.join(temp, 'placeholder.sqlite3'), tempRoot: scratch, loadSqlite: () => { throw new Error('SQLite loader unavailable'); } }).read();
   assert.deepEqual([unsupported.health, unsupported.reason], ['unavailable', 'unsupported']);
   assert.deepEqual(fs.readdirSync(scratch), []);
 
-  // Even on Node without SQLite, failed cleanup must remain visible and secret-free.
+  // Failed cleanup must remain visible and secret-free.
   const warnings = [], warn = console.warn, remove = fs.rmSync;
   const closeBefore = failopen.counts()['observer.bus.close'] || 0;
   const removeBefore = failopen.counts()['observer.bus.remove'] || 0;
   let closes = 0;
   const brokenCleanup = makeBusReader({ now: () => 1000, file: path.join(temp, 'placeholder.sqlite3'), tempRoot: scratch,
-    loadSqlite: () => ({ DatabaseSync: class {
-      prepare() { return { all: () => [] }; }
-      close() { closes++; throw new Error('PRIVATE CLOSE CANARY ' + temp); }
+    loadSqlite: () => ({ Database: class {
+      query() { return { all: () => [] }; }
+      close(immediate) { assert.equal(immediate, true); closes++; throw new Error('PRIVATE CLOSE CANARY ' + temp); }
     } }) });
   fs.rmSync = (target, options) => {
     if (options?.recursive && target.startsWith(scratch + path.sep)) throw new Error('PRIVATE REMOVE CANARY ' + target);
@@ -69,305 +70,314 @@ try {
   assert(!warnings.join(' ').includes('CANARY')); assert(!warnings.join(' ').includes(temp));
   for (const name of fs.readdirSync(scratch)) fs.rmSync(path.join(scratch, name), { recursive: true, force: true });
 
-  let sqlite = null;
-  try { sqlite = require('node:sqlite'); } catch (_) { console.log('observer bus: node:sqlite unavailable on this Node; fixture database checks skipped'); }
-  if (sqlite) {
-    const file = path.join(busDir, 'bus.sqlite3');
-    const writer = new sqlite.DatabaseSync(file);
-    writer.exec(SCHEMA);
-    const agent = writer.prepare("INSERT INTO agents VALUES (?, ?, '/secret/project-canary', '/secret/scope-canary', '2026-10-11T10:00:00Z', NULL, '/secret/socket-canary')");
-    for (const [kind, id] of [['codex', S1], ['claude', S2], ['claude', S3], ['codex', S4]]) agent.run(kind + ':' + id, kind);
-    const send = writer.prepare("INSERT INTO messages (sender, recipient, body, sender_cwd, recipient_cwd, sent_at, wake_status, wake_reason) VALUES (?, ?, 'BODY-CANARY', '/secret/cwd-canary', '/secret/cwd-canary', ?, ?, 'REASON-CANARY')");
-    send.run('codex:' + S1, 'claude:' + S2, '2026-10-11T10:00:00.000Z', 'requested');
-    send.run('claude:' + S3, 'codex:' + S1, '2026-10-11T10:01:00.000Z', null);
-    send.run('codex:' + S1, 'codex:' + S4, '2026-10-11T10:02:00.000Z', 'mystery');
-    writer.close();
-    const before = contents(busDir);
-    let opened = 0, closed = 0, clock = 5000, copied = 0;
-    const selectedSql = [];
-    // SQLite only ever opens the private copy inside the scratch root, never the bus path.
-    const loadSqlite = () => ({ DatabaseSync: class extends sqlite.DatabaseSync {
-      constructor(...args) {
-        assert.notEqual(path.dirname(args[0]), busDir); assert(args[0].startsWith(scratch + path.sep), 'opens only the private snapshot');
-        assert.equal((fs.statSync(path.dirname(args[0])).mode & 0o777).toString(8), '700');
-        for (const suffix of ['', '-wal', '-journal']) {
-          if (fs.existsSync(args[0] + suffix)) assert.equal(fs.statSync(args[0] + suffix).mode & 0o777, 0o600);
-        }
-        super(...args); opened++;
+  const file = path.join(busDir, 'bus.sqlite3');
+  const writer = new sqlite.Database(file);
+  writer.exec(SCHEMA);
+  const agent = writer.query("INSERT INTO agents VALUES (?, ?, '/secret/project-canary', '/secret/scope-canary', '2026-10-11T10:00:00Z', NULL, '/secret/socket-canary')");
+  for (const [kind, id] of [['codex', S1], ['claude', S2], ['claude', S3], ['codex', S4]]) agent.run(kind + ':' + id, kind);
+  const send = writer.query("INSERT INTO messages (sender, recipient, body, sender_cwd, recipient_cwd, sent_at, wake_status, wake_reason) VALUES (?, ?, 'BODY-CANARY', '/secret/cwd-canary', '/secret/cwd-canary', ?, ?, 'REASON-CANARY')");
+  send.run('codex:' + S1, 'claude:' + S2, '2026-10-11T10:00:00.000Z', 'requested');
+  send.run('claude:' + S3, 'codex:' + S1, '2026-10-11T10:01:00.000Z', null);
+  send.run('codex:' + S1, 'codex:' + S4, '2026-10-11T10:02:00.000Z', 'mystery');
+  writer.close(true);
+  const before = contents(busDir);
+  const nativeProof = makePrivateSnapshotQuery({ file, tempRoot: scratch })((database, sourceFingerprint) => {
+    const stat = fs.statSync(file, { bigint: true });
+    const fields = ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'birthtimeNs'];
+    for (const field of fields) assert.equal(typeof stat[field], 'bigint', field + ' preserves native bigint precision');
+    assert(stat.birthtimeNs > 0n, 'native birth time proves source incarnation');
+    assert.equal(sourceFingerprint[0], fields.map(field => stat[field]).join(':'));
+    return { rows: database.query('SELECT id FROM messages').all() };
+  });
+  assert.equal(nativeProof.rows.length, 3, 'default native loader reads the verified private snapshot');
+  assert.deepEqual(contents(busDir), before, 'default native loader leaves source files unchanged');
+  assert.deepEqual(fs.readdirSync(scratch), [], 'default native loader removes its private copy');
+  let opened = 0, closed = 0, clock = 5000, copied = 0;
+  const selectedSql = [];
+  // SQLite only ever opens the private copy inside the scratch root, never the bus path.
+  const loadSqlite = () => ({ Database: class extends sqlite.Database {
+    constructor(...args) {
+      assert.notEqual(path.dirname(args[0]), busDir); assert(args[0].startsWith(scratch + path.sep), 'opens only the private snapshot');
+      assert.equal((fs.statSync(path.dirname(args[0])).mode & 0o777).toString(8), '700');
+      for (const suffix of ['', '-wal', '-journal']) {
+        if (fs.existsSync(args[0] + suffix)) assert.equal(fs.statSync(args[0] + suffix).mode & 0o777, 0o600);
       }
-      prepare(sql) { selectedSql.push(sql); return super.prepare(sql); }
-      close() { closed++; super.close(); } } });
-    const reader = makeBusReader({ file, loadSqlite, now: () => clock, tempRoot: scratch,
-      copyFile: (from, to) => { copied++; fs.copyFileSync(from, to); } });
-    const first = reader.read();
-    assert.deepEqual([first.health, first.observedAt, first.rows.map(row => row.id)], ['available', 5000, [3, 2, 1]]);
-    assert.deepEqual(Object.keys(first.rows[0]).sort(), ['acknowledgedAt', 'id', 'identity', 'recipient', 'sender', 'sentAt', 'wake']);
-    assert.deepEqual(first.rows.map(row => row.wake), ['unknown', 'none', 'requested']);
-    const view = publicBus(first, sessions);
-    assert.deepEqual(view.messages.map(message => [message.id, message.from, message.to]),
-      [[3, 'obs_a', 'external'], [2, 'external', 'obs_a'], [1, 'obs_a', 'ambiguous']]);
-    assert.deepEqual(Object.keys(view.messages[0]).sort(), ['acknowledgedAt', 'from', 'id', 'identity', 'sentAt', 'to', 'wake']);
-    assert.equal(view.window, 100); assert.equal(view.messages[2].sentAt, '2026-10-11T10:00:00.000Z');
-    const exposed = JSON.stringify(view);
-    for (const secret of ['CANARY', '/secret', S1, S2, S3, S4, 'codex:', 'claude:']) assert(!exposed.includes(secret), 'bus view leaks ' + secret);
-    assert.deepEqual(contents(busDir), before, 'reading never mutates the bus or adds journal files');
-    assert.deepEqual(fs.readdirSync(scratch), [], 'the private copy is removed after the read');
-    assert.equal(opened, 1); assert.equal(closed, 1);
-    clock = 5500;
-    for (let n = 0; n < 9; n++) assert.deepEqual(reader.read(), first, 'unchanged metadata retains original observation time');
-    assert.equal(copied, 1, 'ten unchanged reads copy once');
-    assert.equal(opened, 1, 'ten unchanged reads open SQLite once');
-
-    assert(selectedSql.every(sql => !/\bbody\b/i.test(sql)), 'inventory queries never select or hash bodies');
-    const identity = view.messages.find(message => message.id === 1).identity;
-    assert.match(identity, /^mail_[a-f0-9]{64}$/);
-    assert.equal(publicBus(first, []).messages.find(message => message.id === 1).identity, identity, 'roster mapping does not change identity');
-    const selected = reader.inspect(1, identity);
-    assert.deepEqual([selected.health, selected.identity, selected.text], ['available', identity, 'BODY-CANARY']);
-    assert.equal(reader.inspect(1).identity, identity, 'legacy inspection still proves identity');
-    const mismatch = reader.inspect(1, 'mail_' + '0'.repeat(64));
-    assert.deepEqual([mismatch.health, mismatch.reason, mismatch.identity, mismatch.text], ['unavailable', 'identity-mismatch', null, null]);
-    const copiesBeforeInvalid = copied;
-    for (const invalid of ['', null, 'x'.repeat(10000), identity.toUpperCase()]) {
-      const refused = reader.inspect(1, invalid);
-      assert.deepEqual([refused.reason, refused.text], ['invalid-identity', null]);
+      super(...args); opened++;
     }
-    assert.equal(copied, copiesBeforeInvalid, 'malformed identity is rejected before reading any source');
-    assert.equal(reader.inspect(0).reason, 'invalid-message');
-    assert.equal(reader.inspect(Number.MAX_SAFE_INTEGER + 1).reason, 'invalid-message');
-    assert.equal(reader.inspect(999).reason, 'missing-message');
-    assert.deepEqual(contents(busDir), before, 'inspection never acknowledges or mutates source');
-    const secretWriter = new sqlite.DatabaseSync(file);
-    const setBody = secretWriter.prepare('UPDATE messages SET body = ? WHERE id = 1');
-    setBody.run('hello api_key="private multiword value" sk-ant-123456789ABC');
-    const scrubbed = reader.inspect(1);
-    assert.equal(scrubbed.health, 'available'); assert(!scrubbed.text.includes('private')); assert(!scrubbed.text.includes('123456789ABC'));
-    setBody.run('x'.repeat(32760) + ' password="' + 'private '.repeat(10000));
-    const clipped = reader.inspect(1);
-    assert.equal(clipped.truncated, true); assert.equal(clipped.text.length, 32768);
-    assert(!clipped.text.includes('private'), 'secret crossing raw and display caps is withheld');
-    setBody.run('BODY-CANARY'); secretWriter.close();
-    assert.deepEqual(fs.readdirSync(scratch), []);
+    query(sql) { selectedSql.push(sql); return super.query(sql); }
+    close(immediate) { assert.equal(immediate, true); closed++; super.close(immediate); } } });
+  const reader = makeBusReader({ file, loadSqlite, now: () => clock, tempRoot: scratch,
+    copyFile: (from, to) => { copied++; fs.copyFileSync(from, to); } });
+  const first = reader.read();
+  assert.deepEqual([first.health, first.observedAt, first.rows.map(row => row.id)], ['available', 5000, [3, 2, 1]]);
+  assert.deepEqual(Object.keys(first.rows[0]).sort(), ['acknowledgedAt', 'id', 'identity', 'recipient', 'sender', 'sentAt', 'wake']);
+  assert.deepEqual(first.rows.map(row => row.wake), ['unknown', 'none', 'requested']);
+  const view = publicBus(first, sessions);
+  assert.deepEqual(view.messages.map(message => [message.id, message.from, message.to]),
+    [[3, 'obs_a', 'external'], [2, 'external', 'obs_a'], [1, 'obs_a', 'ambiguous']]);
+  assert.deepEqual(Object.keys(view.messages[0]).sort(), ['acknowledgedAt', 'from', 'id', 'identity', 'sentAt', 'to', 'wake']);
+  assert.equal(view.window, 100); assert.equal(view.messages[2].sentAt, '2026-10-11T10:00:00.000Z');
+  const exposed = JSON.stringify(view);
+  for (const secret of ['CANARY', '/secret', S1, S2, S3, S4, 'codex:', 'claude:']) assert(!exposed.includes(secret), 'bus view leaks ' + secret);
+  assert.deepEqual(contents(busDir), before, 'reading never mutates the bus or adds journal files');
+  assert.deepEqual(fs.readdirSync(scratch), [], 'the private copy is removed after the read');
+  assert.equal(opened, 1); assert.equal(closed, 1);
+  clock = 5500;
+  for (let n = 0; n < 9; n++) assert.deepEqual(reader.read(), first, 'unchanged metadata retains original observation time');
+  assert.equal(copied, 1, 'ten unchanged reads copy once');
+  assert.equal(opened, 1, 'ten unchanged reads open SQLite once');
 
-
-    // Acknowledgement and wake changes on an existing id are observed on the next read of the latest window.
-    const update = new sqlite.DatabaseSync(file);
-    update.prepare("UPDATE messages SET acknowledged_at = '2026-10-11T10:05:00.000Z', wake_status = 'failed' WHERE id = 1").run();
-    update.close();
-    clock = 6000;
-    const acked = reader.read().rows.find(row => row.id === 1);
-    assert.equal(acked.identity, identity, 'ACK/wake does not change message identity');
-    assert.deepEqual([acked.acknowledgedAt, acked.wake], ['2026-10-11T10:05:00.000Z', 'failed']);
-    const append = new sqlite.DatabaseSync(file), insert = append.prepare("INSERT INTO messages (sender, recipient, body) VALUES (?, ?, 'BODY-CANARY')");
-    for (let index = 0; index < 100; index++) insert.run('codex:' + S1, 'codex:' + S4);
-    append.close();
-    clock = 7000;
-    const second = reader.read();
-    assert.equal(second.rows.length, 100, 'bounded to the recent window'); assert.equal(second.rows[0].id, 103); assert.equal(second.rows.at(-1).id, 4);
-    assert(!second.rows.some(row => row.id === 1), 'older rows leave the window');
-
-    // Production llm-bus runs in WAL mode. A live writer's committed but uncheckpointed rows sit only in -wal;
-    // the reader must see them while leaving the database, -wal and -shm byte-identical and adding no files.
-    const walDir = path.join(temp, 'wal'); fs.mkdirSync(walDir);
-    const walFile = path.join(walDir, 'bus.sqlite3'), live = new sqlite.DatabaseSync(walFile);
-    live.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;"); live.exec(SCHEMA);
-    live.prepare("INSERT INTO agents VALUES (?, 'codex', '/p', '/s', '2026-10-11T10:00:00Z', NULL, NULL)").run('codex:' + S1);
-    const liveSend = live.prepare("INSERT INTO messages (sender, recipient, body) VALUES (?, ?, 'BODY-CANARY')");
-    for (let index = 0; index < 3; index++) liveSend.run('codex:' + S1, 'codex:' + S1);
-    assert(fs.statSync(walFile + '-wal').size > 0, 'fixture rows live only in the WAL');
-    const walBefore = contents(walDir);
-    const walReader = makeBusReader({ now: () => 1000, file: walFile, loadSqlite, tempRoot: scratch });
-    const fromWal = walReader.read();
-    assert.deepEqual([fromWal.health, fromWal.rows.map(row => row.id)], ['available', [3, 2, 1]], 'committed WAL rows are visible');
-    assert.equal(walReader.inspect(1).text, 'BODY-CANARY');
-    assert.deepEqual(contents(walDir), walBefore, 'database, -wal and -shm unchanged while the writer is live');
-    liveSend.run('codex:' + S1, 'codex:' + S1);
-    assert.deepEqual(walReader.read().rows.map(row => row.id), [4, 3, 2, 1], 'a later live commit is seen on the next read');
-    // A closed writer checkpoints and removes its journals; reading must not recreate them.
-    live.close();
-    const closedBefore = contents(walDir);
-    assert.deepEqual(closedBefore.map(entry => entry.split('=')[0]), ['bus.sqlite3']);
-    assert.deepEqual(walReader.read().rows.map(row => row.id), [4, 3, 2, 1]);
-    assert.deepEqual(contents(walDir), closedBefore, 'no -wal or -shm appears beside a closed bus');
-    assert.deepEqual(fs.readdirSync(scratch), []);
-
-    // A copy that a writer moves underneath on every attempt is rejected as unstable, never half-trusted.
-    let copies = 0;
-    const moving = makeBusReader({ now: () => 1000, file: walFile, loadSqlite, tempRoot: scratch,
-      copyFile: (from, to) => { copies++; fs.copyFileSync(from, to); const at = new Date(Date.UTC(2030, 0, 1) + copies * 1000); fs.utimesSync(walFile, at, at); } }).read();
-    assert.deepEqual([moving.health, moving.reason, moving.rows], ['unavailable', 'unstable', []]);
-    assert.equal(copies, 3, 'retried before giving up');
-    assert.deepEqual(fs.readdirSync(scratch), [], 'an unstable copy is removed');
-    // An open failure on the snapshot also removes it.
-    const failing = makeBusReader({ now: () => 1000, file: walFile, tempRoot: scratch, loadSqlite: () => ({ DatabaseSync: class { constructor() { throw new Error('open failed'); } } }) }).read();
-    assert.deepEqual([failing.health, failing.reason], ['unavailable', 'unreadable']);
-    assert.deepEqual(fs.readdirSync(scratch), [], 'a failed open removes the private copy');
-
-    // A successful query is unusable if its source changes after the copy or during SELECT.
-    let mutationOpens = 0, mutate = true;
-    const mutationReader = makeBusReader({ now: () => 1000, file: walFile, tempRoot: scratch, loadSqlite: () => ({
-      DatabaseSync: class extends sqlite.DatabaseSync {
-        constructor(...args) { super(...args); mutationOpens++; }
-        prepare(sql) {
-          const statement = super.prepare(sql);
-          return { all: () => {
-            const result = statement.all();
-            if (mutate) { const at = new Date(Date.UTC(2030, 0, 2) + mutationOpens * 1000); fs.utimesSync(walFile, at, at); }
-            return result;
-          } };
-        }
-      }
-    }) });
-    assert.deepEqual([mutationReader.read().health, mutationReader.read().reason], ['unavailable', 'unstable']);
-    assert.equal(mutationOpens, 6, 'post-query mutation retries three private queries per read');
-    mutate = false;
-    assert.equal(mutationReader.read().health, 'available', 'a stable query restores proof after failure');
-    const restoredOpens = mutationOpens;
-    mutationReader.read();
-    assert.equal(mutationOpens, restoredOpens, 'restored successful proof permits reuse');
-    assert.deepEqual(fs.readdirSync(scratch), [], 'post-query retries remove private snapshots');
-
-    // One post-query commit retries and returns the newer rows, rather than pairing old rows with new stats.
-    let committedDuringQuery = false, pairedOpens = 0;
-    const pairedReader = makeBusReader({ now: () => 1000, file: walFile, tempRoot: scratch, loadSqlite: () => ({
-      DatabaseSync: class extends sqlite.DatabaseSync {
-        constructor(...args) { super(...args); pairedOpens++; }
-        prepare(sql) {
-          const statement = super.prepare(sql);
-          return { all: () => {
-            const result = statement.all();
-            if (!committedDuringQuery) {
-              committedDuringQuery = true;
-              const changed = new sqlite.DatabaseSync(walFile);
-              try { changed.prepare("INSERT INTO messages (sender, recipient, body) VALUES (?, ?, 'BODY-CANARY')").run('codex:' + S1, 'codex:' + S1); }
-              finally { changed.close(); }
-            }
-            return result;
-          } };
-        }
-      }
-    }) });
-    assert.equal(pairedReader.read().rows[0].id, 5, 'post-query commit yields only newly verified rows');
-    assert.equal(pairedOpens, 2, 'one post-query change retries one private query');
-    pairedReader.read();
-    assert.equal(pairedOpens, 2, 'newer rows retain the matching successful fingerprint');
-
-    // Same-path replacement invalidates metadata even when SQLite rows happen to match.
-    const oldMailIdentity = mutationReader.read().rows.find(row => row.id === 1).identity;
-    const replacementOpens = mutationOpens;
-    const replacement = walFile + '.replacement'; fs.copyFileSync(walFile, replacement);
-    fs.renameSync(replacement, walFile);
-    mutationReader.read();
-    assert.equal(mutationOpens, replacementOpens + 1, 'inode replacement requires another private query');
-    const replacementIdentity = mutationReader.read().rows.find(row => row.id === 1).identity;
-    assert.notEqual(replacementIdentity, oldMailIdentity, 'same immutable message on a replacement source gets a new identity');
-    const replacementReader = makeBusReader({ file: walFile, now: () => clock, tempRoot: scratch });
-    assert.deepEqual([replacementReader.inspect(1, oldMailIdentity).reason, replacementReader.inspect(1, oldMailIdentity).text], ['identity-mismatch', null]);
-    assert.equal(replacementReader.inspect(1, replacementIdentity).identity, replacementIdentity);
-    const changedMessage = new sqlite.DatabaseSync(walFile);
-    changedMessage.exec("INSERT INTO agents (address, kind, project, scope, last_seen) VALUES ('codex:replacement', 'codex', '/p', '/s', '2026-10-12T10:00:00Z'), ('claude:replacement', 'claude', '/p', '/s', '2026-10-12T10:00:00Z')");
-    let previousIdentity = replacementIdentity;
-    for (const change of ["sent_at = '2026-10-12T10:00:00.000Z'", "sender = 'codex:replacement'", "recipient = 'claude:replacement'", 'id = 900']) {
-      changedMessage.exec('UPDATE messages SET ' + change + ' WHERE id = 1');
-      const id = change.startsWith('id =') ? 900 : 1;
-      const changedIdentity = replacementReader.read().rows.find(row => row.id === id).identity;
-      assert.notEqual(changedIdentity, previousIdentity, 'each immutable producer field participates in identity');
-      assert.equal(replacementReader.inspect(id, previousIdentity).reason, 'identity-mismatch', 'changed immutable metadata rejects reused target');
-      previousIdentity = changedIdentity;
-    }
-    changedMessage.close();
-
-    // Replace the source after SELECT returns: a body and identity from the old copy cannot escape together.
-    let bodyQueries = 0, replacedDuringBody = false;
-    const raceReader = makeBusReader({ file: walFile, now: () => clock, tempRoot: scratch, loadSqlite: () => ({
-      DatabaseSync: class extends sqlite.DatabaseSync {
-        prepare(sql) {
-          const statement = super.prepare(sql);
-          if (!/substr\(body/.test(sql)) return statement;
-          return { get: (...args) => {
-            bodyQueries++;
-            const row = statement.get(...args);
-            if (!replacedDuringBody) {
-              replacedDuringBody = true;
-              const next = walFile + '.body-replacement'; fs.copyFileSync(walFile, next); fs.renameSync(next, walFile);
-            }
-            return row;
-          } };
-        }
-      }
-    }) });
-    const raced = raceReader.inspect(900, previousIdentity);
-    assert.deepEqual([raced.health, raced.reason, raced.identity, raced.text], ['unavailable', 'identity-mismatch', null, null]);
-    assert.equal(bodyQueries, 2, 'post-body source replacement retries against the new incarnation');
-    const freshRace = raceReader.inspect(900);
-    assert.equal(freshRace.health, 'available'); assert.notEqual(freshRace.identity, previousIdentity);
-    assert.equal(freshRace.identity, raceReader.read().rows.find(row => row.id === 900).identity, 'returned body identity belongs to the verified snapshot');
-
-    // A failed source proof forbids reuse, even if the exact previous fingerprint becomes readable again.
-    let sqliteSupported = true;
-    const proofReader = makeBusReader({ file: walFile, loadSqlite: () => sqliteSupported ? loadSqlite() : {},
-      tempRoot: scratch, now: () => clock });
-    const proofGood = proofReader.read(), proofOpens = opened;
-    const statSync = fs.statSync;
-    fs.statSync = (target, ...args) => {
-      if (target === walFile) { const error = new Error('denied'); error.code = 'EACCES'; throw error; }
-      return statSync(target, ...args);
-    };
-    try {
-      const failedProof = proofReader.read();
-      assert.deepEqual([failedProof.health, failedProof.reason, failedProof.rows, failedProof.observedAt],
-        ['unavailable', 'unreadable', proofGood.rows, proofGood.observedAt]);
-    } finally { fs.statSync = statSync; }
-    proofReader.read();
-    assert.equal(opened, proofOpens + 1, 'failed fingerprint proof requires a successful private query before reuse');
-    const oversizedJournal = walFile + '-journal';
-    const oversizedFd = fs.openSync(oversizedJournal, 'w');
-    try { fs.ftruncateSync(oversizedFd, 64 * 1024 * 1024 + 1); } finally { fs.closeSync(oversizedFd); }
-    const tooLarge = proofReader.read();
-    assert.deepEqual([tooLarge.health, tooLarge.reason, tooLarge.rows], ['unavailable', 'unreadable', proofGood.rows]);
-    fs.rmSync(oversizedJournal);
-    const beforeSizeRecovery = opened;
-    proofReader.read();
-    assert.equal(opened, beforeSizeRecovery + 1, 'oversize failure invalidates reuse even after the extra journal disappears');
-    const missingSource = walFile + '.away'; fs.renameSync(walFile, missingSource);
-    assert.deepEqual([proofReader.read().health, proofReader.read().reason], ['unavailable', 'missing']);
-    fs.renameSync(missingSource, walFile);
-    assert.equal(proofReader.read().health, 'available');
-    sqliteSupported = false;
-    const unsupportedAt = new Date(Date.UTC(2030, 0, 3)); fs.utimesSync(walFile, unsupportedAt, unsupportedAt);
-    const unsupportedLastGood = proofReader.read();
-    assert.deepEqual([unsupportedLastGood.health, unsupportedLastGood.reason, unsupportedLastGood.rows],
-      ['unavailable', 'unsupported', proofGood.rows]);
-    sqliteSupported = true;
-    assert.equal(proofReader.read().health, 'available', 'available SQLite restores private-query proof');
-
-    assert.deepEqual(fs.readdirSync(scratch), [], 'source-proof failures leave no private copies');
-
-    // A filesystem without a birth-time discriminator cannot prove a replacement-safe incarnation.
-    const realStat = fs.statSync;
-    fs.statSync = (target, ...args) => {
-      const stat = realStat(target, ...args);
-      if (target === walFile) stat.birthtimeNs = 0n;
-      return stat;
-    };
-    try {
-      const unproven = makeBusReader({ file: walFile, now: () => clock, tempRoot: scratch });
-      assert.deepEqual([unproven.read().health, unproven.read().rows], ['unavailable', []]);
-      assert.deepEqual([unproven.inspect(900).health, unproven.inspect(900).text], ['unavailable', null]);
-    } finally { fs.statSync = realStat; }
-
-    // A broken bus keeps the last good rows and their observedAt so the page can show them as stale.
-    fs.writeFileSync(file, 'not a database');
-    clock = 9000;
-    const stale = reader.read();
-    assert.deepEqual([stale.health, stale.reason, stale.observedAt, stale.rows], ['unavailable', 'unreadable', 7000, second.rows]);
-    assert.equal(reader.inspect(1).text, null, 'failed inspection never retains old body');
-    assert.equal(opened, closed, 'every opened connection was closed');
-    assert.deepEqual(fs.readdirSync(scratch), []);
-    const malformed = path.join(temp, 'malformed.sqlite3'), odd = new sqlite.DatabaseSync(malformed);
-    odd.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)'); odd.close();
-    const unreadable = makeBusReader({ now: () => 1000, file: malformed, loadSqlite, tempRoot: scratch }).read();
-    assert.deepEqual([unreadable.health, unreadable.reason, unreadable.rows], ['unavailable', 'unreadable', []]);
-    console.log('observer bus: private snapshot reads (WAL live writer visible, source files and listing unchanged, copy removed on success/unstable/failure), metadata-only window, joins, ACK/wake refresh, stale retention OK');
+  assert(selectedSql.every(sql => !/\bbody\b/i.test(sql)), 'inventory queries never select or hash bodies');
+  const identity = view.messages.find(message => message.id === 1).identity;
+  assert.match(identity, /^mail_[a-f0-9]{64}$/);
+  assert.equal(publicBus(first, []).messages.find(message => message.id === 1).identity, identity, 'roster mapping does not change identity');
+  const selected = reader.inspect(1, identity);
+  assert.deepEqual([selected.health, selected.identity, selected.text], ['available', identity, 'BODY-CANARY']);
+  assert.equal(reader.inspect(1).identity, identity, 'legacy inspection still proves identity');
+  const mismatch = reader.inspect(1, 'mail_' + '0'.repeat(64));
+  assert.deepEqual([mismatch.health, mismatch.reason, mismatch.identity, mismatch.text], ['unavailable', 'identity-mismatch', null, null]);
+  const copiesBeforeInvalid = copied;
+  for (const invalid of ['', null, 'x'.repeat(10000), identity.toUpperCase()]) {
+    const refused = reader.inspect(1, invalid);
+    assert.deepEqual([refused.reason, refused.text], ['invalid-identity', null]);
   }
+  assert.equal(copied, copiesBeforeInvalid, 'malformed identity is rejected before reading any source');
+  assert.equal(reader.inspect(0).reason, 'invalid-message');
+  assert.equal(reader.inspect(Number.MAX_SAFE_INTEGER + 1).reason, 'invalid-message');
+  assert.equal(reader.inspect(999).reason, 'missing-message');
+  assert.deepEqual(contents(busDir), before, 'inspection never acknowledges or mutates source');
+  const secretWriter = new sqlite.Database(file);
+  const setBody = secretWriter.query('UPDATE messages SET body = ? WHERE id = 1');
+  setBody.run('hello api_key="private multiword value" sk-ant-123456789ABC');
+  const scrubbed = reader.inspect(1);
+  assert.equal(scrubbed.health, 'available'); assert(!scrubbed.text.includes('private')); assert(!scrubbed.text.includes('123456789ABC'));
+  setBody.run('x'.repeat(32760) + ' password="' + 'private '.repeat(10000));
+  const clipped = reader.inspect(1);
+  assert.equal(clipped.truncated, true); assert.equal(clipped.text.length, 32768);
+  assert(!clipped.text.includes('private'), 'secret crossing raw and display caps is withheld');
+  setBody.run('BODY-CANARY'); secretWriter.close(true);
+  assert.deepEqual(fs.readdirSync(scratch), []);
+
+
+  // Acknowledgement and wake changes on an existing id are observed on the next read of the latest window.
+  const update = new sqlite.Database(file);
+  update.query("UPDATE messages SET acknowledged_at = '2026-10-11T10:05:00.000Z', wake_status = 'failed' WHERE id = 1").run();
+  update.close(true);
+  clock = 6000;
+  const acked = reader.read().rows.find(row => row.id === 1);
+  assert.equal(acked.identity, identity, 'ACK/wake does not change message identity');
+  assert.deepEqual([acked.acknowledgedAt, acked.wake], ['2026-10-11T10:05:00.000Z', 'failed']);
+  const append = new sqlite.Database(file), insert = append.query("INSERT INTO messages (sender, recipient, body) VALUES (?, ?, 'BODY-CANARY')");
+  for (let index = 0; index < 100; index++) insert.run('codex:' + S1, 'codex:' + S4);
+  append.close(true);
+  clock = 7000;
+  const second = reader.read();
+  assert.equal(second.rows.length, 100, 'bounded to the recent window'); assert.equal(second.rows[0].id, 103); assert.equal(second.rows.at(-1).id, 4);
+  assert(!second.rows.some(row => row.id === 1), 'older rows leave the window');
+
+  // Production llm-bus runs in WAL mode. A live writer's committed but uncheckpointed rows sit only in -wal;
+  // the reader must see them while leaving the database, -wal and -shm byte-identical and adding no files.
+  const walDir = path.join(temp, 'wal'); fs.mkdirSync(walDir);
+  const walFile = path.join(walDir, 'bus.sqlite3'), live = new sqlite.Database(walFile);
+  live.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;"); live.exec(SCHEMA);
+  live.query("INSERT INTO agents VALUES (?, 'codex', '/p', '/s', '2026-10-11T10:00:00Z', NULL, NULL)").run('codex:' + S1);
+  const liveSend = live.query("INSERT INTO messages (sender, recipient, body) VALUES (?, ?, 'BODY-CANARY')");
+  for (let index = 0; index < 3; index++) liveSend.run('codex:' + S1, 'codex:' + S1);
+  assert(fs.statSync(walFile + '-wal').size > 0, 'fixture rows live only in the WAL');
+  const walBefore = contents(walDir);
+  const walReader = makeBusReader({ now: () => 1000, file: walFile, loadSqlite, tempRoot: scratch });
+  const fromWal = walReader.read();
+  assert.deepEqual([fromWal.health, fromWal.rows.map(row => row.id)], ['available', [3, 2, 1]], 'committed WAL rows are visible');
+  assert.equal(walReader.inspect(1).text, 'BODY-CANARY');
+  assert.deepEqual(contents(walDir), walBefore, 'database, -wal and -shm unchanged while the writer is live');
+  liveSend.run('codex:' + S1, 'codex:' + S1);
+  assert.deepEqual(walReader.read().rows.map(row => row.id), [4, 3, 2, 1], 'a later live commit is seen on the next read');
+  // Explicitly checkpoint the test-owned writer and remove its journals; reading must not recreate them.
+  live.fileControl(sqlite.constants.SQLITE_FCNTL_PERSIST_WAL, 0);
+  live.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  live.close(true);
+  const closedBefore = contents(walDir);
+  assert.deepEqual(closedBefore.map(entry => entry.split('=')[0]), ['bus.sqlite3']);
+  assert.deepEqual(walReader.read().rows.map(row => row.id), [4, 3, 2, 1]);
+  assert.deepEqual(contents(walDir), closedBefore, 'no -wal or -shm appears beside a closed bus');
+  assert.deepEqual(fs.readdirSync(scratch), []);
+
+  // A copy that a writer moves underneath on every attempt is rejected as unstable, never half-trusted.
+  let copies = 0;
+  const moving = makeBusReader({ now: () => 1000, file: walFile, loadSqlite, tempRoot: scratch,
+    copyFile: (from, to) => { copies++; fs.copyFileSync(from, to); const at = new Date(Date.UTC(2030, 0, 1) + copies * 1000); fs.utimesSync(walFile, at, at); } }).read();
+  assert.deepEqual([moving.health, moving.reason, moving.rows], ['unavailable', 'unstable', []]);
+  assert.equal(copies, 3, 'retried before giving up');
+  assert.deepEqual(fs.readdirSync(scratch), [], 'an unstable copy is removed');
+  // An open failure on the snapshot also removes it.
+  const failing = makeBusReader({ now: () => 1000, file: walFile, tempRoot: scratch, loadSqlite: () => ({ Database: class { constructor() { throw new Error('open failed'); } } }) }).read();
+  assert.deepEqual([failing.health, failing.reason], ['unavailable', 'unreadable']);
+  assert.deepEqual(fs.readdirSync(scratch), [], 'a failed open removes the private copy');
+
+  // A successful query is unusable if its source changes after the copy or during SELECT.
+  let mutationOpens = 0, mutate = true;
+  const mutationReader = makeBusReader({ now: () => 1000, file: walFile, tempRoot: scratch, loadSqlite: () => ({
+    Database: class extends sqlite.Database {
+      constructor(...args) { super(...args); mutationOpens++; }
+      query(sql) {
+        const statement = super.query(sql);
+        return { all: () => {
+          const result = statement.all();
+          if (mutate) { const at = new Date(Date.UTC(2030, 0, 2) + mutationOpens * 1000); fs.utimesSync(walFile, at, at); }
+          return result;
+        } };
+      }
+    }
+  }) });
+  assert.deepEqual([mutationReader.read().health, mutationReader.read().reason], ['unavailable', 'unstable']);
+  assert.equal(mutationOpens, 6, 'post-query mutation retries three private queries per read');
+  mutate = false;
+  assert.equal(mutationReader.read().health, 'available', 'a stable query restores proof after failure');
+  const restoredOpens = mutationOpens;
+  mutationReader.read();
+  assert.equal(mutationOpens, restoredOpens, 'restored successful proof permits reuse');
+  assert.deepEqual(fs.readdirSync(scratch), [], 'post-query retries remove private snapshots');
+
+  // One post-query commit retries and returns the newer rows, rather than pairing old rows with new stats.
+  let committedDuringQuery = false, pairedOpens = 0;
+  const pairedReader = makeBusReader({ now: () => 1000, file: walFile, tempRoot: scratch, loadSqlite: () => ({
+    Database: class extends sqlite.Database {
+      constructor(...args) { super(...args); pairedOpens++; }
+      query(sql) {
+        const statement = super.query(sql);
+        return { all: () => {
+          const result = statement.all();
+          if (!committedDuringQuery) {
+            committedDuringQuery = true;
+            const changed = new sqlite.Database(walFile);
+            try { changed.query("INSERT INTO messages (sender, recipient, body) VALUES (?, ?, 'BODY-CANARY')").run('codex:' + S1, 'codex:' + S1); }
+            finally { changed.close(true); }
+          }
+          return result;
+        } };
+      }
+    }
+  }) });
+  assert.equal(pairedReader.read().rows[0].id, 5, 'post-query commit yields only newly verified rows');
+  assert.equal(pairedOpens, 2, 'one post-query change retries one private query');
+  pairedReader.read();
+  assert.equal(pairedOpens, 2, 'newer rows retain the matching successful fingerprint');
+
+  // Same-path replacement invalidates metadata even when SQLite rows happen to match.
+  const oldMailIdentity = mutationReader.read().rows.find(row => row.id === 1).identity;
+  const replacementOpens = mutationOpens;
+  const replacement = walFile + '.replacement'; fs.copyFileSync(walFile, replacement);
+  fs.renameSync(replacement, walFile);
+  mutationReader.read();
+  assert.equal(mutationOpens, replacementOpens + 1, 'inode replacement requires another private query');
+  const replacementIdentity = mutationReader.read().rows.find(row => row.id === 1).identity;
+  assert.notEqual(replacementIdentity, oldMailIdentity, 'same immutable message on a replacement source gets a new identity');
+  const replacementReader = makeBusReader({ file: walFile, now: () => clock, tempRoot: scratch });
+  assert.deepEqual([replacementReader.inspect(1, oldMailIdentity).reason, replacementReader.inspect(1, oldMailIdentity).text], ['identity-mismatch', null]);
+  assert.equal(replacementReader.inspect(1, replacementIdentity).identity, replacementIdentity);
+  const changedMessage = new sqlite.Database(walFile);
+  changedMessage.exec("INSERT INTO agents (address, kind, project, scope, last_seen) VALUES ('codex:replacement', 'codex', '/p', '/s', '2026-10-12T10:00:00Z'), ('claude:replacement', 'claude', '/p', '/s', '2026-10-12T10:00:00Z')");
+  let previousIdentity = replacementIdentity;
+  for (const change of ["sent_at = '2026-10-12T10:00:00.000Z'", "sender = 'codex:replacement'", "recipient = 'claude:replacement'", 'id = 900']) {
+    changedMessage.exec('UPDATE messages SET ' + change + ' WHERE id = 1');
+    const id = change.startsWith('id =') ? 900 : 1;
+    const changedIdentity = replacementReader.read().rows.find(row => row.id === id).identity;
+    assert.notEqual(changedIdentity, previousIdentity, 'each immutable producer field participates in identity');
+    assert.equal(replacementReader.inspect(id, previousIdentity).reason, 'identity-mismatch', 'changed immutable metadata rejects reused target');
+    previousIdentity = changedIdentity;
+  }
+  changedMessage.close(true);
+
+  // Replace the source after SELECT returns: a body and identity from the old copy cannot escape together.
+  let bodyQueries = 0, replacedDuringBody = false;
+  const raceReader = makeBusReader({ file: walFile, now: () => clock, tempRoot: scratch, loadSqlite: () => ({
+    Database: class extends sqlite.Database {
+      query(sql) {
+        const statement = super.query(sql);
+        if (!/substr\(body/.test(sql)) return statement;
+        return { get: (...args) => {
+          bodyQueries++;
+          const row = statement.get(...args);
+          if (!replacedDuringBody) {
+            replacedDuringBody = true;
+            const next = walFile + '.body-replacement'; fs.copyFileSync(walFile, next); fs.renameSync(next, walFile);
+          }
+          return row;
+        } };
+      }
+    }
+  }) });
+  const raced = raceReader.inspect(900, previousIdentity);
+  assert.deepEqual([raced.health, raced.reason, raced.identity, raced.text], ['unavailable', 'identity-mismatch', null, null]);
+  assert.equal(bodyQueries, 2, 'post-body source replacement retries against the new incarnation');
+  const freshRace = raceReader.inspect(900);
+  assert.equal(freshRace.health, 'available'); assert.notEqual(freshRace.identity, previousIdentity);
+  assert.equal(freshRace.identity, raceReader.read().rows.find(row => row.id === 900).identity, 'returned body identity belongs to the verified snapshot');
+
+  // A failed source proof forbids reuse, even if the exact previous fingerprint becomes readable again.
+  let sqliteSupported = true;
+  const proofReader = makeBusReader({ file: walFile, loadSqlite: () => sqliteSupported ? loadSqlite() : {},
+    tempRoot: scratch, now: () => clock });
+  const proofGood = proofReader.read(), proofOpens = opened;
+  const statSync = fs.statSync;
+  fs.statSync = (target, ...args) => {
+    if (target === walFile) { const error = new Error('denied'); error.code = 'EACCES'; throw error; }
+    return statSync(target, ...args);
+  };
+  try {
+    const failedProof = proofReader.read();
+    assert.deepEqual([failedProof.health, failedProof.reason, failedProof.rows, failedProof.observedAt],
+      ['unavailable', 'unreadable', proofGood.rows, proofGood.observedAt]);
+  } finally { fs.statSync = statSync; }
+  proofReader.read();
+  assert.equal(opened, proofOpens + 1, 'failed fingerprint proof requires a successful private query before reuse');
+  const oversizedJournal = walFile + '-journal';
+  const oversizedFd = fs.openSync(oversizedJournal, 'w');
+  try { fs.ftruncateSync(oversizedFd, 64 * 1024 * 1024 + 1); } finally { fs.closeSync(oversizedFd); }
+  const tooLarge = proofReader.read();
+  assert.deepEqual([tooLarge.health, tooLarge.reason, tooLarge.rows], ['unavailable', 'unreadable', proofGood.rows]);
+  fs.rmSync(oversizedJournal);
+  const beforeSizeRecovery = opened;
+  proofReader.read();
+  assert.equal(opened, beforeSizeRecovery + 1, 'oversize failure invalidates reuse even after the extra journal disappears');
+  const missingSource = walFile + '.away'; fs.renameSync(walFile, missingSource);
+  assert.deepEqual([proofReader.read().health, proofReader.read().reason], ['unavailable', 'missing']);
+  fs.renameSync(missingSource, walFile);
+  assert.equal(proofReader.read().health, 'available');
+  sqliteSupported = false;
+  const unsupportedAt = new Date(Date.UTC(2030, 0, 3)); fs.utimesSync(walFile, unsupportedAt, unsupportedAt);
+  const unsupportedLastGood = proofReader.read();
+  assert.deepEqual([unsupportedLastGood.health, unsupportedLastGood.reason, unsupportedLastGood.rows],
+    ['unavailable', 'unsupported', proofGood.rows]);
+  sqliteSupported = true;
+  assert.equal(proofReader.read().health, 'available', 'available SQLite restores private-query proof');
+
+  assert.deepEqual(fs.readdirSync(scratch), [], 'source-proof failures leave no private copies');
+
+  // A filesystem without a birth-time discriminator cannot prove a replacement-safe incarnation.
+  const realStat = fs.statSync;
+  fs.statSync = (target, ...args) => {
+    const stat = realStat(target, ...args);
+    if (target === walFile) stat.birthtimeNs = 0n;
+    return stat;
+  };
+  try {
+    const unproven = makeBusReader({ file: walFile, now: () => clock, tempRoot: scratch });
+    assert.deepEqual([unproven.read().health, unproven.read().rows], ['unavailable', []]);
+    assert.deepEqual([unproven.inspect(900).health, unproven.inspect(900).text], ['unavailable', null]);
+  } finally { fs.statSync = realStat; }
+
+  // A broken bus keeps the last good rows and their observedAt so the page can show them as stale.
+  fs.writeFileSync(file, 'not a database');
+  clock = 9000;
+  const stale = reader.read();
+  assert.deepEqual([stale.health, stale.reason, stale.observedAt, stale.rows], ['unavailable', 'unreadable', 7000, second.rows]);
+  assert.equal(reader.inspect(1).text, null, 'failed inspection never retains old body');
+  assert.equal(opened, closed, 'every opened connection was closed');
+  assert.deepEqual(fs.readdirSync(scratch), []);
+  const malformed = path.join(temp, 'malformed.sqlite3'), odd = new sqlite.Database(malformed);
+  odd.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)'); odd.close(true);
+  const unreadable = makeBusReader({ now: () => 1000, file: malformed, loadSqlite, tempRoot: scratch }).read();
+  assert.deepEqual([unreadable.health, unreadable.reason, unreadable.rows], ['unavailable', 'unreadable', []]);
+  console.log('observer bus: private snapshot reads (WAL live writer visible, source files and listing unchanged, copy removed on success/unstable/failure), metadata-only window, joins, ACK/wake refresh, stale retention OK');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }
