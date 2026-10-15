@@ -88,12 +88,15 @@ function sanitizeRow(host, row, receivedAt) {
 }
 function sanitizeSnapshot(host, value, receivedAt) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.sessions)) throw new Error('invalid snapshot');
+  const health = oneOf(value.health, HEALTH, 'unavailable');
   const rows = [];
   for (const row of value.sessions.slice(0, MAX_ROWS)) { const safe = sanitizeRow(host, row, receivedAt); if (safe) rows.push(safe); }
   // A helper whose parent did not survive sanitising would be an orphan: drop it rather than guess a parent.
   const ids = new Set(rows.map(row => row.id));
   const kept = rows.filter(row => !Object.hasOwn(row, 'parentId') || row.parentId && ids.has(row.parentId));
-  return { rows: kept, bus: sanitizeBus(host, value.bus, new Set(kept.map(row => row.id)), receivedAt), targets: sanitizeTargets(value.targets, kept) };
+  return { health, rows: health === 'available' ? kept : kept.map(row => ({ ...row, inventoryHealth: 'unavailable' })),
+    bus: sanitizeBus(host, value.bus, new Set(kept.map(row => row.id)), receivedAt),
+    targets: health === 'available' ? sanitizeTargets(value.targets, kept) : new Map() };
 }
 
 /* Native pane proofs a remote published for control: only the identity fields the local control matches, each
@@ -101,7 +104,7 @@ function sanitizeSnapshot(host, value, receivedAt) {
 const PANE = /^[A-Za-z0-9:_-]{1,100}$/;
 const pathText = value => typeof value === 'string' && value.startsWith('/') && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value) ? value : null;
 function sanitizeTargets(targets, rows) {
-  const panes = new Set(rows.filter(row => row.source === 'herdr' && row.paneId).map(row => row.paneId.slice(row.paneId.indexOf('/') + 1)));
+  const panes = new Set(rows.filter(row => row.source === 'herdr' && row.paneId && row.inventoryHealth === 'available').map(row => row.paneId.slice(row.paneId.indexOf('/') + 1)));
   const result = new Map();
   if (!Array.isArray(targets)) return result;
   for (const pane of targets.slice(0, MAX_ROWS)) {
@@ -182,7 +185,7 @@ function reasonFrom(stderr, code) {
 }
 
 function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
-  const hosts = remotes.map(remote => ({ remote, child: null, rows: [], bus: null, targets: new Map(), receivedAt: null, reason: 'Connecting', failures: 0, timer: null, connected: false }));
+  const hosts = remotes.map(remote => ({ remote, child: null, rows: [], bus: null, targets: new Map(), receivedAt: null, reason: 'Connecting', failures: 0, timer: null, health: 'unavailable' }));
   let closed = false;
   function connect(host) {
     if (closed) return;
@@ -203,8 +206,15 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
         try {
           const receivedAt = now();
           const snap = sanitizeSnapshot(host.remote.id, JSON.parse(line), receivedAt);
-          host.rows = snap.rows; host.bus = snap.bus; host.targets = snap.targets;
-          host.receivedAt = receivedAt; host.reason = null; host.failures = 0; host.connected = true;
+          host.health = snap.health; host.targets = snap.targets; host.failures = 0;
+          if (snap.health === 'available') {
+            host.rows = snap.rows; host.bus = snap.bus; host.receivedAt = receivedAt; host.reason = null;
+          } else {
+            // Unavailable empty envelopes cannot erase the last observed crew or renew its proof.
+            if (snap.rows.length) host.rows = snap.rows;
+            if (!host.bus) host.bus = snap.bus;
+            host.reason = 'Remote inventory unavailable';
+          }
         } catch (_) { host.reason = 'Remote sent an unreadable snapshot'; }
       }
       if (buffer.length > MAX_LINE) { buffer = ''; overflow = true; host.reason = 'Remote snapshot too large'; }
@@ -229,8 +239,8 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
   function snapshot() {
     const at = now(), rows = [], sources = {}, buses = {};
     for (const host of hosts) {
-      const fresh = host.receivedAt !== null && at - host.receivedAt < FRESH_MS;
-      const health = fresh ? 'available' : host.receivedAt !== null ? 'stale' : 'unavailable';
+      const fresh = host.health === 'available' && host.receivedAt !== null && at >= host.receivedAt && at - host.receivedAt < FRESH_MS;
+      const health = fresh ? 'available' : host.health === 'unavailable' || host.receivedAt === null ? 'unavailable' : 'stale';
       // Stale rows stay on screen (the last truthful observation) but are never presented as live.
       for (const row of host.rows) rows.push(fresh ? row : { ...row, inventoryHealth: 'unavailable' });
       // A quiet host's mail is its last observation: kept for the ledger, never presented as a live bus.
@@ -252,7 +262,7 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
   // Control proof for `host`'s pane, stamped with the hub's receipt time; control re-checks it on that host over ssh.
   function controlTarget(hostId, paneId) {
     const host = hosts.find(value => value.remote.id === hostId);
-    if (closed || !host || host.receivedAt === null || now() - host.receivedAt > CONTROL_FRESH_MS || now() < host.receivedAt) return null;
+    if (closed || !host || host.health !== 'available' || host.receivedAt === null || now() - host.receivedAt > CONTROL_FRESH_MS || now() < host.receivedAt) return null;
     const proof = host.targets.get(paneId);
     return proof ? { ...structuredClone(proof), endpoint: 'remote:' + hostId, observedAt: host.receivedAt } : null;
   }
@@ -265,10 +275,17 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
 function makeFederatedObserver(local, remoteHosts, now = Date.now) {
   async function get() {
     const inventory = await local.get(), remote = remoteHosts.snapshot();
-    const sessions = [...inventory.sessions.map(row => ({ ...row, host: null })), ...remote.rows];
+    const sessions = [...inventory.sessions.map(row => {
+      const source = inventory.sources?.[row.source === 'helper' ? 'herdr' : row.source];
+      const observedAt = Number.isFinite(row.observedAt) ? row.observedAt : source?.observedAt ?? inventory.observedAt ?? null;
+      const health = source?.health || inventory.health;
+      return { ...row, host: null, observedAt, inventoryHealth: health === 'available' && Number.isFinite(observedAt) && row.inventoryHealth !== 'unavailable' ? 'available' : 'unavailable' };
+    }), ...remote.rows];
     const herdr = inventory.sources?.herdr;
+    const available = inventory.health === 'available' || Object.values(remote.sources).some(host => host.health === 'available');
+    const times = [inventory.observedAt, ...Object.values(remote.sources).filter(host => host.health === 'available').map(host => host.observedAt)].filter(Number.isFinite);
     return { ...inventory, sessions, aggregate: aggregateRows(sessions, now()),
-      health: inventory.health === 'available' || Object.values(remote.sources).some(host => host.health === 'available') ? 'available' : inventory.health,
+      health: available ? 'available' : inventory.health, observedAt: times.length ? Math.max(...times) : null, error: available ? null : inventory.error,
       sources: { ...inventory.sources, hosts: { local: { health: herdr?.health || 'unavailable', observedAt: herdr?.observedAt ?? null, reason: herdr?.reason || null,
         agents: inventory.sessions.filter(row => row.source === 'herdr').length }, ...remote.sources } }, hostBus: remote.buses || {} };
   }

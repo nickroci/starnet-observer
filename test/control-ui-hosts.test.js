@@ -109,6 +109,12 @@ function element() {
   listener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: Date.now(), sources: { hosts: { local: hosts.local, 'herdr-dev-2': hosts['herdr-dev-2'] } } } });
   viewOptions.onSelect(blocked.id);
   assert.equal(elements['crew-title'].textContent, 'herdr-dev-2 crew');
+  // Empty local host uses the same explicit host action contract as configured remotes.
+  listener({ data: { sessions: [], health: 'available', observedAt: Date.now(), sources: { hosts: { local: { ...hosts.local, agents: 0 }, empty: hosts.empty } } } });
+  tabs.children.find(tab => tab.dataset.host === '').handlers.click();
+  assert.equal(elements['host-spawn'].hidden, false);
+  elements['host-spawn'].children[1].handlers.click(); await tick();
+  assert.equal(lastPost(), JSON.stringify(['/api/control/spawn-host', { host: 'local' }]), 'local plus never sends a null host');
   // A reload restores the remembered tab when that host is still reported, and falls back to this machine when not.
   for (const [remembered, expected] of [['herdr-dev-2', 'herdr-dev-2 crew'], ['gone-host', 'This machine crew']]) {
     const reloaded = {}; let reloadListener;

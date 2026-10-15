@@ -80,15 +80,36 @@ const { nativeProof } = require('../scripts/stream.js');
     assert.equal(calls.length, 0);
   } finally { if (previous === undefined) delete process.env.STARNET_TEST_TOKEN; else process.env.STARNET_TEST_TOKEN = previous; }
 
+  // Empty local host starts in the platform home through the configured local Herdr endpoint.
+  const localCalls = [], localHome = require('node:os').homedir();
+  const localControl = makeControl({ endpoint: '/fixture/local.sock', overseerState: { read: async () => ({ state: 'empty' }), match: async () => false },
+    now: () => at, sleep: async () => {}, execute: async (command, args, options) => {
+      localCalls.push([command, args]);
+      assert.equal(command, 'herdr', 'local host spawn never uses SSH or Terminal');
+      assert.equal(options.env.HERDR_SOCKET_PATH, '/fixture/local.sock');
+      if (args[0] === 'workspace' && args[1] === 'list') return { stdout: JSON.stringify({ result: { workspaces: [] } }) };
+      if (args[0] === 'workspace' && args[1] === 'create') return { stdout: JSON.stringify({ result: { root_pane: { pane_id: 'w3:p1' } } }) };
+      return { stdout: JSON.stringify({ result: {} }) };
+    } });
+  const localSpawn = await localControl.spawnHost('local');
+  assert.equal(localSpawn.paneId, 'w3:p1'); assert.equal(localSpawn.host, 'local'); assert.equal(localSpawn.folder, localHome);
+  const create = localCalls.find(([, args]) => args[0] === 'workspace' && args[1] === 'create')[1];
+  assert.equal(create[create.indexOf('--cwd') + 1], localHome);
+  assert(localCalls.some(([, args]) => args[0] === 'agent' && args[1] === 'start'));
+  const beforeLocalReject = localCalls.length;
+  await assert.rejects(localControl.spawnHost('local', '/arbitrary'), error => error.status === 400);
+  assert.equal(localCalls.length, beforeLocalReject);
+
   // ---- proofs on the wire: the remote streams minimal native identities; the hub keeps only shape-checked ones for its rows ----
   const full = { ...native, name: 'secret-title', terminal_title: 'PRIVATE', agent_session: { agent: 'codex', kind: 'id', value: '0123abcd-0000-4000-8000-000000000001', extra: 'x' } };
   const wire = nativeProof(full);
   assert.deepEqual(Object.keys(wire).sort(), ['agent', 'agent_session', 'cwd', 'foreground_cwd', 'pane_id', 'terminal_id', 'workspace_id']);
   assert.ok(!JSON.stringify(wire).includes('PRIVATE') && !JSON.stringify(wire).includes('secret-title'));
-  const rows = [{ source: 'herdr', paneId: 'herdr-dev-2/w1:p2' }];
+  const rows = [{ source: 'herdr', paneId: 'herdr-dev-2/w1:p2', inventoryHealth: 'available' }];
   assert.equal(sanitizeTargets([wire], rows).get('w1:p2').agent_session.value, '0123abcd-0000-4000-8000-000000000001');
   assert.equal(sanitizeTargets([{ ...wire, pane_id: 'w1:p9' }], rows).size, 0, 'no proof for a pane that is not a surviving row');
   assert.equal(sanitizeTargets([{ ...wire, terminal_id: 't;1' }], rows).size, 0);
+  assert.equal(sanitizeTargets([wire], rows.map(row => ({ ...row, inventoryHealth: 'unavailable' }))).size, 0, 'a cached unavailable row supplies no native control proof');
   assert.equal(sanitizeTargets([{ ...wire, agent: 'shell' }], rows).size, 0);
   assert.equal(sanitizeTargets([{ ...wire, agent_session: { agent: 'codex', kind: 'id', value: 'not-a-uuid' } }], rows).size, 0, 'an unprovable native session yields no proof');
   assert.equal(sanitizeTargets([{ ...wire, cwd: 'relative' }], rows).get('w1:p2').cwd, null);
@@ -98,7 +119,7 @@ const { nativeProof } = require('../scripts/stream.js');
   const spawn = () => { const handlers = {}, out = {}; const child = { stdout: { setEncoding() {}, on: (event, fn) => { out[event] = fn; } }, stderr: { on() {} }, stdin: { end() {} }, on: (event, fn) => { handlers[event] = fn; }, kill() {} }; children.push({ child, out, handlers }); return child; };
   const hosts = makeRemoteHosts({ remotes: [{ id: 'herdr-dev-2', ssh: 'nick@host' }], spawn, now: () => clock, setTimer: () => 0, clearTimer: () => {} });
   const row = { id: 'obs_' + 'a'.repeat(24), provider: 'codex', source: 'herdr', paneId: 'w1:p2', status: 'idle', inventoryHealth: 'available' };
-  children[0].out.data(JSON.stringify({ sessions: [row], targets: [wire] }) + '\n');
+  children[0].out.data(JSON.stringify({ health: 'available', sessions: [row], targets: [wire] }) + '\n');
   const local = { get: async () => ({ sessions: [], sources: {} }), controlTarget: id => id === 'w1:p1' ? { local: true } : null, inspect: async () => ({}), inspectMessage: () => ({}) };
   const hub = makeFederatedObserver(local, hosts, () => clock);
   assert.deepEqual(hub.controlTarget('w1:p1'), { local: true }, 'plain ids stay local');
@@ -121,7 +142,8 @@ const { nativeProof } = require('../scripts/stream.js');
     assert.equal((await post(on.base, '/api/control/attach', { paneId: 'herdr-dev-2/w1:p2' })).status, 200);
     assert.equal((await post(on.base, '/api/control/attach', { paneId: 'a/b/c' })).status, 400);
     assert.equal((await post(on.base, '/api/control/spawn-host', { host: 7 })).status, 400, 'host must be a string');
-    assert.equal((await post(on.base, '/api/control/spawn-host', { host: null })).status, 400, 'host spawn needs a configured remote');
+    assert.equal((await post(on.base, '/api/control/spawn-host', { host: null })).status, 400, 'host spawn requires the explicit local or configured remote discriminator');
+    assert.equal((await post(on.base, '/api/control/spawn-host', { host: 'local' })).status, 200);
     assert.equal((await post(on.base, '/api/control/spawn-host', { host: 'herdr-dev-2', folder: ['~'] })).status, 400, 'folder must be a string');
     assert.equal((await post(on.base, '/api/control/spawn-host', [])).status, 400, 'body must be an object');
     assert.equal((await post(on.base, '/api/control/spawn-host', { host: 'herdr-dev-2', folder: '~/proj' })).status, 200);
@@ -135,6 +157,6 @@ const { nativeProof } = require('../scripts/stream.js');
     const local = await post(masked.base, '/api/control/attach', { paneId: 'w1:p2' });
     assert.equal(local.status, 200, 'local control keeps upstream presentation behaviour');
   } finally { masked.server.close(); }
-  assert.deepEqual(hits, [['attach', 'herdr-dev-2/w1:p2'], ['spawn-host', 'herdr-dev-2', '~/proj'], ['attach', 'w1:p2']]);
+  assert.deepEqual(hits, [['attach', 'herdr-dev-2/w1:p2'], ['spawn-host', 'local', null], ['spawn-host', 'herdr-dev-2', '~/proj'], ['attach', 'w1:p2']]);
   console.log('control remote: ssh routing, fresh streamed proof re-checked on the host, mismatch/stale/foreign refusals, no Terminal on spawn, proof wire shape, hub freshness, routes and presentation refusal OK');
 })().catch(error => { console.error(error); process.exit(1); });

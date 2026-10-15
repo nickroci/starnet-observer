@@ -20,6 +20,13 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
     peers: (remote.peers || []).map(peer => ({ machine: alias('machine', 'Machine', peer.machine), repos: (peer.repos || []).map(repo => alias('repo', 'Shared repo', repo)), agents: peer.agents, lastSeen: peer.lastSeen,
       list: (peer.list || []).map(agent => ({ id: agent.id, provider: agent.provider, repo: alias('repo', 'Shared repo', agent.repo), lastSeen: agent.lastSeen })) })) } : undefined;
   const mailOf = (message, extra = {}) => { const relay = relayOf(message.relay); return { id: message.id, ...extra, from: message.from, to: message.to, sentAt: message.sentAt, acknowledgedAt: message.acknowledgedAt, wake: message.wake, ...(relay ? { relay } : {}) }; };
+
+  // Dynamic-arrangement labels are private too: fictional bay/section names in the same sorted allocation pass.
+  const bays = new Map(), sections = new Map();
+  const bay = id => { if (!bays.has(id)) bays.set(id, 'Bay ' + (bays.size + 1)); return bays.get(id); };
+  const section = id => { if (!sections.has(id)) sections.set(id, 'Section ' + (sections.size + 1)); return sections.get(id); };
+  const arrangementOf = value => value && typeof value === 'object' && typeof value.roomId === 'string' && typeof value.sectionId === 'string'
+    ? { roomId: value.roomId, room: value.roomId === 'unassigned' ? 'Unassigned' : bay(value.roomId), sectionId: value.sectionId, section: value.sectionId === 'unassigned' ? '' : section(value.sectionId) } : null;
   const roomNames = new Set(labels.rooms.map(room => room.name.toLowerCase()));
   const repoNames = new Set(labels.rooms.flatMap(room => room.repos).map(name => name.toLowerCase()));
   function project(id) {
@@ -70,6 +77,8 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
       presence: row.presence, helperOverflow: row.helperOverflow, usage: row.usage, lastActivityAt: Number.isFinite(row.lastActivityAt) ? row.lastActivityAt : null,
       tool: { available: row.tool?.available === true }
     };
+    const arrangement = arrangementOf(row.arrangement);
+    if (arrangement) safe.arrangement = arrangement;
     if (Number.isFinite(row.tool?.observedAt)) safe.tool.observedAt = row.tool.observedAt;
     if (row.tool?.last) safe.tool.last = { name: TOOL_NAMES.has(row.tool.last.name) ? row.tool.last.name : 'Tool', phase: row.tool.last.phase, outcome: row.tool.last.outcome, at: row.tool.last.at };
     if (helper) {

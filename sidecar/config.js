@@ -13,6 +13,7 @@ const DEFAULT_LABELS = Object.freeze({
   ])
 });
 const DEFAULT_CONFIG = path.join(__dirname, '..', 'observer.config.json');
+const DEFAULT_ROOMS = path.join(__dirname, '..', 'rooms.json');
 const HELP = `Usage: bun --no-env-file server.js [options]
 
   --presentation          Enable private labels and block inspectors
@@ -29,6 +30,9 @@ Use PORT to change the listening port (default 4319).
 Config "remotes": [{ "id": "vm1", "ssh": "user@host", "dir": "~/starnet-observer" }] adds remote hosts, each
 streamed read-only over the operator's ssh (key auth, BatchMode) and drawn as its own ship with its own mailroom.
 Cross-machine mail is drawn only from what each llm-bus reports about its own relay binding, never from config.
+Config "roomsFile" (default rooms.json next to server.js, relative to the config file) holds optional dynamic
+arrangement overrides: { "rooms": [{ "name": "Banqora", "match": ["~/dev/repos/bq-*", "github.com/banqora/*"] }] }.
+Config "theme": { "arrange": true } starts the page with the dynamic arrangement on.
 `;
 
 function object(value, field) {
@@ -42,7 +46,7 @@ function label(value, field) {
   return value.trim();
 }
 function validateConfig(input) {
-  object(input, 'Config'); keys(input, ['presentation', 'company', 'repoPrefix', 'rooms', 'theme', 'remotes'], 'config');
+  object(input, 'Config'); keys(input, ['presentation', 'company', 'repoPrefix', 'rooms', 'theme', 'roomsFile', 'remotes'], 'config');
   const result = {};
   if (Object.hasOwn(input, 'presentation')) {
     if (typeof input.presentation !== 'boolean') throw new Error('presentation must be a boolean');
@@ -85,8 +89,12 @@ function validateConfig(input) {
       return { id: remote.id, ssh: remote.ssh, dir };
     });
   }
+  if (Object.hasOwn(input, 'roomsFile')) {
+    if (typeof input.roomsFile !== 'string' || !input.roomsFile.trim() || input.roomsFile.length > 1024 || /[\x00-\x1f\x7f]/.test(input.roomsFile)) throw new Error('roomsFile must be a nonempty path without control characters');
+    result.roomsFile = input.roomsFile;
+  }
   if (Object.hasOwn(input, 'theme')) {
-    object(input.theme, 'theme'); keys(input.theme, ['pack', 'fx', 'colors'], 'theme');
+    object(input.theme, 'theme'); keys(input.theme, ['pack', 'fx', 'arrange', 'colors'], 'theme');
     result.theme = {};
     if (Object.hasOwn(input.theme, 'pack')) {
       if (typeof input.theme.pack !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(input.theme.pack)) throw new Error('theme.pack must be a lowercase pack ID of 1–32 characters');
@@ -95,6 +103,10 @@ function validateConfig(input) {
     if (Object.hasOwn(input.theme, 'fx')) {
       if (typeof input.theme.fx !== 'boolean') throw new Error('theme.fx must be a boolean');
       result.theme.fx = input.theme.fx;
+    }
+    if (Object.hasOwn(input.theme, 'arrange')) {
+      if (typeof input.theme.arrange !== 'boolean') throw new Error('theme.arrange must be a boolean');
+      result.theme.arrange = input.theme.arrange;
     }
     if (Object.hasOwn(input.theme, 'colors')) {
       object(input.theme.colors, 'theme.colors');
@@ -141,6 +153,7 @@ function loadConfig(args = process.argv.slice(2), defaultPath = DEFAULT_CONFIG) 
   return { presentation: values.presentation ? true : values['no-presentation'] ? false : settings.presentation || false,
     labels: { company: labels.company, repoPrefix: labels.repoPrefix, rooms: labels.rooms },
     theme: { ...settings.theme, ...(values.fx ? { fx: true } : values['no-fx'] ? { fx: false } : {}) },
-    remotes: settings.remotes || [] };
+    remotes: settings.remotes || [],
+    roomsFile: settings.roomsFile ? path.resolve(path.dirname(file), settings.roomsFile) : DEFAULT_ROOMS };
 }
-module.exports = { DEFAULT_LABELS, HELP, validateConfig, loadConfig };
+module.exports = { DEFAULT_LABELS, DEFAULT_ROOMS, HELP, validateConfig, loadConfig };

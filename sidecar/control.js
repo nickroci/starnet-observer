@@ -5,7 +5,7 @@
      attach(paneId)  open a macOS Terminal window running `herdr agent attach <pane>` (the only action that opens one)
      spawn(paneId)   new tab in that pane's workspace and cwd, start Claude there; no Terminal (the page selects it)
      close(paneId)   close the pane (ends the agent); the page asks the user to confirm first
-     spawnHost(host, folder) start Claude in a folder on a configured host even if it has no agents yet
+     spawnHost(host, folder) start Claude on a configured host or in the local home, even with no agents
    Spawned agents run unattended; one stopped at a startup dialog shows as waiting until someone attaches.
    Every target is validated against the same pane-id shape the reader accepts. Ordinary actions require a fresh
    private observer proof matched against current Herdr inventory and native agent/pane identities before mutation.
@@ -16,6 +16,7 @@
    own `agent list` / `agent get` / `pane get` immediately before acting. Unlisted hosts are refused; every argument
    that reaches a remote shell is a validated pane id, a validated folder, or a fixed word, and is single-quoted. */
 const path = require('node:path');
+const os = require('node:os');
 const fsp = require('node:fs/promises');
 const { stationChildEnv } = require('./child-env.js');
 const { makeOverseerState, defaultOverseerHome, resolveEndpoint } = require('./overseer-state.js');
@@ -176,28 +177,31 @@ function makeControl(options = {}) {
     await startIn(target, name, 'claude', host);
     return { ok: true, action: 'spawn', paneId: shown(host, target), name, project: path.posix.basename(cwd) };
   }
-  /* Start Claude in a folder on a configured remote host, even one with no agents yet. The folder is that host's home
+  /* Start Claude on a configured remote host or this machine, even with no agents yet. Local spawn uses only
+     the platform home; a remote folder is that host's home
      unless the page names one (validated; `~` means that host's home). Reuses the Herdr workspace labelled after the
      folder, as the claude wrapper does, else creates it. There is no target pane, so there is no pane proof to check:
-     the host must be configured and every argument is validated and quoted. */
+     the host must be explicitly local or configured, and every argument is validated and quoted. */
   async function spawnHost(host, folder) {
     if (typeof host !== 'string' || !host) throw badRequest('unknown-host');
-    remoteOf(host);
+    const controlHost = host === 'local' ? null : host;
+    remoteOf(controlHost);
+    if (controlHost === null && folder != null && folder !== '~') throw badRequest('invalid-folder');
     if (folder != null && (typeof folder !== 'string' || !FOLDER.test(folder) || folder.split('/').includes('..') || (!folder.startsWith('/') && !folder.startsWith('~')))) throw badRequest('invalid-folder');
-    const home = await homeOf(host);
+    const home = controlHost === null ? os.homedir() : await homeOf(controlHost);
     const cwd = folder == null || folder === '~' ? home : folder.startsWith('~/') ? home + folder.slice(1) : folder;
     if (cwd.startsWith('~')) throw badRequest('invalid-folder');
     const label = (path.posix.basename(cwd) || 'home').replace(/[^A-Za-z0-9_-]/g, '-');
     const name = agentName(cwd);
     let workspaces = [];
-    try { workspaces = (await herdr(['workspace', 'list'], 5000, host))?.workspaces || []; } catch (_) { workspaces = []; }
+    try { workspaces = (await herdr(['workspace', 'list'], 5000, controlHost))?.workspaces || []; } catch (_) { workspaces = []; }
     const existing = workspaces.find(workspace => workspace && workspace.label === label && typeof workspace.workspace_id === 'string' && PANE.test(workspace.workspace_id));
-    const created = existing ? await herdr(['tab', 'create', '--workspace', existing.workspace_id, '--cwd', cwd, '--label', name, '--no-focus'], 10000, host)
-      : await herdr(['workspace', 'create', '--cwd', cwd, '--label', label, '--no-focus'], 10000, host);
+    const created = existing ? await herdr(['tab', 'create', '--workspace', existing.workspace_id, '--cwd', cwd, '--label', name, '--no-focus'], 10000, controlHost)
+      : await herdr(['workspace', 'create', '--cwd', cwd, '--label', label, '--no-focus'], 10000, controlHost);
     const target = created && created.root_pane && created.root_pane.pane_id;
     if (!validPane(target)) throw new Error((existing ? 'tab' : 'workspace') + ' create returned no pane');
-    await startIn(target, name, 'claude', host);
-    return { ok: true, action: 'spawn-host', host, paneId: shown(host, target), name, folder: cwd };
+    await startIn(target, name, 'claude', controlHost);
+    return { ok: true, action: 'spawn-host', host, paneId: shown(controlHost, target), name, folder: cwd };
   }
   // Start the selected provider in that pane, tolerating a startup dialog the same way spawn does.
   async function startIn(target, name, provider, host = null) {

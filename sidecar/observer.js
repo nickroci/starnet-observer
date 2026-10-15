@@ -106,7 +106,7 @@ function makeObserver(options = {}) {
   const execute = options.execute || ((command, args, settings) => new Promise((resolve, reject) => {
     childProcess.execFile(command, args, settings, (error, stdout) => error ? reject(error) : resolve({ stdout }));
   }));
-  const projects = options.projects || makeProjectResolver({ execute, now });
+  const projects = options.projects || makeProjectResolver({ execute, now, arrange: options.arrange || null });
   const transcripts = options.transcripts || makeTranscriptObserver({ now });
   const sqlite = !options.helpers || !options.bus ? makeSqliteClient({ now }) : null;
   const helpers = options.helpers || makeHelperObserver({ transcripts, now, readEdges: sqlite.readHelperEdges });

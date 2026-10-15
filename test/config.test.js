@@ -26,6 +26,12 @@ try {
   write({ theme: { fx: false, colors: { accent: '#ABCDEF' } } });
   assert.deepEqual(loadConfig(['--fx'], file).theme, { fx: true, colors: { accent: '#ABCDEF' } });
   assert.equal(loadConfig(['--no-fx'], file).theme.fx, false);
+  // Dynamic arrangement: theme default and the rooms file path (relative to the config file, default next to server.js).
+  write({ theme: { arrange: true }, roomsFile: 'my-rooms.json' });
+  const arranged = loadConfig([], file);
+  assert.equal(arranged.theme.arrange, true); assert.equal(arranged.roomsFile, path.join(folder, 'my-rooms.json'));
+  assert.equal(loadConfig([], missing).roomsFile, require('../sidecar/config.js').DEFAULT_ROOMS);
+  for (const bad of [{ theme: { arrange: 'yes' } }, { roomsFile: '' }, { roomsFile: 3 }, { roomsFile: 'a\u0000b' }]) assert.throws(() => validateConfig(bad));
   assert.throws(() => loadConfig(['--fx', '--no-fx'], missing));
   for (const theme of [null, [], { fx: 'false' }, { scripts: 'bad' }, { colors: { accent: 'red' } }, { colors: { accent: '#123' } }, { colors: { custom: '#123456' } }]) assert.throws(() => validateConfig({ theme }));
   assert.deepEqual(validateConfig({ theme: { pack: 'starnet' } }), { theme: { pack: 'starnet' } });

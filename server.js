@@ -152,7 +152,8 @@ if (require.main === module) {
   setClock(Date.now);
   const endpoint = resolveEndpoint({});
   const overseerState = makeOverseerState({ endpoint });
-  const local = makeObserver({ now: Date.now, warmDetails: !config.presentation, endpoint, overseerState });
+  const local = makeObserver({ now: Date.now, warmDetails: !config.presentation, endpoint, overseerState,
+    arrange: { roomsFile: config.roomsFile, warn: message => console.warn('[observer arrange]', redact(String(message))) } });
   const remoteHosts = config.remotes.length ? makeRemoteHosts({ remotes: config.remotes, now: Date.now }) : null;
   const observer = remoteHosts ? makeFederatedObserver(local, remoteHosts, Date.now) : local;
   const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ endpoint, overseerState, target: paneId => observer.controlTarget(paneId), remotes: config.remotes, claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean) }) : null;

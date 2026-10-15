@@ -7,11 +7,22 @@
   // The resolved appearance snapshot (frozen by the head bootstrap); station colours, accents, effects and crew.
   const pack = ThemePack.freezeSnapshot(window.__OBSERVER_THEME_PACK__) || ThemePack.getDefault();
 
-  const layout = ObserverModel.createLayout({ projectAccents: pack.scene?.projectAccents }), courier = ObserverMail.createCourier({ colors: pack.scene?.colors });
+  let layout = ObserverModel.createLayout({ projectAccents: pack.scene?.projectAccents });
+  const courier = ObserverMail.createCourier({ colors: pack.scene?.colors });
   const filters = Array.from(get('filters').querySelectorAll('button'));
   const clock = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
   const reducedMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-  let latest, selected = null, page = 0, filter = 'all', ingested = null, ingestedStale = false, mailSelected = null, inventoryStale = true;
+  /* Per-viewer view settings survive a reload: a saved value beats the theme default, which beats the built-in one.
+     Storage may be missing or throw (private window, blocked site data), so every access is guarded and the page
+     renders the same without it. Only toggles and positions are kept; never labels, ids or anything about sessions. */
+  const prefs = {
+    get(name) { try { const value = window.localStorage?.getItem('observer.' + name); return typeof value === 'string' ? value : null; } catch (_) { return null; } },
+    set(name, value) { try { window.localStorage?.setItem('observer.' + name, String(value)); } catch (_) { /* convenience only */ } },
+    flag(name, fallback) { const value = prefs.get(name); return value === '1' ? true : value === '0' ? false : fallback; }
+  };
+  const savedFilter = prefs.get('filter'), savedPage = Number(prefs.get('page'));
+  let latest, selected = null, page = Number.isInteger(savedPage) && savedPage >= 0 && savedPage < 1000 ? savedPage : 0,
+    filter = filters.some(button => button.dataset.filter === savedFilter) ? savedFilter : 'all', ingested = null, ingestedStale = false, mailSelected = null, inventoryStale = true;
   let pendingSpots = [], scene = null, grounded = true, byId = new Map(), shadowById = new Map(), relayMembers = new Map();
   // Visibility: a hidden page owns no subscription, deadline or frame; resume proves freshness before inspection.
   let active = false, unsubscribe = null, resumedAt = 0, awaitingProof = false, cachedAtResume = null;
@@ -90,7 +101,7 @@
 
   function setPage(next) {
     if (next === page) return;
-    page = next; resetCouriers();
+    page = next; resetCouriers(); prefs.set('page', page);
   }
   function select(id, scroll = false) {
     if (!byId.has(id)) return;
@@ -256,16 +267,17 @@
   }
   // Ambient sky effects (Matrix rain, pixies, nebulae): off on startup unless explicitly configured.
   const fxButton = get('fx-toggle');
-  function readFx() { return typeof theme.fx === 'boolean' ? theme.fx : false; }
+  function readFx() { return prefs.flag('fx', typeof theme.fx === 'boolean' ? theme.fx : false); }
   function applyFx(on) { view.setFx(on); fxButton.setAttribute('aria-pressed', on ? 'true' : 'false'); }
-  if (fxButton && typeof view.setFx === 'function') { applyFx(readFx()); fxButton.addEventListener('click', () => applyFx(!view.fx())); }
+  if (fxButton && typeof view.setFx === 'function') { applyFx(readFx()); fxButton.addEventListener('click', () => { const on = !view.fx(); applyFx(on); prefs.set('fx', on ? 1 : 0); }); }
   get('zoom-in').addEventListener('click', () => view.zoomBy(1.25));
   get('zoom-out').addEventListener('click', () => view.zoomBy(0.8));
   get('previous-page').addEventListener('click', () => changePage(-1));
   get('next-page').addEventListener('click', () => changePage(1));
   get('search').addEventListener('input', () => { if (latest) render(latest, true); });
+  for (const option of filters) option.setAttribute('aria-pressed', String(option.dataset.filter === filter));
   for (const button of filters) button.addEventListener('click', () => {
-    filter = button.dataset.filter;
+    filter = button.dataset.filter; prefs.set('filter', filter);
     for (const option of filters) option.setAttribute('aria-pressed', String(option === button));
     if (latest) render(latest, true);
   });
@@ -439,7 +451,7 @@
     if (!CONTROL || !paneId || button.disabled) return;
     button.disabled = true; notice(pending);
     try {
-      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? { provider } : action === 'spawn-host' ? { host: paneId === 'local' ? null : paneId } : { paneId });
+      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? { provider } : action === 'spawn-host' ? { host: paneId } : { paneId });
       // Spawning never opens a terminal: the new agent is selected in the panel when it appears; ⇱ attaches.
       if (['spawn', 'spawn-host', 'overseer'].includes(action) && typeof result.paneId === 'string') pendingSpawn = { paneId: result.paneId, until: Date.now() + 90000 };
       notice(action === 'spawn-host' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.folder + ' · ' + result.paneId + ' · selecting it when it appears' : action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · selecting it when it appears' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
@@ -865,6 +877,26 @@
       ...Object.values(latest.data.sources || {}).map(source => source.observedAt), ...(latest.data.sessions || []).flatMap(row => [row.observedAt, row.tool?.observedAt]), latest.data.aggregate?.usageObservedAt].filter(fresh);
     deadline = setTimeout(() => { deadline = null; if (latest) render(latest, true); }, Math.max(0, Math.min(...times) + FRESH_MS + 1 - Date.now()));
   }
+  /* ARRANGE: the page draws either the folder grouping or the sidecar's dynamic arrangement. The arranged copy is
+     memoised per snapshot so unchanged data keeps its identity; toggling rebuilds the layout once (desks then hold). */
+  const arrangeButton = get('arrange-toggle');
+  let arrangeOn = false, rawLatest = null, arrangedFrom = null, arrangedTo = null;
+  arrangeOn = prefs.flag('arrange', theme.arrange === true);
+  function arrangedState(state) {
+    if (!arrangeOn || !state?.data || !Array.isArray(state.data.sessions)) return state;
+    if (arrangedFrom !== state.data) { arrangedFrom = state.data; arrangedTo = { ...state.data, sessions: state.data.sessions.map(ObserverModel.arranged) }; }
+    return { ...state, data: arrangedTo };
+  }
+  function ingest(state) { rawLatest = state; render(arrangedState(state)); }
+  function applyArrange(on, persist) {
+    arrangeOn = !!on;
+    if (arrangeButton) arrangeButton.setAttribute('aria-pressed', arrangeOn ? 'true' : 'false');
+    if (persist) prefs.set('arrange', arrangeOn ? 1 : 0);
+    layout = ObserverModel.createLayout({ projectAccents: pack.scene?.projectAccents }); sceneKey = null; selectedRepoId = null;
+    resetCouriers(); ingested = null; ingestedHosts = null;
+    if (rawLatest) render(arrangedState(rawLatest), true);
+  }
+  if (arrangeButton) { arrangeButton.setAttribute('aria-pressed', arrangeOn ? 'true' : 'false'); arrangeButton.addEventListener('click', () => applyArrange(!arrangeOn, true)); }
   function render(state, refresh = false) {
     if (!active) return;
     const previous = latest, stale = isStale(state);
@@ -919,7 +951,7 @@
       member.lastActivityAt && Math.floor((Date.now() - member.lastActivityAt) / 60000)])])]);
     layout.reconcile([...rows.filter(row => row !== overseerRow), ...ghosts]);
     if (selected && !byId.has(selected)) { overview(); }
-    if (page >= layout.pages()) setPage(layout.pages() - 1);
+    if (data && page >= layout.pages()) setPage(layout.pages() - 1);
     if (!layout.onPage(page).length && rows.length) setPage(layout.pageFor(rows[0].id));
     const rooms = layout.onPage(page), onFloor = rooms.flatMap(room => room.rows.map(value => value.row)).filter(row => !row.shadow), floorRows = [...rows, ...ghosts];
     // Geometry and row fields consumed by floor paint or movement; titles and tools are read live by the hover callbacks.
@@ -986,7 +1018,7 @@
     if (active || document.hidden) return;
     active = true; resumedAt = Date.now(); awaitingProof = panels.some(entry => entry.target.kind === 'agent'); cachedAtResume = latest?.data;
     resetCouriers(); ingested = null; ingestedHosts = null;
-    unsubscribe = QuerySpine.subscribe('observer.sessions', snapshot => render(snapshot), { immediate: false, refresh: false });
+    unsubscribe = QuerySpine.subscribe('observer.sessions', snapshot => ingest(snapshot), { immediate: false, refresh: false });
     Promise.resolve(QuerySpine.invalidate('observer.sessions', { refresh: true })).catch(() => {});
     view.start();
     if (latest) render(latest, true);

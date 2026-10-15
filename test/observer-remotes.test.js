@@ -82,7 +82,7 @@ function fakeTimers() {
   assert.equal(children.length, 1); assert.equal(children[0].command, 'ssh');
   assert.equal(hosts.snapshot().sources.vm.health, 'unavailable');
   assert.equal(hosts.snapshot().sources.vm.reason, 'Connecting');
-  const line = JSON.stringify({ sessions: [row()], health: 'available', bus: { messages: [{ id: 1 }] } });
+  const line = JSON.stringify({ health: 'available', sessions: [row()], health: 'available', bus: { messages: [{ id: 1 }] } });
   children[0].stdout.emit('data', line.slice(0, 20));
   assert.equal(hosts.snapshot().rows.length, 0, 'a partial line is not a snapshot');
   children[0].stdout.emit('data', line.slice(20) + '\n');
@@ -96,10 +96,10 @@ function fakeTimers() {
   assert.equal(snap.sources.vm.health, 'stale'); assert.equal(snap.rows[0].inventoryHealth, 'unavailable', 'stale rows are never live');
   // An oversized line is dropped whole, including its tail after the cap.
   children[0].stdout.emit('data', 'x'.repeat(MAX_LINE + 1));
-  children[0].stdout.emit('data', JSON.stringify({ sessions: [] }) + '\n');
+  children[0].stdout.emit('data', JSON.stringify({ health: 'available', sessions: [] }) + '\n');
   assert.equal(hosts.snapshot().rows.length, 1, 'the tail of an oversized line is not parsed');
   // Exit with an unterminated last line: it is discarded, never parsed.
-  children[0].stdout.emit('data', JSON.stringify({ sessions: [] }));
+  children[0].stdout.emit('data', JSON.stringify({ health: 'available', sessions: [] }));
   children[0].stderr.emit('data', 'nick@host: Permission denied (publickey).');
   children[0].emit('close', 255);
   assert.equal(hosts.snapshot().rows.length, 1, 'an unterminated tail at exit is discarded');
@@ -111,13 +111,41 @@ function fakeTimers() {
   children.at(-1).emit('close', 1);
   assert.equal(timers.timers[0].delay, 60000, 'backoff caps at 60s');
   timers.run();
-  children.at(-1).stdout.emit('data', JSON.stringify({ sessions: [] }) + '\n');
+  children.at(-1).stdout.emit('data', JSON.stringify({ health: 'available', sessions: [] }) + '\n');
   children.at(-1).emit('close', 1);
   assert.equal(timers.timers[0].delay, BACKOFF[0], 'a good snapshot resets the backoff');
   const before = children.length;
   hosts.close();
   assert.equal(timers.timers[0].cleared, true);
   timers.run(); assert.equal(children.length, before, 'nothing reconnects after close');
+}
+
+// Unavailable envelopes describe inventory failure, even when transport is fresh.
+{
+  let clock = 7000;
+  const fake = fakeSpawn();
+  const hosts = makeRemoteHosts({ remotes: [{ id: 'vm', ssh: 'nick@host' }], spawn: fake.spawn, now: () => clock, setTimer: () => 0, clearTimer() {} });
+  const proof = { pane_id: 'w1:p1', workspace_id: 'w1', terminal_id: 't1', agent: 'claude', agent_session: null, cwd: '/work', foreground_cwd: '/work' };
+  const emit = value => fake.children[0].stdout.emit('data', JSON.stringify(value) + '\n');
+  emit({ health: 'available', sessions: [row()], targets: [proof], bus: { health: 'available', messages: [] } });
+  assert(hosts.controlTarget('vm', 'w1:p1'));
+  clock += 100;
+  emit({ health: 'unavailable', sessions: [row()], targets: [proof] });
+  let snap = hosts.snapshot();
+  assert.equal(snap.sources.vm.health, 'unavailable', 'fresh transport cannot mark unavailable inventory live');
+  assert.equal(snap.sources.vm.observedAt, 7000, 'failed inventory does not renew the last successful observation');
+  assert.equal(snap.rows[0].inventoryHealth, 'unavailable');
+  assert.equal(snap.buses.vm.health, 'unavailable');
+  assert.equal(hosts.controlTarget('vm', 'w1:p1'), null, 'unavailable envelopes cannot supply control proof');
+  emit({ health: 'unavailable', sessions: [], error: 'Snapshot too large', targets: [proof] });
+  snap = hosts.snapshot();
+  assert.equal(snap.rows.length, 1, 'unavailable empty envelope retains the cached crew');
+  assert.equal(snap.sources.vm.health, 'unavailable');
+  assert.equal(hosts.controlTarget('vm', 'w1:p1'), null);
+  emit({ health: 'available', sessions: [], targets: [proof] });
+  assert.equal(hosts.snapshot().rows.length, 0, 'a healthy empty inventory authoritatively withdraws cached rows');
+  assert.equal(hosts.snapshot().sources.vm.health, 'available');
+  hosts.close();
 }
 
 // ── Codex rows cross the hub intact: provider, identity (resolved or not), footer source, tool and usage survive.
@@ -197,17 +225,29 @@ function fakeTimers() {
   assert.equal(first.sessions.length, 1); assert.equal(first.sessions[0].host, null);
   assert.equal(first.aggregate.agents.observed, 1);
   // Now the remote speaks.
-  silent.children[0].stdout.emit('data', JSON.stringify({ sessions: [row()] }) + '\n');
+  silent.children[0].stdout.emit('data', JSON.stringify({ health: 'available', sessions: [row()] }) + '\n');
   const second = await federated.get();
   assert.equal(second.sessions.length, 2); assert.equal(second.sources.hosts.vm.health, 'available'); assert.equal(second.sources.hosts.vm.agents, 1);
   assert.equal(second.aggregate.agents.observed, 2, 'aggregate is recomputed over the merged roster');
   assert.deepEqual(second.bus, { health: 'available', messages: [] }, 'bus keeps its local shape');
   assert.deepEqual(second.hostBus, {}, 'a remote that published no bus has no hostBus entry');
   assert.equal(second.sources.hosts.vm.mail, undefined, 'mail topology is never configured');
-  silent.children[0].stdout.emit('data', JSON.stringify({ sessions: [row()], bus: { health: 'available', window: 100, messages: [{ id: 9, from: row().id, to: 'external', sentAt: 1, acknowledgedAt: null, wake: 'none' }] } }) + '\n');
+  silent.children[0].stdout.emit('data', JSON.stringify({ health: 'available', sessions: [row()], bus: { health: 'available', window: 100, messages: [{ id: 9, from: row().id, to: 'external', sentAt: 1, acknowledgedAt: null, wake: 'none' }] } }) + '\n');
   const third = await federated.get();
   assert.equal(third.hostBus.vm.messages[0].key, '9@vm'); assert.equal(third.hostBus.vm.messages[0].from, third.sessions[1].id, 'remote mail names the hub row');
   assert.deepEqual(third.bus, second.bus, 'local mail is untouched by remote mail');
+  const failedLocal = { ...local, get: async () => ({ sessions: [{ ...localRow, observedAt: undefined, inventoryHealth: undefined }],
+    health: 'unavailable', observedAt: null, error: 'Local inventory unavailable', sources: { herdr: { health: 'unavailable', observedAt: null } } }) };
+  const remoteOnly = await makeFederatedObserver(failedLocal, hung, () => 5).get();
+  assert.equal(remoteOnly.health, 'available');
+  assert.equal(remoteOnly.observedAt, 5, 'healthy remote supplies combined freshness when local has never observed');
+  assert.equal(remoteOnly.error, null);
+  assert.equal(remoteOnly.sessions[0].inventoryHealth, 'unavailable', 'healthy remote does not renew a local row that falls back to inventory proof');
+  assert.equal(remoteOnly.sessions[0].observedAt, null);
+  assert.equal(remoteOnly.sources.hosts.local.observedAt, null);
+  assert.equal(remoteOnly.sources.hosts.local.health, 'unavailable');
+  assert.equal(remoteOnly.sessions[1].observedAt, 5);
+  assert.equal(remoteOnly.sessions[1].inventoryHealth, 'available');
   const remoteId = second.sessions[1].id;
   const inspected = await federated.inspect(remoteId);
   assert.equal(inspected.health, 'unavailable'); assert.equal(inspected.reason, 'remote-inspect');
