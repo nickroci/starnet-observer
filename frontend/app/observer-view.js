@@ -251,11 +251,15 @@ const ObserverView = (() => {
   }
   // A ship's hull: a faint plate well below the decks with a dashed rim. Only drawn when remote hosts exist.
   const shipLive = ship => ship.health === 'available';
+  // Remote hulls are smaller and amber reads darker than cyan against space, so they get a firmer plate and a second,
+  // deck-level rim; a down host keeps the same weight in a light grey so the ship stays findable.
+  const HULL_DOWN = '#8d9893';
   function paintHull(ctx, ship) {
-    const r = ship.rect, rim = ship.local ? PALETTE.cyan : shipLive(ship) ? PALETTE.amber : STATUS.unknown;
-    poly(ctx, rectPoly(r, -2.4), ship.local ? 'rgba(63,216,232,0.035)' : 'rgba(255,157,58,0.03)');
-    ctx.save(); ctx.globalAlpha = shipLive(ship) ? 0.7 : 0.4; ctx.setLineDash([6, 5]); ctx.lineWidth = 1.5;
+    const r = ship.rect, live = shipLive(ship), rim = ship.local ? PALETTE.cyan : live ? PALETTE.amber : HULL_DOWN;
+    poly(ctx, rectPoly(r, -2.4), ship.local ? 'rgba(63,216,232,0.035)' : live ? 'rgba(255,157,58,0.09)' : 'rgba(141,152,147,0.07)');
+    ctx.save(); ctx.globalAlpha = ship.local ? (live ? 0.7 : 0.4) : 0.9; ctx.setLineDash([6, 5]); ctx.lineWidth = ship.local ? 1.5 : 2.5;
     poly(ctx, rectPoly(r, -2.4), null, rim); ctx.restore();
+    if (!ship.local) { ctx.save(); ctx.globalAlpha = 0.55; ctx.lineWidth = 1.5; poly(ctx, rectPoly(r, 0), null, rim); ctx.restore(); }
     if (ship.dock) {
       box(ctx, ship.dock, 0.3, { top: '#232a31', left: '#0d1013', right: '#151a1f' });
       isoEllipse(ctx, { x: ship.dock.x + ship.dock.w / 2, y: ship.dock.y + ship.dock.h / 2, z: 0.32 }, 0.8, rim, null, 2);
@@ -271,7 +275,7 @@ const ObserverView = (() => {
     paintWalkway(ctx, { kind: 'bridge', rect: r });
     for (let y = r.y + 1; y < r.y + r.h; y += 3) for (const x of [r.x, r.x + r.w]) line(ctx, { x, y, z: 0 }, { x, y: y + 1.5, z: -1.6 }, '#1a2026', 1, 0.8);
     ctx.save(); ctx.lineWidth = 2; ctx.globalAlpha = live ? 0.85 : 0.45; if (!live) ctx.setLineDash([4, 4]);
-    for (const x of [r.x, r.x + r.w]) line(ctx, { x, y: r.y, z: 0.32 }, { x, y: r.y + r.h, z: 0.32 }, live ? PALETTE.amber : STATUS.unknown, 2);
+    for (const x of [r.x, r.x + r.w]) line(ctx, { x, y: r.y, z: 0.32 }, { x, y: r.y + r.h, z: 0.32 }, live ? PALETTE.amber : HULL_DOWN, 2);
     ctx.restore();
   }
   function paintStatic(ctx, scene) {
@@ -764,7 +768,7 @@ const ObserverView = (() => {
     function paintBridgeLights(bridge, now, animate) {
       const r = bridge.rect; if (!(r.h > 0)) return;
       if (bridge.health !== 'available') {
-        for (const y of [r.y + 0.5, r.y + r.h - 0.5]) isoEllipse(ctx, { x: r.x + r.w / 2, y, z: 0.35 }, 0.12, null, STATUS.unknown);
+        for (const y of [r.y + 0.5, r.y + r.h - 0.5]) isoEllipse(ctx, { x: r.x + r.w / 2, y, z: 0.35 }, 0.12, null, HULL_DOWN);
         return;
       }
       const spacing = 6, phase = animate ? (now / 900) % 1 : 0.4;
@@ -1102,12 +1106,20 @@ const ObserverView = (() => {
         }
       }
       for (const ship of scene.ships || []) {
-        const r = ship.rect, at = screen({ x: r.x + r.w / 2, y: r.y, z: 4 }), live = shipLive(ship);
+        /* A remote ship's label sits on its top edge at the dock (the bridge end), lifted clear of the room signs; it
+           outranks them, and while any part of the hull is on screen it is clamped into view rather than dropped. */
+        const r = ship.rect, live = shipLive(ship);
+        const at = ship.local ? screen({ x: r.x + r.w / 2, y: r.y, z: 4 }) : screen({ x: ship.dock.x + ship.dock.w / 2, y: r.y, z: 3.2 });
+        const hull = [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]].map(([x, y]) => screen({ x, y, z: 0 }));
+        const hullOnScreen = Math.max(...hull.map(p => p.x)) > 0 && Math.min(...hull.map(p => p.x)) < viewport.width && Math.max(...hull.map(p => p.y)) > 0 && Math.min(...hull.map(p => p.y)) < viewport.height;
         const seen = !live && ship.observedAt ? ' · last seen ' + Model.age(ship.observedAt) : '';
         const label = ship.local ? '● THIS MACHINE' : (live ? '● ' : '○ ') + String(ship.id).toUpperCase() + ' · ' + (ship.agents || 0) + ' agent' + (ship.agents === 1 ? '' : 's') +
           (live ? '' : ship.health === 'stale' ? ' · STALE' + seen : ' · ' + (ship.reason || 'unreachable'));
-        const color = ship.local ? PALETTE.cyan : live ? PALETTE.amber : STATUS.unknown;
-        plates.push({ ...textPlate(clipText(label, viewport.width * 0.5, signSize(20)), at.x, at.y, { accent: color, size: signSize(20), color, priority: 48, dash: live ? null : [3, 3] }),
+        const color = ship.local ? PALETTE.cyan : live ? PALETTE.amber : HULL_DOWN;
+        const plate = textPlate(clipText(label, viewport.width * 0.5, signSize(20)), at.x, at.y - (ship.local ? 0 : 10), { accent: color, size: signSize(20), color, priority: ship.local ? 48 : 58, dash: live ? null : [3, 3], force: !ship.local && hullOnScreen });
+        // Remote: the plate starts at the dock and extends right, away from the room signs that sit left of the dock.
+        if (!ship.local) plate.x = Math.round(at.x - 10);
+        plates.push({ ...plate,
           ...(onShip ? { ship: { host: ship.local ? null : ship.id } } : {}) });
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
@@ -1261,7 +1273,7 @@ const ObserverView = (() => {
       const chosenShip = chosenHost !== undefined && scene.ships.find(ship => (ship.local ? null : ship.id) === chosenHost);
       if (chosenShip) {
         ctx.save(); ctx.lineWidth = 2.5 / Math.max(zoom, 0.25); ctx.globalAlpha = animate ? 0.75 + 0.2 * Math.sin(now / 700) : 0.9;
-        poly(ctx, rectPoly(chosenShip.rect, -2.4), null, chosenShip.local ? PALETTE.cyan : shipLive(chosenShip) ? PALETTE.amber : STATUS.unknown); ctx.restore();
+        poly(ctx, rectPoly(chosenShip.rect, -2.4), null, chosenShip.local ? PALETTE.cyan : shipLive(chosenShip) ? PALETTE.amber : HULL_DOWN); ctx.restore();
       }
       paintMail(mail, now, animate);
       if (isStale) { ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.save(); ctx.globalCompositeOperation = 'saturation'; ctx.fillStyle = 'rgba(128,128,128,0.45)'; ctx.fillRect(0, 0, viewport.width, viewport.height); ctx.restore(); }

@@ -6,7 +6,7 @@ const View = require('../frontend/app/observer-view.js');
 
 // Multi-host view: ship clicks select a host (floor or label), blocked agents carry a "!" attention badge.
 function context() {
-  const target = { measureText: text => ({ width: String(text).length * 7 }), createRadialGradient: () => ({ addColorStop() {} }), getContext() { return target; } };
+  const target = { texts: [], fillText(text) { target.texts.push(String(text)); }, measureText: text => ({ width: String(text).length * 7 }), createRadialGradient: () => ({ addColorStop() {} }), getContext() { return target; } };
   return new Proxy(target, { get: (t, key) => key in t ? t[key] : () => {}, set: (t, key, value) => { t[key] = value; return true; } });
 }
 function canvas(width = 1000, height = 700) {
@@ -46,6 +46,15 @@ assert.deepEqual(view.attentionRegions(), [], 'a stale blocked row has no badge'
 staleIds.clear(); now += 16; view.paint(now);
 assert.equal(view.attentionRegions().length, 1);
 
+// The remote ship's own label is drawn at overview and still when zoomed onto its room (it outranks room signs and is
+// clamped into view while the hull is on screen).
+const labelled = () => node.ctx.texts.some(text => /^● VM · 2 agents/.test(text));
+node.ctx.texts.length = 0; now += 16; view.paint(now);
+assert.ok(labelled(), 'remote ship label at overview');
+const vmRoom = scene.platforms.find(platform => platform.host === 'vm');
+assert.ok(view.focusPlatform(vmRoom.key)); node.ctx.texts.length = 0; now += 16; view.paint(now);
+assert.ok(labelled(), 'remote ship label when zoomed onto its room'); assert.ok(node.ctx.texts.some(text => /^P · 2/.test(text)), 'and the room sign survives');
+view.overview(); now += 16; view.paint(now);
 // Ship clicks: anywhere on an empty hull floor (or its label) selects that host; the flagship floor selects this machine.
 const click = point => { const at = Scene.toScreen(point, view.camera()), event = { clientX: at.x, clientY: at.y, pointerId: 1, pointerType: 'mouse', preventDefault() {} };
   node.handlers.get('pointerdown')(event); node.handlers.get('pointerup')(event); now += 400; view.paint(now); };
