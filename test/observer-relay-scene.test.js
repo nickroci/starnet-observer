@@ -87,6 +87,28 @@ const shadowHost = (net, shadow, member) => ({ id: shadow.host, shadow: true, he
   assert.equal(at('accepted_remote')[0].mark, true, 'relay sends never wake locally: marked like any unsupported wake');
 }
 
+// Expiry belongs to the message even when the peer is absent or omitted by render caps.
+{
+  const layout = Model.createLayout(), empty = Scene.build([], 0);
+  const message = { from: 'external', to: 'external', acknowledgedAt: null,
+    relay: { direction: 'out', machine: 'absent', repo: 'llm-bus', state: 'expired' } };
+  assert.deepEqual(Scene.pending(empty, layout, [message]), [], 'expired outgoing mail has no pending spot without a peer route');
+  assert.equal(Scene.pending(empty, layout, [{ ...message, relay: { ...message.relay, state: 'queued_local' } }]).length, 1,
+    'unexpired mail still uses the existing chute fallback when the peer is absent');
+  assert.equal(Scene.pending(empty, layout, [{ ...message, relay: { ...message.relay, direction: 'in', state: 'delivered_local' } }]).length, 1,
+    'incoming delivery remains pending locally until acknowledgement');
+
+  const nets = Scene.relayNetworks([[null, { health: 'available', remote: remote('mac', {
+    peers: Array.from({ length: 7 }, (_, i) => peer('peer-' + i, [agent(String(i))])) }) }]], NOW);
+  const omitted = 'peer-6';
+  assert.equal(nets[0].shadows.length, 6);
+  assert.equal(nets[0].shadows.some(shadow => shadow.machine === omitted), false, 'fixture peer is excluded by the render cap');
+  layout.reconcile(Scene.shadowRows(nets));
+  const capped = Scene.build(layout.onPage(0), 0, { relays: nets, hosts: nets[0].shadows.map(shadow => shadowHost(nets[0], shadow, null)) });
+  assert.deepEqual(Scene.pending(capped, layout, [{ ...message, relay: { ...message.relay, machine: omitted } }]), [],
+    'expired mail to a real but capped peer cannot reappear at the outside chute');
+}
+
 // Two observed machines on one relay: their mailrooms are linked; each ship shows only its own half of a crossing.
 {
   const layout = Model.createLayout(); layout.reconcile([row('obs_l'), row('obs_v', { host: 'vm' })]);

@@ -375,8 +375,8 @@ const ObserverScene = (() => {
       /* Outgoing relayed mail waits where llm-bus last proved it is: this mailroom while queued, halfway along the relay
          link once the relay holds it, and at the far agent's desk once delivered there (an observed far machine shows
          its own copy, so none is drawn here). Expired mail is not waiting anywhere. */
-      const far = message.relay?.direction === 'out' ? relayEnd(scene, message, host) : null, state = far && message.relay.state;
-      if (state === 'expired' || (state === 'delivered_local' && far.observed)) continue;
+      const far = message.relay?.direction === 'out' ? relayEnd(scene, message, host) : null, state = message.relay?.state;
+      if (state === 'expired' || (state === 'delivered_local' && far?.observed)) continue;
       const own = mailOf(scene, host) || scene.mail;
       const end = !far ? endpoint(scene, layout, message.to, host)
         : state === 'queued_local' ? { key: 'queued', points: [own.chute[0]] }
