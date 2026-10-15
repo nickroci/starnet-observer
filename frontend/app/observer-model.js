@@ -2,15 +2,16 @@
 'use strict';
 const ObserverModel = (() => {
   const ROOMS_PER_PAGE = 8, BLOCK_SEATS = 8, BLOCKS_PER_ROOM = 3;
-  const palette = [['cobalt', '#78add7'], ['teal', '#70c5bc'], ['verdant', '#84c98d'], ['moss', '#b3c184'], ['amber', '#dbbd79'],
-    ['ember', '#e39a6c'], ['crimson', '#d68e98'], ['orchid', '#d89bd0'], ['violet', '#b49be3'], ['indigo', '#9aa2ee']];
+  const Themes = typeof module !== 'undefined' && module.exports ? require('./theme-pack.js') : ThemePack;
+  // Ten fixed floor slots: names and order belong to the application; displayed accents come from the theme pack.
+  const FLOORS = ['cobalt', 'teal', 'verdant', 'moss', 'amber', 'ember', 'crimson', 'orchid', 'violet', 'indigo'];
+  const palette = FLOORS.map((floor, index) => [floor, Themes.getDefault().scene.projectAccents[index]]);
   const projectKey = row => row.projectId || 'folder:' + (row.project || 'Unassigned');
   const repoKey = row => row.repoId || projectKey(row);
   // Gaps between reserved root desks; a section shares eight safe stations.
   const helperStations = [6, 9].flatMap(y => [4.25, 8.25, 14.25, 18].map(x => ({ x, y, w: 1, h: 0.72 })));
   const isHelper = row => row.source === 'helper' || Object.hasOwn(row, 'parentId');
   const hash = key => { let value = 0; for (const character of key) value = ((value * 31) + character.charCodeAt(0)) >>> 0; return value; };
-  const hueColor = index => ({ floor: palette[index][0], accent: palette[index][1] });
   function activity(row) {
     const last = row.tool && row.tool.available && row.tool.last;
     if (!last) return row.tool && row.tool.available ? 'No recent tool observed' : 'Tool detail unavailable';
@@ -56,7 +57,10 @@ const ObserverModel = (() => {
     return provider + ' — ' + task + ' · ' + (row.status || 'unknown') + (unavailable ? ' · stale' : '')
       + (age(row.observedAt, now) ? ' · last observed ' + age(row.observedAt, now) : '');
   }
-  function createLayout() {
+  // projectAccents recolours the ten slots only; hashing, slot indices and floor names never change.
+  function createLayout({ projectAccents } = {}) {
+    const accents = palette.map(([, fallback], index) => Array.isArray(projectAccents) && typeof projectAccents[index] === 'string' ? projectAccents[index] : fallback);
+    const hueColor = index => ({ floor: palette[index][0], accent: accents[index] });
     const panes = new Map(), helpers = new Map(), wings = new Map(), names = new Map(), roomSlots = new Map();
     let hues = new Map(), rooms = [];
     // Holes are reused but surviving desks never move; a new block is appended only when none is free.

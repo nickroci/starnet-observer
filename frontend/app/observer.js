@@ -4,8 +4,10 @@
 (async () => {
   const get = id => document.getElementById(id);
   const theme = window.__OBSERVER_THEME__ || {};
+  // The resolved appearance snapshot (frozen by the head bootstrap); station colours, accents, effects and crew.
+  const pack = ThemePack.freezeSnapshot(window.__OBSERVER_THEME_PACK__) || ThemePack.getDefault();
 
-  const layout = ObserverModel.createLayout(), courier = ObserverMail.createCourier();
+  const layout = ObserverModel.createLayout({ projectAccents: pack.scene?.projectAccents }), courier = ObserverMail.createCourier({ colors: pack.scene?.colors });
   const filters = Array.from(get('filters').querySelectorAll('button'));
   const clock = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
   const reducedMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -41,7 +43,7 @@
     selectedRepoId = selectedRepoId === repoId ? null : repoId;
     if (latest) render(latest, true);
   }
-  const view = ObserverView.create({ canvas: get('world'), reducedMotion, onSelect: id => select(id, true),
+  const view = ObserverView.create({ theme: pack, canvas: get('world'), reducedMotion, onSelect: id => select(id, true),
     // A worker's canvas title toggles the same exact panel as its list title and magnifier; focus returns to the station.
     onTitleToggle: id => { const row = rowFor(id); if (row) togglePanel(agentTarget(row), get('world')); },
     // Platform zoom never selects a worker; it only clears a previous worker selection.
@@ -687,8 +689,17 @@
     renderSessions(rows, stale, messages, bus);
     for (const entry of panels) if (entry.target.kind === 'agent') entry.view.roster();
   }
+  /* A failed crew replacement keeps its complete default group: one bounded theme warning (pack, group, reason; never
+     paths or raw errors) and a repaint so a frozen scene shows the fallback. */
+  function crewDegraded({ skin, reason } = {}) {
+    const group = typeof skin === 'string' && /^[a-z0-9_-]{1,32}$/i.test(skin) ? skin : 'unknown', id = typeof pack.effectiveId === 'string' ? pack.effectiveId : 'starnet';
+    const sized = reason === 'image-dimensions';
+    ThemePack.reportWarning({ code: sized ? 'crew-dimensions' : 'crew-load', pack: id, group,
+      message: 'Theme pack ' + id + ' crew ' + group + (sized ? ' images have the wrong size' : ' did not load') + '; showing the default crew.' });
+    view.invalidate();
+  }
   // Never awaited: stalled or failed sprite assets must not hold back the inventory. Crew paint the fallback silhouette until sets load.
-  Promise.resolve().then(() => SPRITES.init()).catch(() => {}).then(() => view.invalidate());
+  Promise.resolve().then(() => SPRITES.init({ crew: pack.crew, onDegraded: crewDegraded })).catch(() => {}).then(() => view.invalidate());
   QuerySpine.define('observer.sessions', { path: '/api/observer/sessions', ttlMs: 2000, pollMs: 2000,
     timeoutMs: 10000, validate: data => !!(data && Array.isArray(data.sessions) && ['available', 'unknown', 'unavailable'].includes(data.health)) });
   /* Visible: subscribe without replaying the cached inventory, read it fresh at once, and rebase the courier.

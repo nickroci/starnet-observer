@@ -629,3 +629,137 @@ const crewChecks = readinessChecks.then(async () => {
   assert.equal(culled.view.hitRegions().length, 192, 'and every body is hit-testable again');
 });
 crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers, DPR equivalence, resize refit, click vs drag, live hover, cursor and pinch zoom, keyboard, clamps, sprite poses and fallback, stale/reduced freeze, cache reuse, lifecycle and focus OK, frozen single paint, invalidation sources, sprite/font readiness, camera report dedupe and offscreen furniture culling OK')).catch(error => { console.error(error); process.exitCode = 1; });
+
+// ---------- Theme: instance palette, effect modes and replacement loading ----------
+{
+  const crypto = require('node:crypto');
+  const Mail = require('../frontend/app/observer-mail.js');
+  const base = require('../frontend/assets/themes/starnet/theme.json').scene;
+  const keys = Object.keys(base.colors);
+  /* Recording context: every colour reaching fillStyle/strokeStyle or a gradient stop, plus each stroke's style and dash,
+     in paint order. Canvas normalizes '#000' and case, so the record does too; dynamic alphas are rounded because engines
+     format the last float digits differently. */
+  const norm = value => { const text = String(value).toLowerCase().replace(/-?\d+\.\d+(?:e[-+]?\d+)?/g, number => Number(number).toFixed(6)); return text === '#000' ? '#000000' : text; };
+  function recorder(log, strokes, firstStops) {
+    let dash = [];
+    const target = { measureText: text => ({ width: String(text).length * 7 }), setLineDash: value => { dash = value; },
+      stroke: () => strokes.push(norm(target.strokeStyle) + '|' + dash.join(',')), strokeRect: () => strokes.push(norm(target.strokeStyle) + '|' + dash.join(',')),
+      createRadialGradient: () => { const stops = []; firstStops.push(stops); return { addColorStop: (offset, color) => { stops.push(norm(color)); log.push('stop:' + norm(color)); } }; } };
+    return new Proxy(target, { get: (t, key) => key in t ? t[key] : () => {}, set: (t, key, value) => {
+      if ((key === 'fillStyle' || key === 'strokeStyle') && typeof value === 'string') log.push(key[0] + ':' + norm(value));
+      t[key] = value; return true; } });
+  }
+  const statuses = ['working', 'blocked', 'idle', 'done', 'unknown', 'working'];
+  const rows = statuses.map((status, i) => ({ id: 'r' + i, project: i < 3 ? 'Alpha' : 'Beta', projectId: i < 3 ? 'alpha' : 'beta', projectKind: 'group',
+    repo: i % 2 ? 'web' : 'api', repoId: i % 2 ? 'web' : 'api', provider: i % 2 ? 'codex' : 'claude', status, worktree: 'wt' + i }));
+  rows.push({ id: 'h0', parentId: 'r0', source: 'helper', project: 'Alpha', projectId: 'alpha', projectKind: 'group', repo: 'api', repoId: 'api', provider: 'claude', status: 'working' },
+    { id: 'h1', parentId: 'r1', source: 'helper', project: 'Alpha', projectId: 'alpha', projectKind: 'group', repo: 'web', repoId: 'web', provider: 'codex', status: 'blocked' });
+  const SCENARIOS = [['fx-off', false, false, false, true, 1], ['fx-on', true, false, false, true, 1], ['fx-on-detail', true, false, false, false, 3], ['stale', true, true, false, true, 1], ['reduced', true, false, true, true, 2.2]];
+  // One deterministic paint per scenario: every status, helpers and tethers, mail, selection, focus, stale and fallback bodies.
+  function record(theme, { only = null, focus = 'r2', list = rows, at = 4321 } = {}) {
+    const layout = Model.createLayout(); layout.reconcile(list);
+    const scene = Scene.build(layout.onPage(0), 0), courier = Mail.createCourier(theme ? { colors: theme.scene.colors } : undefined), result = {};
+    for (const [name, fx, stale, reduced, sprite, zoom] of SCENARIOS) {
+      if (only && !only.includes(name)) continue;
+      const log = [], strokes = [], firstStops = [], ctx = recorder(log, strokes, firstStops);
+      const node = { clientWidth: 1200, clientHeight: 800, width: 0, height: 0, style: {}, getContext: () => ctx, addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({ left: 0, top: 0 }) };
+      const options = { canvas: node, nameFor: id => 'W ' + id, hoverLabel: () => 'hover', reducedMotion: () => reduced,
+        env: { raf: () => 1, caf() {}, dpr: () => 1, now: () => 0, createCanvas: () => node, sprites: { drawBody: sprite ? (c, body) => ({ top: body.py - 60, w: 30, h: 60 }) : () => null } } };
+      if (theme !== undefined) options.theme = theme;
+      const view = View.create(options);
+      view.setFx(fx);
+      const frame = courier.frame(1000, { pending: [{ point: { x: 11, y: 9 }, count: 2, mark: true, label: 'D1' }, { point: { x: 12, y: 9 }, count: 1, mark: false, label: '' }], pads: scene.mail.pads });
+      frame.drones.push({ point: { x: 6, y: 6, z: 2.2 }, parked: false, phase: 'pickup', parcels: [scene.platforms[0].accent, scene.platforms[0].accent] });
+      view.update(scene, { stale: () => stale, mailFrame: () => frame, inspected: () => 'r1', repositorySelection: () => 'web' });
+      if (zoom !== 1) view.zoomBy(zoom);
+      if (focus) view.focus(focus);
+      view.paint(at);
+      result[name] = { log, strokes, firstStops };
+    }
+    return { result, scene };
+  }
+  const digest = result => crypto.createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(result).map(([name, value]) => [name, value.log])))).digest('hex');
+  // Characterization of the pre-theme literal painter (HEAD 196d86d), recorded with this exact scenario set.
+  const HEAD_DEFAULT = 'c79337c849ba718dca8bddcc7382f371d30a07d5cadd4950e1f9881fc9117af7';
+  const omitted = record(undefined).result;
+  assert.equal(digest(omitted), HEAD_DEFAULT, 'default paint colours, order and count equal the pre-theme painter');
+  assert.equal(digest(record(require('../frontend/app/theme-pack.js').getDefault()).result), HEAD_DEFAULT, 'the canonical snapshot paints the same default');
+  assert.equal(omitted['fx-on'].log.filter(entry => entry === 'f:' + base.colors['pixie-core']).length >= 26, true);
+
+  // A synthetic palette with a distinct colour per key: every recorded colour is attributable to exactly one key.
+  const custom = Object.fromEntries(keys.map((key, index) => [key, key.endsWith('transparent') ? 'rgba(1,2,' + (index % 250) + ',0)' : '#' + (0x100000 + index * 0x10101).toString(16).slice(-6)]));
+  const values = Object.values(custom); assert.equal(new Set(values).size, values.length, 'synthetic colours are distinct');
+  const keyOf = new Map(keys.map(key => [norm(custom[key]), key]));
+  const prefix = keys.map(key => { const hex = /^#(..)(..)(..)$/.exec(custom[key]); return hex ? [key, hex.slice(1).map(h => parseInt(h, 16)).join(',')] : null; }).filter(Boolean);
+  const attribute = color => keyOf.get(color) || prefix.find(([, rgb]) => color.startsWith('rgba(' + rgb + ',') || color === 'rgb(' + rgb + ')')?.[0] || null;
+  const used = run => new Set(Object.values(run).flatMap(value => value.log.map(entry => attribute(entry.slice(entry.indexOf(':') + 1)))).filter(Boolean));
+  const snapshot = (extra = {}) => ({ version: 1, requestedId: 'synthetic', effectiveId: 'synthetic', scene: { ...base, colors: custom, ...extra } });
+  // Unfocused, so the whole station (observatory, corner props, every status) is on stage.
+  const wide = Array.from({ length: 24 }, (_, i) => ({ id: 'w' + i, project: 'P' + (i % 8), projectId: 'p' + (i % 8), projectKind: 'group', repo: 'r', repoId: 'r',
+    provider: i % 2 ? 'codex' : 'claude', status: statuses[i % statuses.length] }));
+  const themed = record(snapshot()).result, themedKeys = new Set([...used(themed), ...used(record(snapshot(), { focus: null }).result),
+    ...[7400, 14400, 21400, 28400].flatMap(at => [...used(record(snapshot(), { focus: null, list: wide, at, only: ['fx-on'] }).result)])]);
+  const layoutAccents = new Set(record(undefined).scene.platforms.map(platform => platform.accent));
+  const defaultLeft = Object.values(themed).flatMap(value => value.log).map(entry => entry.slice(entry.indexOf(':') + 1))
+    .filter(color => Object.values(base.colors).map(norm).includes(color) && !attribute(color) && !layoutAccents.has(color));
+  assert.deepEqual([...new Set(defaultLeft)], [], 'no canonical scene colour survives a complete custom palette');
+  /* Every scene key reaches the canvas in its custom colour (furnishings, crew, mail, plates, sky and effects), except:
+     console/chair (station palette keys with no painter consumer), spark (the sparks() default every call overrides),
+     office-backdrop (home-office art) and the courier-owned mail keys, which observer-mail tests cover. */
+  assert.deepEqual(keys.filter(key => !themedKeys.has(key)), ['console', 'chair', 'spark', 'office-backdrop', 'mail-acknowledged', 'mail-unassigned']);
+
+  // Two views on one page: a custom view never changes a default view painted before or after it.
+  const before = record(undefined, { only: ['fx-on'] }).result, other = record(snapshot(), { only: ['fx-on'] }).result, after = record(undefined, { only: ['fx-on'] }).result;
+  assert.deepEqual(after['fx-on'].log, before['fx-on'].log, 'default view unchanged by a simultaneous custom view');
+  assert.notDeepEqual(other['fx-on'].log, before['fx-on'].log);
+  assert(Object.isFrozen(View.PALETTE) && View.PALETTE.cyan === base.colors.cyan && View.STATUS.blocked === base.colors.blocked, 'exported defaults stay canonical');
+
+  // backgroundFx none drops only the rain; everything else in the station sky stays.
+  const dry = used(record(snapshot({ backgroundFx: 'none' }), { only: ['fx-on'] }).result);
+  for (const key of ['rain-head', 'rain-bright', 'rain-dim']) assert(!dry.has(key), key + ' is not painted without rain');
+  for (const key of ['star-cool', 'nebula-violet', 'pixie-core', 'planet-core', 'furniture-spark']) assert(dry.has(key), key + ' stays with rain off');
+  assert.equal(record(snapshot({ backgroundFx: 'none' }), { only: ['fx-on'] }).result['fx-on'].log.filter(entry => attribute(entry.slice(2)) === 'pixie-core').length,
+    themed['fx-on'].log.filter(entry => attribute(entry.slice(2)) === 'pixie-core').length, 'the same 26 pixies');
+
+  // ambientFx none: no sky or decorative halos/sparks; shadows, markers, status, plates and tethers remain.
+  const calm = record(snapshot({ ambientFx: 'none' }), { focus: null }), calmKeys = used(calm.result);
+  for (const key of ['star-cool', 'star-white', 'plain-star', 'nebula-cyan', 'nebula-violet', 'planet-core', 'planet-rim', 'shuttle-body', 'pixie-core', 'pixie-cyan', 'pixie-green', 'shooting-star-head',
+    'spark', 'rim-spark', 'platform-spark', 'screen-spark', 'furniture-spark', 'vent-spark', 'tank-spark', 'mast-glow', 'mast-core', 'mast-spark', 'apron-spark', 'walkway-light-head', 'tower-spark',
+    'pod-spark', 'observatory-spark', 'telescope-spark', 'desk-spark', 'desk-spark-alt', 'aura-spark', 'aura-transparent'])
+    assert(!calmKeys.has(key), key + ' is decorative and stays off with ambientFx none');
+  for (const key of ['space', 'rain-head', 'contact-shadow', 'body-outline', 'focus', 'repo', 'working', 'blocked', 'unknown', 'stale', 'stale-overlay', 'glass', 'envelope-outline', 'drone-body'])
+    assert(calmKeys.has(key), key + ' remains with ambientFx none');
+  const halos = Object.values(calm.result).flatMap(value => value.firstStops).map(stops => attribute(stops[0]));
+  assert.deepEqual([...new Set(halos)].sort(), ['blocked', 'repo', 'working'], 'only status-lamp and selection glows remain');
+  const tethers = scene => scene.workers.filter(worker => worker.connector).map(worker => norm(worker.accent) + '|4,4');
+  assert(tethers(calm.scene).length > 0 && tethers(calm.scene).every(tether => calm.result['fx-off'].strokes.includes(tether)), 'helper tethers remain');
+  assert(calm.result.stale.strokes.some(stroke => stroke === norm(custom.stale) + '|3,3'), 'the dashed STALE plate keeps the stale colour');
+  const calmOff = used(record(snapshot({ ambientFx: 'none', backgroundFx: 'none' }), { only: ['fx-on'] }).result);
+  for (const key of ['rain-head', 'star-cool', 'planet-core']) assert(!calmOff.has(key), key + ' off with both effect modes none');
+  console.log('theme view: HEAD-equal default paint, complete custom palette, isolated simultaneous views, backgroundFx/ambientFx layers OK');
+}
+
+// A replacement crew group still loading draws canonical frames; a frozen scene repaints once it settles, ready or failed.
+(async () => {
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  for (const outcome of ['ready', 'failed', 'rejected']) {
+    let settle, state = 'loading', ensured = 0;
+    const job = new Promise((resolve, reject) => { settle = () => outcome === 'rejected' ? reject(new Error('x')) : resolve(outcome === 'ready'); });
+    job.catch(() => {});
+    const sprite = { ...sprites(), replacementState: () => state, ensureSkin: () => { ensured++; return job; } };
+    const run = scheduled({ statuses: ['idle'], sprite, reduced: () => true });
+    run.run();
+    assert.equal(run.frames.length, 0, outcome + ': a reduced scene is frozen after its paint');
+    assert(ensured > 0, outcome + ': a loading replacement is watched even though canonical frames painted');
+    state = outcome === 'ready' ? 'ready' : 'failed'; settle(); await flush();
+    assert.equal(run.frames.length, 1, outcome + ': settlement schedules one repaint');
+    run.run();
+    assert.equal(run.frames.length, 0, outcome + ': the settled group never re-arms a loop');
+  }
+  // Ready or inherited groups and older sprite engines without replacementState are not watched while frames paint.
+  for (const sprite of [{ ...sprites(), replacementState: () => 'ready', ensureSkin: () => { throw new Error('unexpected'); } }, { ...sprites(), ensureSkin: () => { throw new Error('unexpected'); } }]) {
+    const run = scheduled({ statuses: ['idle'], sprite, reduced: () => true });
+    assert.doesNotThrow(() => run.run());
+  }
+  console.log('theme view: loading replacement crew watch and settled repaint OK');
+})().catch(error => { console.error(error); process.exitCode = 1; });
