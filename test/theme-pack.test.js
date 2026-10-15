@@ -287,6 +287,22 @@ assert.deepEqual(numericReadoutGaps(stylesheet), [], 'numeric readouts declare a
 for (const fixed of [...numericReadouts, 'canvas']) {
   assert.ok(!stylesheet.split('\n').filter(line => line.includes('data-type-profile')).some(line => line.includes(fixed)), fixed + ' has no profile override');
 }
+// Pixel profile and pixel chrome are independent switches: each reaches its own rules, neither selector depends on the
+// other, typography never clips and chrome never picks faces. Visual fidelity and focus are browser-verified, not mirrored here.
+const rulesFor = attribute => [...stylesheet.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+  .filter(([, selectors]) => selectors.includes(attribute)).map(([, selectors, body]) => ({ selectors: selectors.trim(), body }));
+const pixelType = rulesFor('[data-type-profile=pixel]'), pixelChrome = rulesFor('[data-chrome=pixel]');
+assert.ok(pixelType.length > 0 && pixelChrome.length > 0, 'pixel profile and pixel chrome both have consumers');
+assert.ok([...pixelType, ...pixelChrome].every(rule => !(rule.selectors.includes('data-type-profile') && rule.selectors.includes('data-chrome'))), 'no rule requires both pixel switches');
+for (const family of ["'Jersey 10'", 'Silkscreen']) assert.ok(pixelType.some(rule => rule.body.includes(family)), family + ' has a pixel-profile consumer');
+assert.ok(pixelType.some(rule => /font-synthesis:none/.test(rule.body)), 'pixel profile disables synthetic faces');
+assert.ok(pixelChrome.every(rule => !/font(-family)?:/.test(rule.body)) && pixelType.every(rule => !/clip-path|border(-\w+)?:/.test(rule.body)), 'profile owns faces, chrome owns frames');
+// Stepped clips stay on decorative, non-interactive pseudo-elements so focus rings and scrolling regions are never cut.
+const parts = selectors => selectors.split(/,(?![^()]*\))/).map(part => part.trim());
+for (const rule of [...pixelChrome, ...pixelType].filter(rule => /clip-path:(?!none)/.test(rule.body))) for (const part of parts(rule.selectors)) {
+  assert.ok(/::(before|after)$/.test(part) && pixelChrome.some(other => parts(other.selectors).includes(part) && /pointer-events:none/.test(other.body)), 'clip only on pointer-transparent pseudo-elements: ' + part);
+}
+assert.ok(stylesheet.includes('.brand-logo { flex:none; display:block; width:auto; max-width:112px; height:24px; object-fit:contain; }'), 'default logo metrics are unchanged');
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'observer-theme-test-'));
 const frontend = path.join(temporary, 'frontend');
 const install = (id, value) => {
