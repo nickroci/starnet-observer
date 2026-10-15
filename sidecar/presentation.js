@@ -56,7 +56,7 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
       role: row.role === 'overseer' && row.source === 'herdr' ? 'overseer' : null,
       title: helper ? 'Helper' : 'Live ' + (row.provider === 'claude' ? 'Claude' : 'Codex') + ' session',
       inspectionIdentity: null, observedAt: row.observedAt, inventoryHealth: row.inventoryHealth,
-      presence: row.presence, helperOverflow: row.helperOverflow, usage: row.usage,
+      presence: row.presence, helperOverflow: row.helperOverflow, usage: row.usage, lastActivityAt: Number.isFinite(row.lastActivityAt) ? row.lastActivityAt : null,
       tool: { available: row.tool?.available === true }
     };
     if (Number.isFinite(row.tool?.observedAt)) safe.tool.observedAt = row.tool.observedAt;

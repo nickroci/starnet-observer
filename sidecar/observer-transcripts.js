@@ -280,7 +280,8 @@ function makeTranscriptObserver(options = {}) {
       const stats = inspector.metadata(state.projection, provider, now());
       return { available: true, last: state.tool ? { ...state.tool } : null, usage: {
         ...Object.fromEntries(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'].map(key => [key, stats[key]])),
-        coverage: 'bounded-transcript', observedAt: state.observedAt } };
+        coverage: 'bounded-transcript', observedAt: state.observedAt },
+        lastEntryAt: state.projection.lastEntryAt ? Date.parse(state.projection.lastEntryAt) : null };
     };
     let handle;
     try {

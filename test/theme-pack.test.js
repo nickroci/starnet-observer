@@ -14,6 +14,18 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const custom = value => ({ version: 1, id: 'sample', extends: 'starnet', ...value });
 const initial = loadThemePack({}, root);
 assert.equal(initial.effectiveId, 'starnet');
+assert.equal(initial.ui.chrome, 'classic');
+assert.deepEqual(initial.ui.typography, { profile: 'classic', scale: 1 });
+for (const chrome of ['classic', 'pixel']) for (const profile of ['classic', 'pixel']) {
+  const result = resolvePack(custom({ ui: { chrome, typography: { profile } } }), defaults);
+  assert.equal(result.ui.chrome, chrome); assert.equal(result.ui.typography.profile, profile);
+  assert.equal(result.ui.typography.scale, 1);
+  assert.equal('fonts' in result.ui.typography, false, 'pure resolution never derives URLs');
+}
+assert.deepEqual(resolvePack(custom({ ui: { typography: { scale: 1.05 } } }), defaults).ui.typography, { profile: 'classic', scale: 1.05 });
+assert.equal(resolvePack(custom({ ui: { chrome: 'pixel' } }), defaults).ui.typography.profile, 'classic');
+const incompleteDefault = clone(defaults); delete incompleteDefault.ui.chrome;
+assert.throws(() => validatePack(incompleteDefault, defaults), /Invalid theme pack/);
 assert.deepEqual(initial.warnings, []);
 assert.equal(initial.scene.colors.space, '#020406');
 assert.equal(initial.scene.colors.stale, '#ffbd5c');
@@ -35,6 +47,8 @@ for (const invalid of [
   { version: 2 }, { id: '../sample' }, { extends: 'other' }, { scripts: [] }, { ui: null },
   { ui: { colors: { madeUp: '#123456' } } }, { ui: { colors: { ink: 'url(secret)' } } },
   { ui: { colors: { ink: 'rgba(256,0,0,.2)' } } }, { ui: { colors: { ink: 'rgba(1,2,3,1.1)' } } },
+  { ui: { chrome: 'remote' } }, { ui: { chrome: {} } },
+  { ui: { typography: { fonts: { jersey10: 'https://host/font.woff2' } } } },
   { ui: { typography: { profile: 'remote' } } }, { ui: { typography: { scale: 1.11 } } },
   { ui: { typography: { scale: NaN } } }, { ui: { typography: { font: 'fonts/other.woff2' } } },
   { ui: { shapes: { control: [1, 2, 3] } } }, { ui: { shapes: { panel: [25, 1, 1, 1] } } },
@@ -99,7 +113,7 @@ const applied = snapshot => appliedDocument(snapshot).styles;
 const radii = values => values.map(value => value + 'px').join(' ');
 const defaultStyles = new Map([...colorKeys.map(key => ['--' + key, defaults.ui.colors[key]]), ['--type-scale', '1'],
   ...Object.entries(SHAPE_PROPERTIES).map(([key, property]) => [property, radii(defaults.ui.shapes[key])])]);
-const defaultAttributes = { 'data-type-profile': 'classic', 'data-badge-cut': 'classic', 'data-decor-scanlines': 'on', 'data-decor-glyph-strip': 'on', 'data-decor-corner-brackets': 'on', 'data-decor-glow': 'on' };
+const defaultAttributes = { 'data-chrome': 'classic', 'data-type-profile': 'classic', 'data-badge-cut': 'classic', 'data-decor-scanlines': 'on', 'data-decor-glyph-strip': 'on', 'data-decor-corner-brackets': 'on', 'data-decor-glow': 'on' };
 assert.deepEqual(applied(defaults), defaultStyles, 'default binds exactly the canonical inventory plus fixed type scale and radii');
 assert.deepEqual(appliedDocument(defaults).documentElement.attributes, defaultAttributes, 'default selects classic type, classic badges and all decoration');
 assert.equal(defaultStyles.get('--shape-panel'), '3px 16px 3px 16px'); assert.equal(defaultStyles.get('--shape-session-row'), '2px 10px 2px 2px');
@@ -121,6 +135,12 @@ for (const [flag, attribute] of Object.entries(DECOR_ATTRIBUTES)) {
 }
 const injected = appliedDocument({ ui: { typography: { profile: 'remote', scale: 1.05 }, shapes: { badgeCut: 'custom' } } });
 assert.deepEqual([injected.documentElement.attributes['data-type-profile'], injected.documentElement.attributes['data-badge-cut'], injected.styles.get('--type-scale')], ['classic', 'classic', '1.05'], 'only fixed enum values become attributes');
+for (const chrome of ['classic', 'pixel']) for (const profile of ['classic', 'pixel']) {
+  const doc = appliedDocument({ ui: { chrome, typography: { profile } } });
+  assert.equal(doc.documentElement.attributes['data-chrome'], chrome);
+  assert.equal(doc.documentElement.attributes['data-type-profile'], profile);
+}
+assert.equal(appliedDocument({ ui: { chrome: {} } }).documentElement.attributes['data-chrome'], 'classic');
 // DM Sans: fixed family from the server-derived local path, swap display; a failed load keeps the fallback with one warning.
 const faces = [];
 class FakeFace { constructor(family, source, descriptors) { this.family = family; this.source = source; this.descriptors = descriptors; faces.push(this); } load() { return this.result; } }
@@ -130,12 +150,24 @@ FakeFace.prototype.result = Promise.resolve();
 const fontDoc = appliedDocument(dmSans, { FontFace: FakeFace });
 assert.equal(fontDoc.documentElement.attributes['data-type-profile'], 'dm-sans'); assert.equal(fontDoc.styles.get('--type-scale'), '1.1');
 assert.deepEqual([faces.length, faces[0].family, faces[0].source, faces[0].descriptors.display, fontDoc.faces[0]], [1, 'DM Sans', 'url("' + fontPath + '") format("woff2")', 'swap', faces[0]]);
+assert.deepEqual(faces[0].descriptors, { display: 'swap', weight: '500 600', style: 'normal' });
 for (const font of [undefined, 'https://fonts.example/dm.woff2', '/assets/themes/sample/fonts/other.woff2', fontPath + '")']) {
   appliedDocument({ ui: { typography: { profile: 'dm-sans', font } } }, { FontFace: FakeFace });
 }
 assert.equal(faces.length, 1, 'no font face without the exact local server-derived path');
 appliedDocument({ ui: { typography: { profile: 'classic', font: fontPath } } }, { FontFace: FakeFace });
 assert.equal(faces.length, 1, 'classic never installs DM Sans');
+const pixelFonts = { jersey10: '/assets/themes/sample/fonts/jersey-10.woff2', silkscreen: '/assets/themes/sample/fonts/silkscreen.woff2' };
+const pixelSnapshot = { requestedId: 'sample', effectiveId: 'sample', ui: { chrome: 'pixel', typography: { profile: 'pixel', fonts: pixelFonts } } };
+const pixelDoc = appliedDocument(pixelSnapshot, { FontFace: FakeFace });
+assert.deepEqual(pixelDoc.faces.map(face => [face.family, face.source, face.descriptors]), [
+  ['Jersey 10', 'url("' + pixelFonts.jersey10 + '") format("woff2")', { display: 'swap', weight: '400', style: 'normal' }],
+  ['Silkscreen', 'url("' + pixelFonts.silkscreen + '") format("woff2")', { display: 'swap', weight: '400', style: 'normal' }]
+]);
+for (const fonts of [undefined, {}, [], { jersey10: pixelFonts.jersey10 }, { ...pixelFonts, silkscreen: 'https://host/silkscreen.woff2' }, { ...pixelFonts, jersey10: pixelFonts.silkscreen }, { ...pixelFonts, extra: pixelFonts.jersey10 },
+  ...['https://host/jersey-10.woff2', '/assets/themes/../fonts/jersey-10.woff2', pixelFonts.jersey10 + '?v=1', pixelFonts.jersey10 + '\n', '/assets/themes/sample/fonts/extra/jersey-10.woff2', '/assets/themes/sample/fonts/other.woff2', pixelFonts.jersey10 + '\"'].map(jersey10 => ({ ...pixelFonts, jersey10 }))]) {
+  assert.equal(appliedDocument({ ui: { typography: { profile: 'pixel', fonts } } }, { FontFace: FakeFace }).faces.length, 0, 'invalid pixel map never installs faces');
+}
 const statusDocument = (extra = {}) => {
   const region = fakeElement({ role: 'status' }); region.hidden = true;
   const image = fakeElement(); image.hidden = true; const mark = fakeElement();
@@ -149,6 +181,14 @@ const fontRegion = failedFont.getElementById('theme-status');
 assert.equal(fontRegion.hidden, false);
 assert.deepEqual(fontRegion.children.map(line => line.textContent), ['Theme pack sample font did not load; using the system font.'], 'one bounded font warning without the raw exception');
 assert.equal(failedFont.getElementById('health').textContent, '', 'theme warnings never touch source health');
+for (const rejected of [['Jersey 10'], ['Silkscreen'], ['Jersey 10', 'Silkscreen']]) {
+  class RejectingFace extends FakeFace { load() { return rejected.includes(this.family) ? Promise.reject(new Error('private decode details')) : Promise.resolve(); } }
+  const doc = statusDocument({ FontFace: RejectingFace }); const status = ThemePack.start(pixelSnapshot, doc);
+  await settle();
+  assert.equal(doc.faces.length, 2);
+  assert.deepEqual(status.lines(), ['Theme pack sample font did not load; using the system font.']);
+  assert.equal(doc.getElementById('health').textContent, '');
+}
 // Logo: the mark stays until decode succeeds; failure restores it and warns once.
 const logoSnapshot = { requestedId: 'sample', effectiveId: 'sample', ui: { logo: { image: '/assets/themes/sample/branding/logo.png', alt: 'Example <b>Brand</b>' } } };
 let decodeResult;
@@ -247,6 +287,22 @@ assert.deepEqual(numericReadoutGaps(stylesheet), [], 'numeric readouts declare a
 for (const fixed of [...numericReadouts, 'canvas']) {
   assert.ok(!stylesheet.split('\n').filter(line => line.includes('data-type-profile')).some(line => line.includes(fixed)), fixed + ' has no profile override');
 }
+// Pixel profile and pixel chrome are independent switches: each reaches its own rules, neither selector depends on the
+// other, typography never clips and chrome never picks faces. Visual fidelity and focus are browser-verified, not mirrored here.
+const rulesFor = attribute => [...stylesheet.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+  .filter(([, selectors]) => selectors.includes(attribute)).map(([, selectors, body]) => ({ selectors: selectors.trim(), body }));
+const pixelType = rulesFor('[data-type-profile=pixel]'), pixelChrome = rulesFor('[data-chrome=pixel]');
+assert.ok(pixelType.length > 0 && pixelChrome.length > 0, 'pixel profile and pixel chrome both have consumers');
+assert.ok([...pixelType, ...pixelChrome].every(rule => !(rule.selectors.includes('data-type-profile') && rule.selectors.includes('data-chrome'))), 'no rule requires both pixel switches');
+for (const family of ["'Jersey 10'", 'Silkscreen']) assert.ok(pixelType.some(rule => rule.body.includes(family)), family + ' has a pixel-profile consumer');
+assert.ok(pixelType.some(rule => /font-synthesis:none/.test(rule.body)), 'pixel profile disables synthetic faces');
+assert.ok(pixelChrome.every(rule => !/font(-family)?:/.test(rule.body)) && pixelType.every(rule => !/clip-path|border(-\w+)?:/.test(rule.body)), 'profile owns faces, chrome owns frames');
+// Stepped clips stay on decorative, non-interactive pseudo-elements so focus rings and scrolling regions are never cut.
+const parts = selectors => selectors.split(/,(?![^()]*\))/).map(part => part.trim());
+for (const rule of [...pixelChrome, ...pixelType].filter(rule => /clip-path:(?!none)/.test(rule.body))) for (const part of parts(rule.selectors)) {
+  assert.ok(/::(before|after)$/.test(part) && pixelChrome.some(other => parts(other.selectors).includes(part) && /pointer-events:none/.test(other.body)), 'clip only on pointer-transparent pseudo-elements: ' + part);
+}
+assert.ok(stylesheet.includes('.brand-logo { flex:none; display:block; width:auto; max-width:112px; height:24px; object-fit:contain; }'), 'default logo metrics are unchanged');
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'observer-theme-test-'));
 const frontend = path.join(temporary, 'frontend');
 const install = (id, value) => {
@@ -351,6 +407,33 @@ try {
   assert.equal(loadThemePack({ pack: 'sample' }, frontend).ui.typography.font, '/assets/themes/sample/fonts/dm-sans.woff2');
   writeResource(directory, 'fonts/dm-sans.woff2', Buffer.alloc(524289)); fallback(font);
   fs.rmSync(path.join(directory, 'fonts/dm-sans.woff2')); fallback(font);
+  const pixel = custom({ ui: { chrome: 'pixel', typography: { profile: 'pixel' } } });
+  const pixelResources = [['fonts/jersey-10.woff2', 'fonts/Jersey-10-OFL.txt'], ['fonts/silkscreen.woff2', 'fonts/Silkscreen-OFL.txt']];
+  const license = Buffer.from('SIL OPEN FONT LICENSE Version 1.1');
+  for (const [file, ofl] of pixelResources) { writeResource(directory, file, fontHeader); writeResource(directory, ofl, license); }
+  install('sample', pixel);
+  const resolvedPixel = loadThemePack({ pack: 'sample' }, frontend);
+  assert.equal(resolvedPixel.effectiveId, 'sample'); assert.equal(resolvedPixel.ui.chrome, 'pixel');
+  assert.deepEqual(resolvedPixel.ui.typography.fonts, pixelFonts);
+  assert.equal('font' in resolvedPixel.ui.typography, false);
+  for (const [file, ofl] of pixelResources) {
+    for (const [relative, damage] of [[file, null], [ofl, null], [file, Buffer.alloc(524289)], [file, Buffer.alloc(48)],
+      [file, Buffer.from('wOF2' + 'x'.repeat(44))], [ofl, Buffer.alloc(65537)], [ofl, Buffer.from('Version 1.1')], [ofl, Buffer.from('SIL OPEN FONT LICENSE Version 1.0')]]) {
+      if (damage === null) fs.rmSync(path.join(directory, relative)); else writeResource(directory, relative, damage);
+      const failed = fallback(pixel); assert.equal(failed.ui.typography.profile, 'classic'); assert.equal('fonts' in failed.ui.typography, false);
+      writeResource(directory, file, fontHeader); writeResource(directory, ofl, license);
+    }
+    for (const relative of [file, ofl]) {
+      const outside = path.join(temporary, 'outside-font'); fs.writeFileSync(outside, relative === file ? fontHeader : license);
+      fs.rmSync(path.join(directory, relative)); fs.symlinkSync(outside, path.join(directory, relative));
+      assert.equal(fallback(pixel).warnings[0].reason, 'asset-containment');
+      fs.rmSync(path.join(directory, relative)); writeResource(directory, relative, relative === file ? fontHeader : license);
+    }
+  }
+  install('sample', pixel);
+  const linkedPixel = path.join(frontend, 'assets/themes/pixel-link'); fs.symlinkSync(directory, linkedPixel);
+  assert.equal(loadThemePack({ pack: 'pixel-link' }, frontend).warnings[0].reason, 'pack-symlink');
+  fs.rmSync(linkedPixel);
   install('sample', custom({}));
   fs.symlinkSync(directory, path.join(frontend, 'assets/themes/linked'));
   assert.deepEqual(validateInstalledPacks(frontend), ['sample', 'starnet'], 'author discovery does not follow directory links');
