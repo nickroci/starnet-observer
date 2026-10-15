@@ -189,7 +189,7 @@ OBSERVER_CONTROL=1 bun run start
 | `⇱` | session row | Opens a Terminal window attached to that pane with `herdr agent attach --takeover`, so it takes input even if another terminal was attached. Detach with `ctrl+b q`; the agent keeps running. |
 | `✕` | session row | Closes the Herdr pane, ending that agent. The page asks you to confirm first. |
 
-Agents are grouped on the station by project (one deck), then by repository and sub-folder (one walled section per folder, with its own sign); idle agents stroll inside their own section whenever another agent from the same folder is there too. Linked Git worktrees share their main repository group; sub-folders are calculated relative to the checkout where each agent is working.
+Agents are grouped on the station by project (one deck), then by actual checkout and sub-folder (one walled section per checkout/folder, with repository, checkout and folder text on its sign); idle agents stroll inside their own section whenever another agent from the same folder is there too. Linked Git worktrees share their main repository group and repository highlight. Main and linked checkouts have separate Live sessions headings, followed by sub-folder sections. Equal checkout basenames stay distinct through canonical opaque checkout IDs; missing proof is labeled Checkout unavailable. Sub-folders are calculated relative to the checkout where each agent is working.
 
 Clicking the **OBSERVATORY** sign on the station selects the overseer if one is running, or offers to start one. Choose **Claude** (the default) or **Codex**, then select **Start**; **Cancel** leaves sessions unchanged. Provider selection applies only to the overseer.
 
@@ -199,7 +199,7 @@ The private launch record is `~/.local/share/starnet-observer/overseer/identity.
 
 After a caught launch failure, a later request can release a recorded reservation only after a complete Herdr agent inventory omits that pane and Herdr returns the exact `pane_not_found` error for it. A crash can leave the exclusive `~/.local/share/starnet-observer/overseer/identity.json.owner` directory behind. Stop every observer process using this state and verify through Herdr that no launch or recorded pane remains active before inspecting it manually. Only an empty, confirmed abandoned owner directory may be removed manually; never recursively delete the state directory or steal an uncertain lock. Nonempty locks, missing pane records, or uncertain Herdr results require manual inspection; restarting alone does not guarantee recovery.
 
-One overseer is shared across providers; choosing another provider never replaces a running overseer. Project `+` continues to launch Claude. Separate worktree sections are deferred.
+One overseer is shared across providers; choosing another provider never replaces a running overseer. Project `+` continues to launch Claude.
 
 Set `OBSERVER_CLAUDE_ARGS` to pass flags only to spawned Claude sessions (including a Claude overseer), for example `OBSERVER_CLAUDE_ARGS="--dangerously-skip-permissions"`. Terminal launching uses macOS Terminal.app.
 

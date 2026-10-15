@@ -648,3 +648,40 @@ const crewChecks = readinessChecks.then(async () => {
   assert.equal(culled.view.hitRegions().length, 192, 'and every body is hit-testable again');
 });
 crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers, DPR equivalence, resize refit, click vs drag, live hover, cursor and pinch zoom, keyboard, clamps, sprite poses and fallback, stale/reduced freeze, cache reuse, lifecycle and focus OK, frozen single paint, invalidation sources, sprite/font readiness, camera report dedupe and offscreen furniture culling OK')).catch(error => { console.error(error); process.exitCode = 1; });
+
+{
+  const layout = Model.createLayout();
+  layout.reconcile([{ id: 'checkout-sign', projectId: 'p', project: 'P', repoId: 'r', repo: 'api',
+    checkoutId: 'checkout_abcd', checkoutKind: 'worktree', worktree: 'review', folder: 'src', provider: 'codex', status: 'idle' }]);
+  const scene = Scene.build(layout.onPage(0), 0), node = canvas(1000, 700);
+  const view = View.create({ canvas: node, env: { raf: () => 1, caf() {}, now: () => 0, dpr: () => 1, createCanvas: () => canvas() } });
+  view.start(); view.update(scene, {}); view.focusPlatform(scene.platforms[0].key); view.paint(16);
+  for (const text of ['api', 'Worktree review · abcd', 'src']) assert(node.ctx.calls.fillText.includes(text), 'checkout sign paints ' + text);
+  assert.equal(view.signRegions()[0].repo, 'r', 'multi-line sign retains repository target');
+  view.stop();
+}
+
+// Long equal-basename checkout labels retain their discriminator, including a real four-character hash collision.
+for (const [name, ids, suffixes] of [
+  ['a-very-long-same-checkout-name', ['checkout_aaaa', 'checkout_bbbb'], ['aaaa', 'bbbb']],
+  ['same-name', ['checkout_7785594026262a4b150b', 'checkout_95a43a6b39b11304150b'], ['b150b', '4150b']]
+]) {
+  const layout = Model.createLayout();
+  layout.reconcile(ids.map((checkoutId, index) => ({ id: 'sign-' + index, projectId: 'p', project: 'P', repoId: 'r', repo: 'api',
+    checkoutId, checkoutKind: 'worktree', worktree: name, folder: 'src', provider: 'codex', status: 'idle' })));
+  const scene = Scene.build(layout.onPage(0), 0), lines = [];
+  for (const platform of scene.platforms) {
+    const node = canvas(1600, 1000);
+    const view = View.create({ canvas: node, env: { raf: () => 1, caf() {}, now: () => 0, dpr: () => 1, createCanvas: () => canvas() } });
+    view.start(); view.update(scene, {}); view.focusPlatform(platform.key); view.paint(16);
+    lines.push(...node.ctx.calls.fillText.filter(text => text.startsWith('Worktree ')));
+    assert(node.ctx.calls.fillText.includes('api'), 'repository text remains painted');
+    assert(node.ctx.calls.fillText.includes('src'), 'folder text remains painted');
+    assert(view.signRegions().every(sign => sign.repo === 'r'), 'repository hit targets stay exact');
+    view.stop();
+  }
+  const distinct = [...new Set(lines)];
+  assert.equal(distinct.length, 2, 'same-basename checkouts paint two distinct signs');
+  for (const suffix of suffixes) assert(distinct.some(text => text.endsWith(' · ' + suffix)), 'painted sign retains ' + suffix);
+  assert(distinct.every(text => text.length * 7 <= 180), 'checkout sign text stays within existing width');
+}

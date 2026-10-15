@@ -30,8 +30,17 @@ assert.throws(() => makeProjectResolver({ execute: execFile }), /requires an inj
     await fs.mkdir(path.join(sameLinked, 'nested'));
     const sameLinkedRow = await batch.resolve(path.join(sameLinked, 'nested'));
     assert.equal(sameLinkedRow.repoId, batchRows[1].repoId); assert.equal(sameLinkedRow.folder, 'nested', 'equal checkout basenames do not change folder coordinates');
+    const twin = path.join(temp, 'd', 'same name'); await git(root, ['worktree', 'add', '-q', '--detach', twin]);
+    await fs.mkdir(path.join(twin, 'nested'));
+    const twinRow = await batch.resolve(path.join(twin, 'nested'));
+    assert.equal(twinRow.repoId, sameLinkedRow.repoId);
+    assert.notEqual(twinRow.checkoutId, sameLinkedRow.checkoutId);
+    assert.equal(twinRow.checkoutKind, 'worktree');
+    assert.equal(batchRows[1].checkoutKind, 'main');
+    assert.notEqual(batchRows[0].checkoutId, batchRows[1].checkoutId);
     const linkedAlias = path.join(temp, 'linked-alias'); await fs.symlink(worktree, linkedAlias);
     assert.equal((await batch.resolve(path.join(linkedAlias, 'nested'))).folder, 'nested');
+    assert.equal((await batch.resolve(linkedAlias)).checkoutId, batchRows[0].checkoutId);
     assert.equal((await batch.resolve(path.join(root, 'nested'))).folder, 'nested');
     await fs.mkdir(path.join(root, '..drafts'));
     const dotDrafts = await batch.resolve(path.join(root, '..drafts'));

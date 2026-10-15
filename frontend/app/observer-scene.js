@@ -47,7 +47,8 @@ const ObserverScene = (() => {
       for (let block = 0; block < room.blocks.length; block++) {
         const value = room.blocks[block], previous = sections.at(-1);
         if (previous && (previous.section || previous.repo) === (value.section || value.repo)) previous.rect.h += 7;
-        else sections.push({ repo: value.repo, section: value.section || value.repo, label: value.label, partitions: block ? partitionsFor(rect, block) : [], rect: { x: rect.x + 1, y: rect.y + 4 + block * 7, w: 18, h: 7 }, sign: pointAt(rect, 1.5, 4 + block * 7, 1.25) });
+        else sections.push({ repo: value.repo, section: value.section || value.repo, label: value.label, checkoutId: value.checkoutId ?? null, checkoutKind: value.checkoutKind ?? null,
+          repoLabel: value.repoLabel, checkoutLabel: value.checkoutLabel, worktree: value.worktree, folder: value.folder, partitions: block ? partitionsFor(rect, block) : [], rect: { x: rect.x + 1, y: rect.y + 4 + block * 7, w: 18, h: 7 }, sign: pointAt(rect, 1.5, 4 + block * 7, 1.25) });
       }
       const decorationRegions = [
         { kind: 'wall', edge: 'rear-y', rect: { x: rect.x + 2, y: rect.y + 0.5, w: 16, h: 2 } },
@@ -112,7 +113,7 @@ const ObserverScene = (() => {
     const extents = [mail.rect, ...platforms.map(p => p.rect), ...walkways.map(w => w.rect)].map(rect => ({ rect }))
       .concat(observatory.extents);
     const bounds = projectedBounds(extents);
-    const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.section || b.repo)]).sort(),
+    const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => [b.section || b.repo, b.label, b.checkoutKind])]).sort(),
       workers.map(w => [w.id, w.kind, w.parentId, w.chair.x, w.chair.y]).sort()]);
     return { page, revision, platforms, walkways, workers, helperOverflow, observatory, mail, bounds };
   }

@@ -207,3 +207,8 @@ body.control .session-row .row-top { padding-right:98px; } body.control .session
 .overseer-actions { display: flex; justify-content: flex-end; gap: .75rem; }
 .overseer-actions button { padding: .5rem 1rem; }
 .overseer-chooser :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+
+/* Text and dividers expose checkout boundaries without depending on color. */
+.checkout-group { margin-top:10px; padding-top:8px; border-top:1px solid var(--chrome); min-width:0; }
+.checkout-heading { margin:0 0 6px; font-size:12px; overflow-wrap:anywhere; }
+.folder-heading { margin:7px 0 4px; font-size:11px; color:var(--dim); overflow-wrap:anywhere; }

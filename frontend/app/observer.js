@@ -484,9 +484,9 @@
       heading.append(spawn);
     }
     const repos = text('div', 'repo-toggles', ''); repos.setAttribute('role', 'group');
-    const list = text('ul', 'session-list', '');
+    const list = text('div', 'checkout-groups', '');
     section.append(heading, repos, list);
-    entry = { section, label, kind, total, zoom, repos, list }; groupNodes.set(key, entry);
+    entry = { section, label, kind, total, zoom, repos, list, checkouts: new Map() }; groupNodes.set(key, entry);
     return entry;
   }
   // One toggle per exact repository id while it has a row; the listener reads the id, never the label.
@@ -596,7 +596,7 @@
   function renderSessions(rows, stale, messages, bus) {
     const query = get('search').value.trim().toLowerCase();
     const matching = rows.filter(row => (filter === 'all' || row.status === filter) &&
-      [row.project, row.repo, row.title, row.paneId, row.provider, row.worktree].some(value => String(value || '').toLowerCase().includes(query)));
+      [row.project, row.repo, row.title, row.paneId, row.provider, row.worktree, row.folder, ObserverModel.checkoutLabel(row)].some(value => String(value || '').toLowerCase().includes(query)));
     const groups = new Map(), labels = new Map(), unread = new Map();
     for (const message of messages) if (!message.acknowledgedAt) unread.set(message.to, (unread.get(message.to) || 0) + 1);
     // Repositories by exact id per project, from every row: a filter or search never hides a repository's toggle.
@@ -642,10 +642,46 @@
       });
       entry.repos.hidden = !toggles.length; entry.repos.setAttribute('aria-label', 'Repositories in ' + name);
       if (arrange(entry.repos, toggles)) moved = true;
-      const items = lineageOrder(group, rank).map(([row, depth]) => {
-        const node = rowNode(row.id); paintRow(node, row, depth, unread.get(row.id), bus?.window || 100); return node.item;
+      const checkouts = new Map();
+      for (const row of group) {
+        const checkout = ObserverModel.checkoutKey(row);
+        if (!checkouts.has(checkout)) checkouts.set(checkout, []);
+        checkouts.get(checkout).push(row);
+      }
+      for (const checkout of entry.checkouts.keys()) if (!checkouts.has(checkout)) entry.checkouts.delete(checkout);
+      const checkoutSections = [...checkouts].map(([checkout, crew]) => {
+        let node = entry.checkouts.get(checkout);
+        if (!node) {
+          const section = text('section', 'checkout-group', ''), heading = text('h4', 'checkout-heading', ''), folders = text('div', 'folder-groups', '');
+          section.append(heading, folders); node = { section, heading, folders, nodes: new Map() }; entry.checkouts.set(checkout, node);
+        }
+        const first = crew[0], label = ObserverModel.checkoutLabel(first);
+        const twins = [...checkouts.values()].filter(other => ObserverModel.repoKey(other[0]) === ObserverModel.repoKey(first) && ObserverModel.checkoutLabel(other[0]) === label);
+        setText(node.heading, (first.repo || first.project || 'Unassigned') + ' · ' + label + (twins.length > 1 && first.checkoutId ? ' · ' + ObserverModel.checkoutSuffix(first.checkoutId, [...checkouts.values()].map(rows => rows[0].checkoutId)) : ''));
+        const folders = new Map();
+        for (const row of crew) {
+          const folder = typeof row.folder === 'string' ? row.folder : '';
+          if (!folders.has(folder)) folders.set(folder, []);
+          folders.get(folder).push(row);
+        }
+        for (const folder of node.nodes.keys()) if (!folders.has(folder)) node.nodes.delete(folder);
+        const folderSections = [...folders].map(([folder, members]) => {
+          let part = node.nodes.get(folder);
+          if (!part) {
+            const section = text('section', 'folder-group', ''), heading = text('h5', 'folder-heading', ''), list = text('ul', 'session-list', '');
+            section.append(heading, list); part = { section, heading, list }; node.nodes.set(folder, part);
+          }
+          setText(part.heading, folder || 'Checkout root');
+          const items = lineageOrder(members, rank).map(([row, depth]) => {
+            const item = rowNode(row.id); paintRow(item, row, depth, unread.get(row.id), bus?.window || 100); return item.item;
+          });
+          if (arrange(part.list, items)) moved = true;
+          return part.section;
+        });
+        if (arrange(node.folders, folderSections)) moved = true;
+        return node.section;
       });
-      if (arrange(entry.list, items)) moved = true;
+      if (arrange(entry.list, checkoutSections)) moved = true;
       return entry.section;
     });
     if (arrange(get('sessions'), sections)) moved = true;
@@ -765,7 +801,7 @@
     if (!layout.onPage(page).length && rows.length) setPage(layout.pageFor(rows[0].id));
     const rooms = layout.onPage(page), onFloor = rooms.flatMap(room => room.rows.map(value => value.row));
     // Geometry and row fields consumed by floor paint or movement; titles and tools are read live by the hover callbacks.
-    const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider]], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
+    const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider]], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.checkoutId, value.checkoutKind, value.folder, value.lineageState, value.lifecycleEvidence?.state] : value);
     const bus = data?.bus || null, messages = Array.isArray(bus?.messages) ? bus.messages : [];
     // Hover text, plates and pending envelopes read rows and bus live; a frozen floor repaints only when they change.
     const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages]]);

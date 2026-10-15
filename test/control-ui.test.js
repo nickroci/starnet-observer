@@ -1,4 +1,5 @@
 'use strict';
+const sessionItems = node => node.className?.split(' ').includes('session-item') ? [node] : (node.children || []).flatMap(sessionItems);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -54,7 +55,7 @@ async function controls(enabled, presentation) {
   const tick = () => new Promise(resolve => setImmediate(resolve));
   publish(sessions);
   assert.equal(badge.textContent, presentation ? 'LIVE · FICTIONAL LABELS' + (enabled ? ' · CONTROLS ON' : '') : enabled ? 'CONTROLS ON' : 'READ ONLY');
-  const group = elements.sessions.children[0], heading = group.children[0], rows = group.children[2].children;
+  const group = elements.sessions.children[0], heading = group.children[0], rows = sessionItems(group);
   assert.equal(rows.length, 2);
   const [herdrRow, desktopRow] = rows.map(item => ({ item, button: item.children[0], inspect: item.children[2], attach: item.children[3], close: item.children[4] }));
   if (!enabled) {
@@ -105,7 +106,7 @@ async function controls(enabled, presentation) {
   }
   herdrRow.button.focus();
   publish(sessions.map(row => ({ ...row })));
-  assert.equal(elements.sessions.children[0].children[2].children[0], herdrRow.item);
+  assert.equal(sessionItems(elements.sessions.children[0])[0], herdrRow.item);
   assert.equal(document.activeElement, herdrRow.button, 'polls and controls preserve row focus');
   publish([{ ...sessions[0], observedAt: Date.now() - 6001 }]);
   assert.equal(herdrRow.attach.hidden, true); assert.equal(herdrRow.close.hidden, true);
