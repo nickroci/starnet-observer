@@ -39,7 +39,7 @@ function boot({ theme = {}, saved = {}, broken = false } = {}) {
   const context = { console, Date, Set, Map, Number, document, setTimeout: () => 0, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, ThemePack, encodeURIComponent,
     window: { __OBSERVER_THEME__: theme, localStorage, addEventListener() {} },
     SPRITES: { init: async () => {} }, Harness: { api: { get: () => new Promise(() => {}) } },
-    QuerySpine: { define() {}, invalidate: () => Promise.resolve(), subscribe(key, fn) { if (key === 'observer.sessions') listener = fn; return () => {}; } } };
+    QuerySpine: { define() {}, invalidate: () => { listener({}); return Promise.resolve(); }, subscribe(key, fn) { if (key === 'observer.sessions') listener = fn; return () => {}; } } };
   vm.runInNewContext(fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8'), context);
   return { get, updates, stored, fx, poll: data => listener({ data }) };
 }

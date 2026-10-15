@@ -824,7 +824,7 @@
     const overseerRow = rows.find(row => row.role === 'overseer' && row.source === 'herdr') || null;
     layout.reconcile(rows.filter(row => row !== overseerRow));
     if (selected && !byId.has(selected)) { overview(); }
-    if (page >= layout.pages()) setPage(layout.pages() - 1);
+    if (data && page >= layout.pages()) setPage(layout.pages() - 1);
     if (!layout.onPage(page).length && rows.length) setPage(layout.pageFor(rows[0].id));
     const rooms = layout.onPage(page), onFloor = rooms.flatMap(room => room.rows.map(value => value.row));
     // Geometry and row fields consumed by floor paint or movement; titles and tools are read live by the hover callbacks.

@@ -156,7 +156,7 @@ function makeArranger({ git, now, fs = fsp, home = os.homedir(), roomsFile = nul
     await Promise.all(Array.from({ length: Math.min(4, items.length) }, async () => { while (next < items.length) { const item = items[next++]; await work(item); } }));
   }
 
-  /* entries[i]: { kind: 'repository' | 'folder', root, here } with canonical absolute paths, or null (unassigned). */
+  /* entries[i]: { kind: 'repository' | 'folder', root, checkoutRoot, here } with canonical absolute paths, or null (unassigned). */
   async function arrange(entries) {
     if (homeReal === null) { try { homeReal = await fs.realpath(home); } catch (_) { homeReal = home; } }
     for (const entry of entries) if (entry && entry.kind === 'repository') { knownRepos.delete(entry.root); knownRepos.set(entry.root, true); }
@@ -165,10 +165,11 @@ function makeArranger({ git, now, fs = fsp, home = os.homedir(), roomsFile = nul
     for (const entry of entries) {
       if (!entry) { placed.push(null); continue; }
       const root = entry.kind === 'repository' ? entry.root : await folderUnit(entry.here);
-      const rel = path.relative(root, entry.here);
+      const checkout = entry.kind === 'repository' ? entry.checkoutRoot || root : root;
+      const rel = path.relative(checkout, entry.here);
       const sub = rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel.split(path.sep).map(clean).filter(Boolean).join('/').slice(0, 120) : '';
       if (!units.has(root)) units.set(root, { root, kind: entry.kind, remote: null, outer: null });
-      placed.push({ root, sub });
+      placed.push({ root, checkout, sub });
     }
     const repositories = [...units.values()].filter(unit => unit.kind === 'repository');
     await pooled(repositories, async unit => { const value = await unitInfo(unit.root); unit.remote = value.remote; unit.outer = value.outer; });
@@ -182,40 +183,58 @@ function makeArranger({ git, now, fs = fsp, home = os.homedir(), roomsFile = nul
     }
     const ruleUnits = [...units.values()].filter(unit => !assigned.has(unit.root));
     // c. nested: the nearest outer Git checkout, else the nearest observed unit folder that contains this one.
+    const nested = new Map();
     for (const unit of ruleUnits) {
       let outer = unit.outer;
       if (!outer) for (const other of new Set([...units.keys(), ...sticky.keys()])) if (other !== unit.root && inside(unit.root, other) && (!outer || inside(other, outer))) outer = other;
       if (!outer) continue;
-      const room = assigned.get(outer) || sticky.get(outer) || fileRoom(rules, outer, null) || { key: 'unit\0' + outer, name: path.basename(outer) };
-      assigned.set(unit.root, room);
+      nested.set(unit.root, outer);
     }
-    // d. org: join the single room org-mates already hold, or open an org room for two or more unplaced mates.
-    const remaining = ruleUnits.filter(unit => !assigned.has(unit.root) && unit.remote);
     const byOrg = new Map();
-    for (const unit of remaining) { const key = unit.remote.host + '/' + unit.remote.org; if (!byOrg.has(key)) byOrg.set(key, []); byOrg.get(key).push(unit); }
-    for (const [org, members] of byOrg) {
-      const held = new Map();
-      for (const [root, key] of unitOrg) if (key === org && !members.some(unit => unit.root === root)) {
-        const room = assigned.get(root) || sticky.get(root);
-        if (room && !room.key.startsWith('file\0')) held.set(room.key, room);
-      }
-      for (const unit of units.values()) if (unit.remote && unit.remote.host + '/' + unit.remote.org === org && assigned.has(unit.root) && !members.includes(unit)) {
-        const room = assigned.get(unit.root); if (!room.key.startsWith('file\0')) held.set(room.key, room);
-      }
-      let room = null;
-      if (held.size === 1) room = [...held.values()][0];
-      else if (held.size === 0 && members.length >= 2) room = { key: 'org\0' + org, name: org.split('/')[1] };
-      if (room) for (const unit of members) assigned.set(unit.root, room);
+    for (const unit of repositories) if (unit.remote) {
+      const org = unit.remote.host + '/' + unit.remote.org;
+      if (!byOrg.has(org)) byOrg.set(org, []);
+      byOrg.get(org).push(unit);
     }
-    // f. the unit is its own room.
-    for (const unit of ruleUnits) if (!assigned.has(unit.root)) assigned.set(unit.root, { key: 'unit\0' + unit.root, name: path.basename(unit.root) });
+    // Resolve room dependencies before caching any fallback. Organization mates can themselves be nested.
+    function roomFor(root, visiting = new Set()) {
+      if (assigned.has(root)) return assigned.get(root);
+      if (visiting.has(root)) return null;
+      visiting.add(root);
+      let outer = nested.get(root);
+      // A Git ancestor may have no pane: continue through its known containing unit.
+      if (!outer && !units.has(root)) for (const other of new Set([...units.keys(), ...sticky.keys()]))
+        if (inside(root, other) && (!outer || inside(other, outer))) outer = other;
+      let room = fileRoom(rules, root, units.get(root)?.remote) || sticky.get(root);
+      if (!room && outer) room = roomFor(outer, visiting);
+      const remote = units.get(root)?.remote;
+      if (!room && !outer && remote) {
+        const org = remote.host + '/' + remote.org, members = byOrg.get(org) || [], held = new Map();
+        const hold = value => { if (value && !value.key.startsWith('file\0')) held.set(value.key, value); };
+        for (const [known, key] of unitOrg) if (key === org && !members.some(unit => unit.root === known)) hold(sticky.get(known));
+        for (const member of members) if (member.root !== root) {
+          if (assigned.has(member.root)) hold(assigned.get(member.root));
+          else if (nested.has(member.root) && !inside(member.root, root)) hold(roomFor(member.root, visiting));
+        }
+        if (held.size === 1) room = [...held.values()][0];
+        else if (held.size === 0 && members.filter(unit => !nested.has(unit.root) && !assigned.has(unit.root)).length >= 2)
+          room = { key: 'org\0' + org, name: org.split('/')[1] };
+      }
+      room ||= { key: 'unit\0' + root, name: path.basename(root) };
+      assigned.set(root, room);
+      visiting.delete(root);
+      return room;
+    }
+    // Canonical ordering makes cyclic organization dependencies resolve consistently across roster permutations.
+    for (const root of [...units.keys()].sort()) roomFor(root);
     for (const unit of ruleUnits) { sticky.delete(unit.root); sticky.set(unit.root, assigned.get(unit.root)); }
     bounded(sticky);
     return placed.map(place => {
       if (!place) return { ...UNASSIGNED };
       const room = assigned.get(place.root), own = room.key === 'unit\0' + place.root, name = clean(path.basename(place.root)) || 'Local folder';
+      const linked = place.checkout !== place.root, checkoutName = clean(path.basename(place.checkout)) || name;
       return { roomId: opaque('room_', room.key), room: clean(room.name) || 'Local folder',
-        sectionId: opaque('sec_', place.root + '\0' + place.sub), section: (own ? place.sub || name : name + (place.sub ? '/' + place.sub : '')).slice(0, 120) };
+        sectionId: opaque('sec_', place.root + '\0' + place.checkout + '\0' + place.sub), section: (linked ? checkoutName + (place.sub ? '/' + place.sub : '') : own ? place.sub || name : name + (place.sub ? '/' + place.sub : '')).slice(0, 120) };
     });
   }
   return { arrange };

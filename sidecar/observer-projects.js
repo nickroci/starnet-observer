@@ -71,7 +71,7 @@ function makeProjectResolver({ execute, now, arrange = null, fs: arrangeFs }) {
       checkoutId: opaque('checkout_', checkoutRoot), checkoutKind: kind === 'folder' ? 'folder' : worktree ? 'worktree' : 'main',
       worktree: worktree ? clean(worktree) : null, folder: folder.slice(0, 120) };
     // Canonical paths stay inside the process: the arranger reads them, the API never sees them.
-    const paths = here ? { kind, root, here } : null;
+    const paths = here ? { kind, root, checkoutRoot, here } : null;
     found.paths = paths;
     cache.set(cwd, { at: now(), value, paths, mainRoot, repositoryIdentity: kind === 'repository' ? identity : null });
     if (cache.size > 256) cache.delete(cache.keys().next().value);

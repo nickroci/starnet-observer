@@ -68,6 +68,38 @@ for (const bad of [null, [], { rooms: 'x' }, { rooms: [{ name: '', match: ['/a']
     const all = JSON.stringify(rows);
     assert(!all.includes(temp) && !all.includes(await fs.realpath(temp)) && !all.includes('github.com'), 'no paths or remote URLs cross the resolver');
 
+    // Linked checkout subfolders keep separate sections, using real Git checkout discovery.
+    await git(at('mono'), ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture']);
+    const linked = at('mono-linked');
+    await git(at('mono'), ['worktree', 'add', '-qb', 'fixture-linked', linked]);
+    await fs.mkdir(path.join(linked, 'src')); await fs.mkdir(path.join(linked, 'test'));
+    const linkedRows = await resolver.resolveMany([at('mono'), linked, path.join(linked, 'src'), path.join(linked, 'test')]);
+    assert.equal(new Set(linkedRows.map(row => row.arrangement.roomId)).size, 1, 'linked checkout belongs to repository room');
+    assert.equal(new Set(linkedRows.map(row => row.arrangement.sectionId)).size, 4, 'main, linked root, src and test remain distinct');
+    assert.equal(new Set(linkedRows.map(row => Model.sectionKey(Model.arranged(row)))).size, 4, 'ARRANGE preserves every checkout subfolder section');
+
+    // Resolve the outer organization room before inheriting it, regardless of input order or nesting depth.
+    await repository(at('outer'), 'https://github.com/acme/outer.git');
+    await repository(at('mate'), 'https://github.com/acme/mate.git');
+    await repository(at('outer', 'inner')); await repository(at('outer', 'inner', 'deep'));
+    const nestedResolver = makeProjectResolver({ now: () => clock, execute: execFile, arrange: { home } });
+    const nestedPaths = [at('outer', 'inner', 'deep'), at('outer', 'inner'), at('mate'), at('outer')];
+    const nested = await nestedResolver.resolveMany(nestedPaths);
+    assert.deepEqual(nested.map(row => row.arrangement.room), ['acme', 'acme', 'acme', 'acme'], 'all nested units inherit the final outer organization room');
+    const nestedAgain = await nestedResolver.resolveMany([...nestedPaths].reverse());
+    assert(nestedAgain.every(row => row.arrangement.roomId === nested[0].arrangement.roomId), 'sticky placement preserves consistent ancestry');
+    const skippedResolver = makeProjectResolver({ now: () => clock, execute: execFile, arrange: { home } });
+    const skipped = await skippedResolver.resolveMany([at('outer', 'inner', 'deep'), at('mate'), at('outer')]);
+    assert(skipped.every(row => row.arrangement.room === 'acme'), 'unobserved intermediate checkout inherits the known outer room');
+    // An outer repository can itself follow an organization mate nested under another outer unit.
+    await repository(at('B'), 'https://github.com/team/B.git'); await repository(at('B', 'A'));
+    await repository(at('D')); await repository(at('D', 'C'), 'https://github.com/team/C.git');
+    for (const order of [[at('B', 'A'), at('B'), at('D', 'C'), at('D')], [at('D'), at('D', 'C'), at('B'), at('B', 'A')]]) {
+      const dependent = await makeProjectResolver({ now: () => clock, execute: execFile, arrange: { home } }).resolveMany(order);
+      assert(dependent.every(row => row.arrangement.room === 'D'), 'nested descendants follow the outer unit final organization dependency');
+    }
+
+
     // Stability: a later org-mate joins the existing room and never moves anyone; a lone unit's room is kept.
     await repository(at('bq-exec'), 'https://github.com/banqora/bq-exec.git');
     await repository(at('acme-two'), 'https://github.com/acme/two.git');
