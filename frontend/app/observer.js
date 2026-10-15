@@ -115,7 +115,7 @@
     if (!byId.has(id)) return;
     selected = id;
     const row = byId.get(id);
-    if (hostList.length && (row.host || null) !== selectedHost) { selectedHost = row.host || null; rememberHost(selectedHost); }
+    if (hostList.length && (row.host || null) !== selectedHost) { selectedHost = row.host || null; mailSelected = null; rememberHost(selectedHost); }
     const target = layout.pageFor(id); if ((row.role !== 'overseer' || row.host) && Number.isInteger(target)) setPage(target);   // the local overseer sits on every page
     render(latest, true);
     view.focus(id);
@@ -959,7 +959,7 @@
       member: net.members[0]?.host ?? null, agents: Math.max(shadow.agents, ghosts.filter(row => row.host === shadow.host).length), lastSeen: shadow.lastSeen })));
     // Each shadow ship docks beside the first observed ship on its relay (this machine first, when it is a member).
     const sceneHosts = [...hosts, ...shadowHosts.filter((host, index) => shadowHosts.findIndex(other => other.id === host.id) === index)];
-    const relayKey = JSON.stringify([[...relayMembers.keys()].sort(), sceneHosts.filter(host => host.shadow).map(host => [host.id, host.agents]), relays.map(net => [net.relay, net.members.map(member => [member.host, member.state,
+    const relayKey = JSON.stringify([[...relayMembers.keys()].sort(), sceneHosts.filter(host => host.shadow).map(host => [host.id, host.agents]), relays.map(net => [net.relay, net.members.map(member => [member.host, member.state, member.crossed,
       member.lastActivityAt && Math.floor((Date.now() - member.lastActivityAt) / 60000)])])]);
     layout.reconcile([...rows.filter(row => row !== overseerRow), ...ghosts]);
     if (selected && !byId.has(selected)) { overview(); }

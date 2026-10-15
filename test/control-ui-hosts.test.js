@@ -78,6 +78,36 @@ function element() {
   assert.equal(elements['mail-title'].textContent, 'Mailroom · herdr-dev-2 · recent 100', 'the mailroom section is the selected host’s own');
   assert.equal(elements['mail-ledger'].children.length, 2, 'and lists that host’s own bus');
   assert.match(elements['mail-counts'].textContent, /^1 pending · 1 acknowledged/);
+  // Numeric ledger ids belong to one host; canvas selection must not carry
+  // the selection into an unrelated host's message with the same id.
+  const collidingMail = () => listener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: Date.now(), sources: { hosts }, bus: localBus,
+    hostBus: { 'herdr-dev-2': { ...hostBus['herdr-dev-2'], messages: [{ ...hostBus['herdr-dev-2'].messages[1], id: 1 }] } } } });
+  collidingMail();
+  viewOptions.onShip(null);
+  elements['mail-ledger'].children[0].children[0].handlers.click();
+  viewOptions.onSelect(sessions[0].id);
+  assert.equal(elements['mail-detail'].hidden, false, 'same-host canvas selection preserves mail selection');
+  assert.equal(elements['mail-ledger'].children[0].children[0].attributes['aria-pressed'], 'true');
+  viewOptions.onSelect(blocked.id);
+  assert.equal(viewOptions.hostSelection(), 'herdr-dev-2');
+  assert.equal(elements['mail-detail'].hidden, true, 'canvas host switch clears the previous host mail detail');
+  assert.equal(elements['mail-ledger'].children[0].children[0].attributes['aria-pressed'], 'false', 'colliding remote ledger id is not selected');
+  multi();
+  // Crossing evidence can change without any roster, message id or activity-minute change.
+  const relayAt = Date.now(), peerId = 'peer_' + 'e'.repeat(24);
+  const relaySnapshot = state => listener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: relayAt, sources: { hosts }, hostBus,
+    bus: { ...localBus, remote: { relay: 'relay.example.dev', machine: 'mac', lastActivityAt: relayAt,
+      peers: [{ machine: 'far', repos: ['repo'], agents: 1, lastSeen: relayAt,
+        list: [{ id: peerId, provider: 'codex', repo: 'repo', lastSeen: relayAt }] }] },
+      messages: [{ id: 1, from: sessions[0].id, to: 'external', sentAt: relayAt, acknowledgedAt: null,
+        relay: { direction: 'out', machine: 'far', repo: 'repo', peer: peerId, state } }] } } });
+  relaySnapshot('accepted_remote');
+  const rosterScene = viewScene;
+  assert.equal(rosterScene.relays[0].links[0].verified, false, 'relay acceptance alone leaves the route roster-only');
+  relaySnapshot('delivered_local');
+  assert.notEqual(viewScene, rosterScene, 'delivery evidence invalidates the controller scene cache');
+  assert.equal(viewScene.relays[0].links[0].verified, true, 'delivery marks the existing relay route verified');
+  multi();
   // Expired relay history is still listed, but never waiting, acknowledged by
   // inference, highlighted as pending, or counted in the recipient's unread badge.
   const mixedBus = { ...hostBus['herdr-dev-2'], window: 37, messages: [
