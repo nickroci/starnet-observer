@@ -91,7 +91,38 @@ function sanitizeSnapshot(host, value, receivedAt) {
   for (const row of value.sessions.slice(0, MAX_ROWS)) { const safe = sanitizeRow(host, row, receivedAt); if (safe) rows.push(safe); }
   // A helper whose parent did not survive sanitising would be an orphan: drop it rather than guess a parent.
   const ids = new Set(rows.map(row => row.id));
-  return rows.filter(row => !Object.hasOwn(row, 'parentId') || row.parentId && ids.has(row.parentId));
+  const kept = rows.filter(row => !Object.hasOwn(row, 'parentId') || row.parentId && ids.has(row.parentId));
+  return { rows: kept, bus: sanitizeBus(host, value.bus, new Set(kept.map(row => row.id)), receivedAt) };
+}
+
+/* A remote host's own llm-bus, as its observer published it (publicBus shape). Each host's bus stands alone: message
+   ids stay that host's integers, and every message also carries its hub-wide key "id@host" and its host. Endpoints are
+   re-derived exactly like the rows (remap), and anything that does not name a surviving row of that host becomes
+   'external'. Message identities are dropped: a remote body is never inspectable from the hub. */
+// Same vocabulary as the local reader (observer-bus.js): anything else from a remote reads as 'unknown'.
+const WAKES = new Set(['requested', 'failed', 'unsupported', 'none', 'unknown']);
+const MAX_MESSAGES = 200;
+function sanitizeBus(host, bus, rowIds, receivedAt) {
+  if (!bus || typeof bus !== 'object' || !Array.isArray(bus.messages)) return null;
+  const endpoint = value => value === 'external' || value === 'ambiguous' ? value : ID.test(value) && rowIds.has(remap(host, value)) ? remap(host, value) : 'external';
+  const messages = [];
+  for (const message of bus.messages.slice(0, MAX_MESSAGES)) {
+    if (!message || !Number.isSafeInteger(message.id) || message.id < 1) continue;
+    messages.push({ id: message.id, key: message.id + '@' + host, host, from: endpoint(message.from), to: endpoint(message.to),
+      sentAt: time(message.sentAt), acknowledgedAt: time(message.acknowledgedAt), wake: WAKES.has(message.wake) ? message.wake : 'unknown' });
+  }
+  const health = bus.health === 'available' ? 'available' : 'unavailable';
+  return { health, reason: health === 'available' ? null : text(bus.reason, 120) || 'unreadable', observedAt: health === 'available' ? receivedAt : null,
+    window: Number.isSafeInteger(bus.window) && bus.window > 0 && bus.window <= 1000 ? bus.window : 100, messages };
+}
+/* Relay detection hook. With mail "relay" configured the page may only draw a working mail link once relayed traffic
+   is actually seen; config alone never makes it active. Nothing relays today, so this always reports 'none'.
+   TODO(relay): when llm-bus gains host-qualified addresses (claude:<uuid>@host, docs/multi-host.md Decision 2), the
+   remote observer must publish them (publicBus currently folds unknown senders into 'external'); detect them here,
+   set observed: 'active' and lastRelayedAt to the newest relayed message's sentAt. */
+function relayObserved(host, bus) {
+  void host; void bus;
+  return { observed: 'none', lastRelayedAt: null };
 }
 
 // The remote command is fixed; only `dir` varies, and it is validated by config and single-quoted for the remote shell.
@@ -118,7 +149,7 @@ function reasonFrom(stderr, code) {
 }
 
 function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
-  const hosts = remotes.map(remote => ({ remote, child: null, rows: [], receivedAt: null, reason: 'Connecting', failures: 0, timer: null, connected: false }));
+  const hosts = remotes.map(remote => ({ remote, child: null, rows: [], bus: null, receivedAt: null, reason: 'Connecting', failures: 0, timer: null, connected: false }));
   let closed = false;
   function connect(host) {
     if (closed) return;
@@ -138,7 +169,8 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
         if (!line.trim()) continue;
         try {
           const receivedAt = now();
-          host.rows = sanitizeSnapshot(host.remote.id, JSON.parse(line), receivedAt);
+          const snap = sanitizeSnapshot(host.remote.id, JSON.parse(line), receivedAt);
+          host.rows = snap.rows; host.bus = snap.bus;
           host.receivedAt = receivedAt; host.reason = null; host.failures = 0; host.connected = true;
         } catch (_) { host.reason = 'Remote sent an unreadable snapshot'; }
       }
@@ -162,16 +194,21 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
   for (const host of hosts) connect(host);
 
   function snapshot() {
-    const at = now(), rows = [], sources = {};
+    const at = now(), rows = [], sources = {}, buses = {};
     for (const host of hosts) {
       const fresh = host.receivedAt !== null && at - host.receivedAt < FRESH_MS;
       const health = fresh ? 'available' : host.receivedAt !== null ? 'stale' : 'unavailable';
       // Stale rows stay on screen (the last truthful observation) but are never presented as live.
       for (const row of host.rows) rows.push(fresh ? row : { ...row, inventoryHealth: 'unavailable' });
+      // A quiet host's mail is its last observation: kept for the ledger, never presented as a live bus.
+      const bus = host.bus && (fresh ? host.bus : { ...host.bus, health: 'unavailable', reason: 'Host not currently observed', observedAt: host.bus.observedAt });
+      if (bus) buses[host.remote.id] = bus;
       sources[host.remote.id] = { health, observedAt: host.receivedAt, reason: fresh ? null : host.reason || 'No recent snapshot',
-        agents: host.rows.filter(row => row.source !== 'helper').length };
+        agents: host.rows.filter(row => row.source !== 'helper').length,
+        // Mail topology: the configured mode, and what is actually observed (config alone never makes a link active).
+        mail: { mode: host.remote.mail === 'relay' ? 'relay' : 'separate', ...relayObserved(host.remote.id, host.bus) } };
     }
-    return { rows, sources };
+    return { rows, sources, buses };
   }
   function close() {
     closed = true;
@@ -185,7 +222,8 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
 }
 
 /* The hub's observer: the local snapshot plus every remote's rows. Local rows carry host: null. Aggregates are
-   recomputed over the merged roster; the bus stays local (cross-host mail is a separate design step). */
+   recomputed over the merged roster. `bus` keeps its local shape; each remote's own bus is under `hostBus[id]`
+   (there is no cross-host mail: llm-bus is per host). */
 function makeFederatedObserver(local, remoteHosts, now = Date.now) {
   async function get() {
     const inventory = await local.get(), remote = remoteHosts.snapshot();
@@ -194,7 +232,7 @@ function makeFederatedObserver(local, remoteHosts, now = Date.now) {
     return { ...inventory, sessions, aggregate: aggregateRows(sessions, now()),
       health: inventory.health === 'available' || Object.values(remote.sources).some(host => host.health === 'available') ? 'available' : inventory.health,
       sources: { ...inventory.sources, hosts: { local: { health: herdr?.health || 'unavailable', observedAt: herdr?.observedAt ?? null, reason: herdr?.reason || null,
-        agents: inventory.sessions.filter(row => row.source === 'herdr').length }, ...remote.sources } } };
+        agents: inventory.sessions.filter(row => row.source === 'herdr').length }, ...remote.sources } }, hostBus: remote.buses || {} };
   }
   async function inspect(id, expectedIdentity) {
     if (remoteHosts.snapshot().rows.some(row => row.id === id)) return unavailable(id, 'remote-inspect', now());
@@ -203,4 +241,4 @@ function makeFederatedObserver(local, remoteHosts, now = Date.now) {
   return { get, inspect, inspectMessage: (id, expectedIdentity) => local.inspectMessage(id, expectedIdentity), close: async () => { remoteHosts.close(); await local.close?.(); } };
 }
 
-module.exports = { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sshArgs, remoteCommand, reasonFrom, MAX_LINE, FRESH_MS, BACKOFF };
+module.exports = { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sanitizeBus, relayObserved, sshArgs, remoteCommand, reasonFrom, MAX_LINE, FRESH_MS, BACKOFF };

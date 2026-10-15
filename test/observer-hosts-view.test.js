@@ -29,9 +29,9 @@ for (const status of ['working', 'idle', 'done', 'unknown']) assert.equal(View.n
 const layout = Model.createLayout();
 const rows = [row('obs_local', { status: 'working' }), row('obs_blocked', { host: 'vm', status: 'blocked' }), row('obs_idle', { host: 'vm', status: 'idle' })];
 layout.reconcile(rows);
-const hosts = [{ id: 'vm', health: 'available', agents: 2 }, { id: 'empty', health: 'available', agents: 0 }];
+const hosts = [{ id: 'vm', health: 'available', agents: 2, mail: { mode: 'relay', observed: 'none', lastRelayedAt: null } }, { id: 'empty', health: 'stale', observedAt: 1, agents: 0 }];
 const scene = Scene.build(layout.onPage(0), 0, { hosts });
-assert.equal(scene.bridges.length, 2, 'fixture: a bridge per remote ship');
+assert.equal(scene.links.length, 2, 'fixture: an observation link per remote ship'); assert.equal(scene.relays.length, 1, 'fixture: one relay-configured host');
 const node = canvas(), ships = [];
 let now = 0, chosenHost = null; const staleIds = new Set();
 const view = View.create({ canvas: node, nameFor: id => id, onShip: host => { ships.push(host); chosenHost = host; }, hostSelection: () => chosenHost,
@@ -51,6 +51,11 @@ assert.equal(view.attentionRegions().length, 1);
 const labelled = () => node.ctx.texts.some(text => /^● VM · 2 agents/.test(text));
 node.ctx.texts.length = 0; now += 16; view.paint(now);
 assert.ok(labelled(), 'remote ship label at overview');
+const drawn = text => node.ctx.texts.includes(text);
+assert.ok(drawn('ssh · observing'), 'a live host\'s observation link says what it is');
+assert.ok(drawn('ssh · stale'), 'a stale host\'s link shows its real state');
+assert.ok(drawn('relay configured · not seen'), 'a configured but unobserved relay says so');
+assert.ok(!drawn('relay · mail'), 'and is never drawn as a working mail link');
 const vmRoom = scene.platforms.find(platform => platform.host === 'vm');
 assert.ok(view.focusPlatform(vmRoom.key)); node.ctx.texts.length = 0; now += 16; view.paint(now);
 assert.ok(labelled(), 'remote ship label when zoomed onto its room'); assert.ok(node.ctx.texts.some(text => /^P · 2/.test(text)), 'and the room sign survives');
@@ -59,14 +64,14 @@ view.overview(); now += 16; view.paint(now);
 const click = point => { const at = Scene.toScreen(point, view.camera()), event = { clientX: at.x, clientY: at.y, pointerId: 1, pointerType: 'mouse', preventDefault() {} };
   node.handlers.get('pointerdown')(event); node.handlers.get('pointerup')(event); now += 400; view.paint(now); };
 const empty = scene.ships.find(ship => ship.id === 'empty'), flagship = scene.ships.find(ship => ship.local);
-click({ x: empty.dock.x + empty.dock.w / 2, y: empty.dock.y + empty.dock.h / 2 });
+click({ x: empty.mail.rect.x + 2, y: empty.mail.rect.y + empty.mail.rect.h - 2 });
 assert.deepEqual(ships, ['empty'], 'a remote hull floor click selects that host');
 click({ x: flagship.rect.x + 2, y: flagship.rect.y + flagship.rect.h - 2 });
 assert.deepEqual(ships, ['empty', null], 'the flagship floor selects this machine');
 // Without onShip (a page with no remotes) nothing on the floor is a ship target.
 const plain = View.create({ canvas: canvas(), nameFor: id => id, env: { raf: () => 1, caf() {}, now: () => 0, dpr: () => 1, createCanvas: () => canvas(), sprites: { drawBody: () => null } } });
 plain.start(); plain.update(Scene.build(layout.onPage(0).filter(room => !room.host), 0), { mailFrame: () => ({ drones: [], envelopes: [] }) }); plain.paint(16);
-assert.equal(Scene.build(layout.onPage(0).filter(room => !room.host), 0).bridges, undefined, 'no remotes, no bridges');
+assert.equal(Scene.build(layout.onPage(0).filter(room => !room.host), 0).links, undefined, 'no remotes, no observation links');
 view.stop(); assert.deepEqual(view.attentionRegions(), [], 'stop clears badges');
 // "~ home": a home-folder room and its own section read "~ home"; a repository room in home keeps its repo section name.
 assert.equal(Model.projectName({ project: 'nick', projectHome: true }), '~ home');
@@ -80,4 +85,4 @@ assert.equal(Model.projectName({ project: 'web' }), 'web');
   const homeScene = Scene.build(homeLayout.onPage(0), 0);
   assert.deepEqual(homeScene.platforms[0].sections.map(section => section.label).sort(), ['tools', '~ home'], 'section labels');
 }
-console.log('observer hosts view: "~ home" labels, blocked "!" badge (fresh only, overview too), ship floor/label selection, bridges only with remotes OK');
+console.log('observer hosts view: "~ home" labels, blocked "!" badge (fresh only, overview too), ship floor/label selection, observation/relay labels, links only with remotes OK');

@@ -56,6 +56,12 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
           const data = await observer.inspect(session[1], identities[0]);
           return json(data.reason === 'unknown-session' ? 404 : 200, data);
         }
+        // A remote host's message is addressed id@host; its body lives on that host's disk, so it is never inspectable here.
+        const remoteMail = url.pathname.match(/^\/api\/observer\/messages\/([1-9][0-9]{0,15})@([a-z0-9][a-z0-9-]{0,31})\/inspect$/);
+        if (remoteMail && Number.isSafeInteger(Number(remoteMail[1]))) {
+          if (identities.length) return json(400, { id: remoteMail[1] + '@' + remoteMail[2], identity: null, health: 'unavailable', reason: 'invalid-identity', text: null });
+          return json(200, { id: remoteMail[1] + '@' + remoteMail[2], identity: null, health: 'unavailable', reason: 'remote-inspect', text: null });
+        }
         const mail = url.pathname.match(/^\/api\/observer\/messages\/([1-9][0-9]{0,15})\/inspect$/);
         if (mail && Number.isSafeInteger(Number(mail[1]))) {
           if (identities.length > 1 || identities.length === 1 && !/^mail_[a-f0-9]{64}$/.test(identities[0])) return json(400, { id: Number(mail[1]), identity: null, health: 'unavailable', reason: 'invalid-identity', text: null });

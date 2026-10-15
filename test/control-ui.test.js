@@ -25,10 +25,10 @@ function element() {
   const filters = ['all', 'working', 'blocked'].map(value => { const button = element(); button.dataset.filter = value; return button; });
   document = { documentElement: element(), body: element(), activeElement: null, hidden: false, getElementById: id => elements[id] || (elements[id] = element()), createElement: element, addEventListener() {} };
   elements.filters = element(); elements.filters.children = filters;
-  const posts = [], confirms = []; const lastPost = () => JSON.stringify(posts.at(-1)); let confirmAnswer = false, listener;
+  const posts = [], confirms = [], stored = new Map(); const lastPost = () => JSON.stringify(posts.at(-1)); let confirmAnswer = false, listener;
   const context = { console, Date, Set, Map, document, setTimeout: () => 1, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, encodeURIComponent,
     ObserverView: { create: options => (viewOptions = options, { setFx() {}, fx() { return true; }, update() {}, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate() {} }) },
-    window: { __OBSERVER_CONTROL__: true, __OBSERVER_THEME__: {}, localStorage: { getItem() { return 'on'; }, setItem() {} }, addEventListener() {}, confirm: message => { confirms.push(message); return confirmAnswer; } },
+    window: { __OBSERVER_CONTROL__: true, __OBSERVER_THEME__: {}, localStorage: { getItem(key) { return stored.has(key) ? stored.get(key) : key === 'observer.host' ? null : 'on'; }, setItem(key, value) { stored.set(key, String(value)); }, removeItem(key) { stored.delete(key); } }, addEventListener() {}, confirm: message => { confirms.push(message); return confirmAnswer; } },
     SPRITES: { init: async () => ({}) },
     Harness: { api: { get: () => new Promise(() => {}), post: async (path, body) => { posts.push([path, body]); return { ok: true, paneId: 'w1:pX', name: 'spawned' }; } } },
     QuerySpine: { define() {}, invalidate() { return Promise.resolve(); }, subscribe(key, fn) { if (key === 'observer.sessions') listener = fn; return () => {}; } }
@@ -71,7 +71,11 @@ function element() {
   assert.equal(typeof viewOptions.onShip, 'function', 'ship clicks are selection targets');
   const hosts = { local: { health: 'available', observedAt: Date.now(), reason: null, agents: 1 }, 'herdr-dev-2': { health: 'available', observedAt: Date.now(), reason: null, agents: 1 }, empty: { health: 'available', observedAt: Date.now(), reason: null, agents: 0 } };
   const blocked = { ...remote, status: 'blocked' };
-  const multi = () => listener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: Date.now(), sources: { hosts } } });
+  const localBus = { health: 'available', reason: null, observedAt: Date.now(), window: 100, messages: [{ id: 1, from: sessions[0].id, to: 'external', sentAt: 1, acknowledgedAt: 2, wake: 'none' }] };
+  const hostBus = { 'herdr-dev-2': { health: 'available', reason: null, observedAt: Date.now(), window: 100, messages: [
+    { id: 7, key: '7@herdr-dev-2', host: 'herdr-dev-2', from: blocked.id, to: 'external', sentAt: 1, acknowledgedAt: null, wake: 'requested' },
+    { id: 8, key: '8@herdr-dev-2', host: 'herdr-dev-2', from: 'external', to: blocked.id, sentAt: 2, acknowledgedAt: 3, wake: 'none' }] } };
+  const multi = () => listener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: Date.now(), sources: { hosts }, bus: localBus, hostBus } });
   multi();
   const tabs = elements['host-tabs'];
   assert.equal(tabs.hidden, false); assert.deepEqual(tabs.children.map(tab => tab.dataset.host), ['', 'empty', 'herdr-dev-2'], 'one tab per host, this machine first');
@@ -79,14 +83,18 @@ function element() {
   const listed = () => elements.sessions.children.flatMap(section => section.children[2].children).map(item => item.children[0].dataset.sessionId);
   assert.deepEqual(listed(), [sessions[0].id], 'this machine lists only local rows');
   assert.equal(elements['host-spawn'].hidden, true, 'no "New agent in ~" row for a local host that has agents');
-  assert.doesNotMatch(elements['mail-title'].textContent, /this machine/, 'no hint while this machine is listed');
+  assert.equal(elements['mail-title'].textContent, 'Mailroom · this machine · recent 100');
+  assert.equal(elements['mail-ledger'].children.length, 1, 'this machine lists its own mail');
   const confirmsBefore = confirms.length, postsBefore = posts.length;
   viewOptions.onShip('herdr-dev-2');
   assert.equal(posts.length, postsBefore, 'a ship click starts nothing'); assert.equal(confirms.length, confirmsBefore, 'and asks nothing');
   assert.equal(elements['crew-title'].textContent, 'herdr-dev-2 crew'); assert.equal(viewOptions.hostSelection(), 'herdr-dev-2');
+  assert.deepEqual([...stored.entries()].filter(([key]) => key === 'observer.host'), [['observer.host', 'herdr-dev-2']], 'only the host id is remembered');
   assert.deepEqual(listed(), [remote.id], 'the panel switches to that host');
   assert.match(elements['host-health'].textContent, /^Live · 1 agent$/);
-  assert.match(elements['mail-title'].textContent, /· this machine$/, 'a remote host view says the mail shown is this machine’s');
+  assert.equal(elements['mail-title'].textContent, 'Mailroom · herdr-dev-2 · recent 100', 'the mailroom section is the selected host’s own');
+  assert.equal(elements['mail-ledger'].children.length, 2, 'and lists that host’s own bus');
+  assert.match(elements['mail-counts'].textContent, /^1 pending · 1 acknowledged/);
   // Blocked: the row reads "waiting for input", carries the attach hint and a prominent attach button.
   const blockedItem = elements.sessions.children.flatMap(section => section.children[2].children)[0];
   assert.equal(blockedItem.title, 'Waiting for input — press ⇱ to attach'); assert.match(blockedItem.className, /needs-input/);
@@ -107,6 +115,10 @@ function element() {
   tabs.children.find(tab => tab.dataset.host === 'empty').handlers.click();
   assert.equal(elements['crew-title'].textContent, 'empty crew'); assert.deepEqual(listed(), []);
   assert.equal(elements['host-spawn'].hidden, false); assert.equal(elements.empty.textContent, 'No sessions on empty.');
+  assert.equal(stored.get('observer.host'), 'empty');
+  tabs.children.find(tab => tab.dataset.host === '').handlers.click();
+  assert.equal(stored.has('observer.host'), false, 'choosing this machine forgets the remote tab');
+  tabs.children.find(tab => tab.dataset.host === 'empty').handlers.click();
   // A host that disappears falls back to this machine.
   listener({ data: { sessions: [sessions[0]], health: 'available', observedAt: Date.now(), sources: { hosts: { local: hosts.local, 'herdr-dev-2': hosts['herdr-dev-2'] } } } });
   assert.equal(elements['crew-title'].textContent, 'This machine crew');
@@ -114,5 +126,26 @@ function element() {
   listener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: Date.now(), sources: { hosts: { local: hosts.local, 'herdr-dev-2': hosts['herdr-dev-2'] } } } });
   viewOptions.onSelect(blocked.id);
   assert.equal(elements['crew-title'].textContent, 'herdr-dev-2 crew');
-  console.log('control UI: buttons only on live Herdr panes, close confirms first, attach/close/spawn post the shown pane id, remote rows, host tabs/ship selection, blocked hint, New agent in ~ and spawn-then-select OK');
+  // A reload restores the remembered tab when that host is still reported, and falls back to this machine when not.
+  for (const [remembered, expected] of [['herdr-dev-2', 'herdr-dev-2 crew'], ['gone-host', 'This machine crew']]) {
+    const reloaded = {}; let reloadListener;
+    const page = { documentElement: element(), body: element(), activeElement: null, hidden: false, getElementById: id => reloaded[id] || (reloaded[id] = element()), createElement: element, addEventListener() {} };
+    reloaded.filters = element(); reloaded.filters.children = ['all', 'working', 'blocked'].map(value => { const button = element(); button.dataset.filter = value; return button; });
+    document = page;
+    vm.runInNewContext(fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8'), { ...context, document: page,
+      window: { ...context.window, localStorage: { getItem: key => key === 'observer.host' ? remembered : null, setItem() {}, removeItem() {} } },
+      QuerySpine: { define() {}, invalidate() { return Promise.resolve(); }, subscribe(key, fn) { if (key === 'observer.sessions') reloadListener = fn; return () => {}; } } });
+    await new Promise(resolve => setImmediate(resolve));
+    reloadListener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: Date.now(), sources: { hosts: { local: hosts.local, 'herdr-dev-2': hosts['herdr-dev-2'] } } } });
+    assert.equal(reloaded['crew-title'].textContent, expected, 'remembered ' + remembered);
+  }
+  // Storage that throws never breaks the page.
+  {
+    const page = { documentElement: element(), body: element(), activeElement: null, hidden: false, getElementById: id => (page[id] || (page[id] = element())), createElement: element, addEventListener() {} };
+    page.filters = element(); page.filters.children = [];
+    document = page;
+    vm.runInNewContext(fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8'), { ...context, document: page,
+      window: { ...context.window, get localStorage() { throw new Error('SecurityError'); } } });
+  }
+  console.log('control UI: buttons only on live Herdr panes, close confirms first, attach/close/spawn post the shown pane id, remote rows, host tabs/ship selection, blocked hint, New agent in ~, spawn-then-select, per-host mail panel and remembered host tab OK');
 })().catch(error => { console.error(error); process.exit(1); });

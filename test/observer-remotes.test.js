@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sshArgs, remoteCommand, reasonFrom, MAX_LINE, BACKOFF } = require('../sidecar/observer-remotes.js');
+const { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sanitizeBus, relayObserved, sshArgs, remoteCommand, reasonFrom, MAX_LINE, BACKOFF } = require('../sidecar/observer-remotes.js');
 const { startStream } = require('../scripts/stream.js');
 const { PANE } = require('../sidecar/control.js');
 
@@ -112,6 +112,30 @@ function fakeTimers() {
   timers.run(); assert.equal(children.length, before, 'nothing reconnects after close');
 }
 
+// ── Per-host mail: a remote's own bus is kept, namespaced by host, endpoints remapped like rows, identities dropped.
+{
+  const snap = sanitizeSnapshot('vm', { sessions: [row()], bus: { health: 'available', reason: null, observedAt: 1, window: 100, messages: [
+    { id: 5, identity: 'mail_' + 'f'.repeat(64), from: 'obs_' + 'a'.repeat(24), to: 'external', sentAt: '2026-10-15T10:00:00.000Z', acknowledgedAt: null, wake: 'requested', body: 'SECRET' },
+    { id: 6, from: 'obs_' + 'e'.repeat(24), to: 'ambiguous', sentAt: 2, acknowledgedAt: 3, wake: 'rm -rf' },
+    { id: 'x', from: 'external', to: 'external' }, { id: -1, from: 'external', to: 'external' }] } }, 1000);
+  const remoteRow = snap.rows[0];
+  assert.equal(snap.bus.messages.length, 2, 'non-integer and negative ids are dropped');
+  const [five, six] = snap.bus.messages;
+  assert.deepEqual(five, { id: 5, key: '5@vm', host: 'vm', from: remoteRow.id, to: 'external', sentAt: '2026-10-15T10:00:00.000Z', acknowledgedAt: null, wake: 'requested' },
+    'host-qualified key, endpoint remapped consistently with the re-ided row, identity and unknown fields dropped');
+  assert.equal(six.from, 'external', 'an endpoint naming no surviving row of that host is external');
+  assert.equal(six.wake, 'unknown', 'unknown wake words collapse');
+  assert.equal(snap.bus.observedAt, 1000, 'restamped with hub receipt time');
+  assert.ok(!JSON.stringify(snap.bus).includes('SECRET') && !JSON.stringify(snap.bus).includes('mail_'));
+  assert.equal(sanitizeBus('vm', { messages: 'no' }, new Set(), 1), null);
+  assert.equal(sanitizeSnapshot('vm', { sessions: [row()] }, 1).bus, null, 'a remote without a bus has none');
+  const other = sanitizeSnapshot('vm2', { sessions: [row()], bus: { health: 'available', messages: [{ id: 5, from: 'obs_' + 'a'.repeat(24), to: 'external' }] } }, 1);
+  assert.notEqual(other.bus.messages[0].from, five.from, 'the same remote session on two hosts never shares an endpoint');
+  assert.equal(other.bus.messages[0].key, '5@vm2', 'the same id on two hosts has two keys');
+  // Relay hook: nothing relays today, whatever the bus says.
+  assert.deepEqual(relayObserved('vm', snap.bus), { observed: 'none', lastRelayedAt: null });
+}
+
 // ── Federation: never awaits ssh; merged aggregate; remote inspect; local unchanged.
 (async () => {
   const localRow = row({ id: 'obs_' + 'c'.repeat(24), sessionId: UUID.replace('0892', '1111'), inspectionIdentity: 'claude:' + UUID.replace('0892', '1111') });
@@ -133,12 +157,24 @@ function fakeTimers() {
   const second = await federated.get();
   assert.equal(second.sessions.length, 2); assert.equal(second.sources.hosts.vm.health, 'available'); assert.equal(second.sources.hosts.vm.agents, 1);
   assert.equal(second.aggregate.agents.observed, 2, 'aggregate is recomputed over the merged roster');
-  assert.deepEqual(second.bus, { health: 'available', messages: [] }, 'bus stays local');
+  assert.deepEqual(second.bus, { health: 'available', messages: [] }, 'bus keeps its local shape');
+  assert.deepEqual(second.hostBus, {}, 'a remote that published no bus has no hostBus entry');
+  assert.deepEqual(second.sources.hosts.vm.mail, { mode: 'separate', observed: 'none', lastRelayedAt: null }, 'mail defaults to separate');
+  silent.children[0].stdout.emit('data', JSON.stringify({ sessions: [row()], bus: { health: 'available', window: 100, messages: [{ id: 9, from: row().id, to: 'external', sentAt: 1, acknowledgedAt: null, wake: 'none' }] } }) + '\n');
+  const third = await federated.get();
+  assert.equal(third.hostBus.vm.messages[0].key, '9@vm'); assert.equal(third.hostBus.vm.messages[0].from, third.sessions[1].id, 'remote mail names the hub row');
+  assert.deepEqual(third.bus, second.bus, 'local mail is untouched by remote mail');
   const remoteId = second.sessions[1].id;
   const inspected = await federated.inspect(remoteId);
   assert.equal(inspected.health, 'unavailable'); assert.equal(inspected.reason, 'remote-inspect');
   assert.deepEqual(await federated.inspect(localRow.id), { id: localRow.id, local: true });
   federated.close(); assert.equal(silent.children[0].killed, 'SIGTERM'); assert.equal(silent.children[0].stdinEnded, true);
+  // Config "relay" alone never claims relayed traffic: observed stays 'none' (the page then draws only a broken line).
+  const relaySpawn = fakeSpawn();
+  const relayHosts = makeRemoteHosts({ remotes: [{ id: 'r', ssh: 'r', mail: 'relay' }], spawn: relaySpawn.spawn, now: () => 5, setTimer: () => ({}), clearTimer: () => {} });
+  relaySpawn.children[0].stdout.emit('data', JSON.stringify({ sessions: [row()], bus: { health: 'available', messages: [{ id: 1, from: row().id, to: 'external' }] } }) + '\n');
+  assert.deepEqual(relayHosts.snapshot().sources.r.mail, { mode: 'relay', observed: 'none', lastRelayedAt: null });
+  relayHosts.close();
 
   // ── Remote stream side: one line per tick, written and awaited before the next is scheduled; stop is final.
   const writes = [], ticks = fakeTimers();
@@ -172,32 +208,55 @@ function fakeTimers() {
   for (const platform of multi.platforms.filter(p => p.host === 'vm')) assert.ok(inside(platform.rect, vmShip.rect), 'remote rooms sit inside their hull');
   for (const platform of multi.platforms.filter(p => !p.host)) assert.ok(inside(platform.rect, multi.ships[0].rect), 'local rooms sit inside the flagship');
   assert.ok(!overlaps(vmShip.rect, multi.ships[0].rect) && !overlaps(emptyShip.rect, vmShip.rect) && !overlaps(emptyShip.rect, multi.ships[0].rect), 'ships do not overlap');
-  assert.ok(vmShip.rect.y >= multi.ships[0].rect.y + multi.ships[0].rect.h && emptyShip.rect.y >= vmShip.rect.y + vmShip.rect.h, 'remote ships dock in a line below the flagship');
-  assert.ok(emptyShip.rect.w > 0 && emptyShip.rect.w <= 10 && emptyShip.rect.h <= 10, 'an empty host gets a compact hull just around its dock');
+  assert.ok(vmShip.rect.y >= multi.ships[0].rect.y + multi.ships[0].rect.h && emptyShip.rect.y >= vmShip.rect.y + vmShip.rect.h, 'remote ships sit in a line below the flagship');
   const flag = multi.ships[0].rect;
   assert.ok(vmShip.rect.y - (flag.y + flag.h) >= 8 && emptyShip.rect.y - (vmShip.rect.y + vmShip.rect.h) >= 8, 'a clear gap between hulls');
-  for (const ship of [vmShip, emptyShip]) assert.equal(ship.dock.y, ship.rect.y + 2, 'the dock sits on the hull edge nearest the mailroom');
+  // Each remote ship has its own mailroom on its top edge; an empty host's hull wraps just that mailroom.
+  for (const ship of [vmShip, emptyShip]) {
+    assert.ok(ship.mail && ship.mail !== multi.mail, 'a remote ship has its own mailroom');
+    assert.equal(ship.mail.rect.y, ship.rect.y + 2, 'on the hull edge nearest the flagship'); assert.ok(inside(ship.mail.rect, ship.rect));
+    assert.ok(inside({ x: ship.mail.hub.x, y: ship.mail.hub.y, w: 0, h: 0 }, ship.mail.rect) && ship.mail.pads.length === 3 && ship.mail.pod.length && ship.mail.chute.length, 'same mailroom furniture');
+  }
+  assert.ok(emptyShip.rect.w <= 18 && emptyShip.rect.h <= 16, 'an empty host gets a compact hull around its mailroom');
   const vmRooms = multi.platforms.filter(p => p.host === 'vm');
-  assert.ok(vmRooms.some(p => p.rect.y === vmShip.dock.y), 'rooms start right beside the dock');
-  const extent = [vmShip.dock, ...vmRooms.map(p => p.rect)], bottom = Math.max(...extent.map(r => r.y + r.h));
+  assert.ok(vmRooms.every(p => !overlaps(p.rect, vmShip.mail.rect)) && vmRooms.some(p => p.rect.y === vmShip.mail.rect.y), 'rooms flank the mailroom');
+  const extent = [vmShip.mail.rect, ...vmRooms.map(p => p.rect)], bottom = Math.max(...extent.map(r => r.y + r.h));
   assert.ok(vmShip.rect.y + vmShip.rect.h - bottom <= 6, 'the hull wraps its rooms tightly');
-  // Bridges: one per remote ship, a chain up the mailroom corridor, crossing no room.
-  assert.equal(single.bridges, undefined, 'no remotes → no bridges');
-  assert.equal(multi.bridges.length, 2);
-  const [toVm, toEmpty] = multi.bridges;
-  assert.deepEqual([toVm.host, toVm.health, toEmpty.host, toEmpty.health], ['vm', 'stale', 'empty', 'unavailable']);
-  assert.deepEqual(toVm.from, { x: 7, y: multi.mail.rect.y + multi.mail.rect.h }, 'the first bridge leaves the mailroom');
-  assert.deepEqual(toVm.to, { x: 7, y: vmShip.dock.y }, 'and reaches the first dock');
-  assert.deepEqual(toEmpty.from, { x: 7, y: vmShip.rect.y + vmShip.rect.h }, 'the next leaves the bottom of the ship above');
-  assert.ok(toVm.to.y - flag.y - flag.h <= 14, 'the bridge spans the gap directly, not across an empty hull');
-  assert.deepEqual(toEmpty.to, { x: 7, y: emptyShip.dock.y });
-  for (const bridge of multi.bridges) for (const platform of multi.platforms) assert.ok(!overlaps(bridge.rect, platform.rect), 'a bridge crosses no room');
-  const remoteWorker = multi.workers.find(worker => worker.row.host === 'vm');
-  assert.deepEqual(remoteWorker.route.at(-1), multi.mail.hub, 'remote crew route over the bridge to the mailroom');
-  assert.deepEqual(remoteWorker.route.at(-2), { x: 7, y: vmShip.dock.y + 2, z: 0 }, 'by way of their own dock');
+  // No physical connection between ships: no bridges, and every remote walk/courier path stays inside its own ship.
+  assert.equal(multi.bridges, undefined, 'no bridge implies a mail path that does not exist');
+  for (const worker of multi.workers.filter(worker => worker.row.host)) {
+    const ship = multi.ships.find(value => value.id === worker.row.host);
+    assert.deepEqual(worker.route.at(-1), ship.mail.hub, 'remote crew end at their own mailroom');
+    for (const point of worker.route) assert.ok(inside({ x: point.x, y: point.y, w: 0, h: 0 }, ship.rect), 'every route point stays inside its own ship');
+  }
+  const remoteWorker = multi.workers.find(worker => worker.row.host === 'vm'), localWorker = multi.workers.find(worker => !worker.row.host);
+  // Courier routes: a remote host's message routes only within that host's ship, even if it names a row of another host.
+  const fakeLayout = { seatFor: id => (multi.workers.some(w => w.id === id) ? 0 : undefined), pageFor: () => 0, colorFor: () => ({ accent: '#fff' }) };
+  const remoteRoute = Scene.route(multi, fakeLayout, { from: remoteWorker.id, to: 'external' }, [], 'vm');
+  for (const point of [...remoteRoute.from, ...remoteRoute.to]) assert.ok(inside({ x: point.x, y: point.y, w: 0, h: 0 }, vmShip.rect), 'remote courier stays on its ship');
+  const crossed = Scene.route(multi, fakeLayout, { from: localWorker.id, to: remoteWorker.id }, [], 'vm');
+  for (const point of [...crossed.from, ...crossed.to]) assert.ok(inside({ x: point.x, y: point.y, w: 0, h: 0 }, vmShip.rect), 'a local row named in remote mail never pulls a courier off the ship');
+  const localRoute = Scene.route(multi, fakeLayout, { from: localWorker.id, to: 'external' }, []);
+  for (const point of [...localRoute.from, ...localRoute.to]) assert.ok(inside({ x: point.x, y: point.y, w: 0, h: 0 }, flag), 'local couriers stay on the flagship');
+  assert.ok(Scene.pending(multi, fakeLayout, [{ to: 'external', acknowledgedAt: null }], 'vm').every(spot => inside({ x: spot.point.x, y: spot.point.y, w: 0, h: 0 }, vmShip.mail.rect)), 'remote pending mail rests in its own mailroom');
+  // Observation links: one per remote, hull to hull across the gap, state = stream health; absent without remotes.
+  assert.equal(single.links, undefined); assert.equal(single.relays, undefined);
+  assert.deepEqual(multi.links.map(link => [link.host, link.health]), [['vm', 'stale'], ['empty', 'unavailable']], 'link state is the real stream health');
+  assert.equal(multi.links[0].from.y, flag.y + flag.h); assert.equal(multi.links[0].to.y, vmShip.rect.y);
+  assert.equal(multi.links[1].from.y, vmShip.rect.y + vmShip.rect.h); assert.equal(multi.links[1].to.y, emptyShip.rect.y);
+  assert.deepEqual(multi.relays, [], 'mail "separate" (default): no mail link at all');
+  // Relay mode: configured but unobserved → only a broken "configured" line; observed → active. Config alone never activates it.
+  const relayed = mail => Scene.build(rooms, 0, { hosts: [{ id: 'vm', health: 'available', agents: 2, mail }] });
+  assert.deepEqual(relayed({ mode: 'relay', observed: 'none', lastRelayedAt: null }).relays.map(relay => relay.state), ['configured']);
+  assert.deepEqual(relayed({ mode: 'relay', observed: 'active', lastRelayedAt: 5 }).relays.map(relay => relay.state), ['active']);
+  assert.deepEqual(relayed({ mode: 'relay' }).relays.map(relay => relay.state), ['configured'], 'relay without an observation is never active');
+  assert.deepEqual(relayed({ mode: 'separate', observed: 'active' }).relays, [], 'separate never draws a mail link');
+  assert.equal(Scene.build(rooms, 0, { hosts: [{ id: 'vm', health: 'available', agents: 2, mail: { mode: 'relay', observed: 'none' } }] }).links[0].health, 'available', 'the observation link follows stream health, not config');
+  const relay = relayed({ mode: 'relay', observed: 'none' }).relays[0], relayShip = relayed({ mode: 'relay', observed: 'none' }).ships[1];
+  assert.equal(relay.from.y, multi.mail.rect.y + multi.mail.rect.h); assert.equal(relay.to.y, relayShip.mail.rect.y, 'a relay line runs mailroom to mailroom');
   assert.ok(multi.bounds.maxY > single.bounds.maxY, 'the camera fits every ship');
   const localCrew = multi.workers.find(worker => !worker.row.host), alone = single.workers.find(worker => worker.id === localCrew.id);
   assert.deepEqual(localCrew.route, alone.route, 'local crew routes are unchanged by remotes');
   assert.notEqual(multi.revision, Scene.build(rooms, 0, { hosts: [{ id: 'vm', health: 'available', agents: 2 }, { id: 'empty', health: 'unavailable', agents: 0 }] }).revision, 'host health is part of the scene revision');
-  console.log('observer remotes: fixed ssh argv, option-injection refusal, sanitised host-scoped rows/ids/panes, partial/garbage/oversized/unterminated lines, stale truth, backoff, cache-only federation, remote inspect, local bus, stream flush ordering, per-host room slots, stacked ship hulls and mailroom bridges OK');
+  console.log('observer remotes: fixed ssh argv, option-injection refusal, sanitised host-scoped rows/ids/panes, partial/garbage/oversized/unterminated lines, stale truth, backoff, cache-only federation, remote inspect, local bus, stream flush ordering, per-host room slots, stacked ships with own mailrooms, no cross-ship paths, observation links and relay states OK');
 })().catch(error => { console.error(error); process.exit(1); });

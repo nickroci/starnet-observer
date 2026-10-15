@@ -203,24 +203,30 @@ Agents on other machines (for example a VPS running Herdr) can appear as their o
 station. Install the observer on each remote as usual, then list the remotes in `observer.config.json`:
 
 ```json
-{ "remotes": [{ "id": "vm1", "ssh": "nick@203.0.113.10", "dir": "~/starnet-observer" }] }
+{ "remotes": [{ "id": "vm1", "ssh": "nick@203.0.113.10", "dir": "~/starnet-observer", "mail": "separate" }] }
 ```
 
 The hub keeps one `ssh -o BatchMode=yes` stream per remote running `bun --no-env-file scripts/stream.js`, which prints
-one snapshot per line and opens no port. Key authentication must already work non-interactively. Remote rows are
-sanitised and re-identified per host, remote ships dim with "last seen" when their stream goes quiet, transcript
-inspection never reaches a remote, and llm-bus mail is shown for this machine only.
+one snapshot per line and opens no port. Key authentication must already work non-interactively. Remote rows and mail
+are sanitised and re-identified per host, remote ships dim with "last seen" when their stream goes quiet, and
+transcript or message inspection never reaches a remote.
+
+llm-bus is per host, so each remote ship has its own mailroom showing that host's own bus; its couriers and crew stay
+on their own ship, and the Live sessions mailroom section lists the selected host's mail. Remote messages keep their
+host's numeric id and also carry a hub-wide `key` (`5@vm1`). The ships are joined only by a dashed "ssh · observing"
+line: the hub's observation stream, coloured by its real health, never a mail path. `mail` is `"separate"` (default,
+no mail link) or `"relay"`: a relay between buses is expected, but until relayed traffic is actually observed the page
+draws only a broken "relay configured · not seen" line between the mailrooms (nothing relays today).
 
 With `OBSERVER_CONTROL=1`, control actions also work on remote agents: `⇱`, `✕` and the project `+` run `herdr` on
 that host over the same non-interactive ssh (every argument validated and single-quoted; hosts not listed in
 `remotes` are refused), and attaching opens a Terminal running `ssh -t <host> 'herdr agent attach <pane> --takeover'`.
-Remote ships dock in a line below this machine's station, each joined to the mailroom by a bridge that is lit while
-the host is reachable and dark when it is not; remote crew route over it. Clicking a ship (or a host tab above the
-Live sessions list) switches the list to that host's crew. On a remote host the list starts with a "New agent in ~"
-row whose `+` starts Claude in that host's home folder, even on a host with no agents yet, reusing the Herdr
-workspace named after the folder or creating it. Starting an agent never opens a terminal: the new agent is selected
-when it appears. An agent waiting for input (for example Claude's "trust this folder" dialog) shows a "!" badge on
-the station and "waiting for input" in its row; press `⇱` to attach and answer it.
+Remote ships sit in a line below this machine's station. Clicking a ship (or a host tab above the Live sessions list)
+switches the list to that host's crew; the chosen tab is remembered across reloads. On a remote host the list starts
+with a "New agent in ~" row whose `+` starts Claude in that host's home folder, even on a host with no agents yet,
+reusing the Herdr workspace named after the folder or creating it. Starting an agent never opens a terminal: the new
+agent is selected when it appears. An agent waiting for input (for example Claude's "trust this folder" dialog) shows
+a "!" badge on the station and "waiting for input" in its row; press `⇱` to attach and answer it.
 
 ## Privacy and limits
 

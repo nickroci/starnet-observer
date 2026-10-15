@@ -260,23 +260,6 @@ const ObserverView = (() => {
     ctx.save(); ctx.globalAlpha = ship.local ? (live ? 0.7 : 0.4) : 0.9; ctx.setLineDash([6, 5]); ctx.lineWidth = ship.local ? 1.5 : 2.5;
     poly(ctx, rectPoly(r, -2.4), null, rim); ctx.restore();
     if (!ship.local) { ctx.save(); ctx.globalAlpha = 0.55; ctx.lineWidth = 1.5; poly(ctx, rectPoly(r, 0), null, rim); ctx.restore(); }
-    if (ship.dock) {
-      box(ctx, ship.dock, 0.3, { top: '#232a31', left: '#0d1013', right: '#151a1f' });
-      isoEllipse(ctx, { x: ship.dock.x + ship.dock.w / 2, y: ship.dock.y + ship.dock.h / 2, z: 0.32 }, 0.8, rim, null, 2);
-    }
-  }
-  /* A docking bridge between ships: the station's grate walkway on a deeper truss, with side light strips that are
-     lit amber while the far ship is reachable and dark and dashed while it is stale or unreachable. The running
-     lights that travel along it are painted per frame (paintBridgeLights). */
-  function paintBridge(ctx, bridge) {
-    const r = bridge.rect; if (!(r.h > 0)) return;
-    const live = bridge.health === 'available';
-    prism(ctx, corners(r), -0.35, -1.6, { top: '#0c0f12', left: '#080a0c', right: '#0e1114' });
-    paintWalkway(ctx, { kind: 'bridge', rect: r });
-    for (let y = r.y + 1; y < r.y + r.h; y += 3) for (const x of [r.x, r.x + r.w]) line(ctx, { x, y, z: 0 }, { x, y: y + 1.5, z: -1.6 }, '#1a2026', 1, 0.8);
-    ctx.save(); ctx.lineWidth = 2; ctx.globalAlpha = live ? 0.85 : 0.45; if (!live) ctx.setLineDash([4, 4]);
-    for (const x of [r.x, r.x + r.w]) line(ctx, { x, y: r.y, z: 0.32 }, { x, y: r.y + r.h, z: 0.32 }, live ? PALETTE.amber : HULL_DOWN, 2);
-    ctx.restore();
   }
   function paintStatic(ctx, scene) {
     const hub = scene.mail.rect;
@@ -289,7 +272,8 @@ const ObserverView = (() => {
         return { key: center(rect).x + center(rect).y + (walkway.kind === 'connector' ? 40 : 0), paint: () => rect.w > 0 && paintWalkway(ctx, { ...walkway, rect }) };
       }),
       { key: center(hub).x + center(hub).y + 0.01, paint: () => paintHub(ctx, scene.mail) },
-      ...(scene.bridges || []).map(bridge => ({ key: center(bridge.rect).x + center(bridge.rect).y, paint: () => paintBridge(ctx, bridge) })),
+      // Each remote ship's own mailroom: the same furniture, showing only that host's llm-bus.
+      ...(scene.ships || []).filter(ship => !ship.local && ship.mail).map(ship => ({ key: center(ship.mail.rect).x + center(ship.mail.rect).y + 0.01, paint: () => paintHub(ctx, ship.mail) })),
       ...(scene.observatory ? [{ key: middle(scene.observatory.rect), paint: () => paintObservatoryDeck(ctx, scene.observatory) }] : [])
     ].sort((a, b) => a.key - b.key);
     for (const piece of pieces) piece.paint();
@@ -763,21 +747,28 @@ const ObserverView = (() => {
       if (animate) { paintShootingStars(now); paintShuttle(now); }
     }
 
-    /* Bridge running lights: pulses travel from the far dock toward the mailroom while the host is reachable (the
-       direction mail and crew take); a dead link shows a single dim, still lamp at each end. FX adds sparks. */
-    function paintBridgeLights(bridge, now, animate) {
-      const r = bridge.rect; if (!(r.h > 0)) return;
-      if (bridge.health !== 'available') {
-        for (const y of [r.y + 0.5, r.y + r.h - 0.5]) isoEllipse(ctx, { x: r.x + r.w / 2, y, z: 0.35 }, 0.12, null, HULL_DOWN);
-        return;
-      }
-      const spacing = 6, phase = animate ? (now / 900) % 1 : 0.4;
-      for (let k = 0; k * spacing < r.h + spacing; k++) {
-        const y = r.y + r.h - ((k + phase) * spacing) % (r.h + 0.001); if (y < r.y || y > r.y + r.h) continue;
-        for (const x of [r.x, r.x + r.w]) glow(ctx, { x, y, z: 0.4 }, 10, PALETTE.amber, 0.55);
-        isoEllipse(ctx, { x: r.x + r.w / 2, y, z: 0.36 }, 0.1, null, PALETTE.window);
-      }
-      if (fx && animate) for (const end of [bridge.from, bridge.to]) { const a = P({ x: end.x, y: end.y, z: 0.5 }); sparks(a.x, a.y, 'bridge' + bridge.host + end.y, now, { count: 6, color: PALETTE.amber, alt: '#ffffff', rise: 22, spread: 18, life: 1300, size: 2 }); }
+    /* Observation link: the hub's ssh stream to a remote host, drawn as a floating dashed telemetry beam between the
+       hulls, well above deck height so it never reads as a walkway. Its state is the stream's real health: marching
+       cyan dashes while available, still grey dashes when stale or unreachable. Nothing ever travels along it. */
+    function paintObservation(link, now, animate) {
+      const live = link.health === 'available', color = live ? PALETTE.cyan : HULL_DOWN;
+      const a = P({ ...link.from, z: 2.2 }), b = P({ ...link.to, z: 2.2 });
+      ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = live ? 1.6 : 1.2; ctx.globalAlpha = live ? 0.85 : 0.45;
+      ctx.setLineDash([3, 5]); ctx.lineDashOffset = live && animate ? -(now / 60) % 8 : 0;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+      for (const end of [a, b]) { ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(end.x, end.y - 4); ctx.lineTo(end.x + 4, end.y); ctx.lineTo(end.x, end.y + 4); ctx.lineTo(end.x - 4, end.y); ctx.closePath(); ctx.fill(); }
+      if (live) glow(ctx, { ...link.to, z: 2.2 }, 14, PALETTE.cyan, animate ? 0.3 + 0.25 * Math.sin(now / 600) : 0.4);
+      ctx.restore();
+    }
+    /* Relay line (config mail: "relay"): mailroom to mailroom. Configured but never observed, it is a broken amber dash
+       ("relay configured · not seen"); only observed relayed traffic makes it a solid mail link. */
+    function paintRelay(relay, now, animate) {
+      const active = relay.state === 'active', a = P({ ...relay.from, z: 0.6 }), b = P({ ...relay.to, z: 0.6 });
+      ctx.save(); ctx.strokeStyle = PALETTE.amber;
+      if (active) { ctx.lineWidth = 3; ctx.globalAlpha = 0.9; }
+      else { ctx.lineWidth = 1.5; ctx.globalAlpha = 0.55; ctx.setLineDash([2, 9]); }
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.restore();
+      void now; void animate;
     }
     // ---------- FX: glow and sparks on the station itself (world space, deterministic) ----------
     // A burst of rising pixel sparks around a screen point. Each spark loops on its own phase so there is no state.
@@ -1106,10 +1097,10 @@ const ObserverView = (() => {
         }
       }
       for (const ship of scene.ships || []) {
-        /* A remote ship's label sits on its top edge at the dock (the bridge end), lifted clear of the room signs; it
-           outranks them, and while any part of the hull is on screen it is clamped into view rather than dropped. */
+        /* A remote ship's label sits just above its hull's top corner, clear of the room signs; it outranks them, and
+           while any part of the hull is on screen it is clamped into view rather than dropped. */
         const r = ship.rect, live = shipLive(ship);
-        const at = ship.local ? screen({ x: r.x + r.w / 2, y: r.y, z: 4 }) : screen({ x: ship.dock.x + ship.dock.w / 2, y: r.y, z: 3.2 });
+        const at = ship.local ? screen({ x: r.x + r.w / 2, y: r.y, z: 4 }) : screen({ x: r.x, y: r.y, z: 0 });
         const hull = [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]].map(([x, y]) => screen({ x, y, z: 0 }));
         const hullOnScreen = Math.max(...hull.map(p => p.x)) > 0 && Math.min(...hull.map(p => p.x)) < viewport.width && Math.max(...hull.map(p => p.y)) > 0 && Math.min(...hull.map(p => p.y)) < viewport.height;
         const seen = !live && ship.observedAt ? ' · last seen ' + Model.age(ship.observedAt) : '';
@@ -1117,10 +1108,24 @@ const ObserverView = (() => {
           (live ? '' : ship.health === 'stale' ? ' · STALE' + seen : ' · ' + (ship.reason || 'unreachable'));
         const color = ship.local ? PALETTE.cyan : live ? PALETTE.amber : HULL_DOWN;
         const plate = textPlate(clipText(label, viewport.width * 0.5, signSize(20)), at.x, at.y - (ship.local ? 0 : 10), { accent: color, size: signSize(20), color, priority: ship.local ? 48 : 58, dash: live ? null : [3, 3], force: !ship.local && hullOnScreen });
-        // Remote: the plate starts at the dock and extends right, away from the room signs that sit left of the dock.
-        if (!ship.local) plate.x = Math.round(at.x - 10);
         plates.push({ ...plate,
           ...(onShip ? { ship: { host: ship.local ? null : ship.id } } : {}) });
+        // A remote mailroom names its host once zoomed in; at overview the narrow gap belongs to the link label.
+        if (!ship.local && ship.mail && tier !== 'overview') {
+          const tower = ship.mail.tower, mailAt = screen({ x: tower.x + tower.w / 2, y: tower.y + tower.h / 2, z: 3.4 });
+          plates.push(textPlate('MAILROOM · ' + String(ship.id), mailAt.x, mailAt.y, { accent: PALETTE.amber, size: signSize(16), color: PALETTE.window, priority: 44 }));
+        }
+      }
+      // Link labels: the observation link says what it is (and its real state); a relay says whether it was ever seen.
+      for (const link of scene.links || []) {
+        const mid = screen({ x: link.from.x, y: (link.from.y + link.to.y) / 2, z: 2.2 }), live = link.health === 'available';
+        plates.push(textPlate(live ? 'ssh · observing' : link.health === 'stale' ? 'ssh · stale' : 'ssh · unreachable', mid.x, mid.y - 4,
+          { accent: live ? PALETTE.cyan : HULL_DOWN, size: 12, color: live ? PALETTE.cyan : HULL_DOWN, priority: 46, dash: [2, 2] }));
+      }
+      for (const relay of scene.relays || []) {
+        // Labelled where it leaves this machine's mailroom, clear of the gap the observation link labels use.
+        const start = screen({ x: relay.from.x, y: relay.from.y + 4, z: 0.6 });
+        plates.push(textPlate(relay.state === 'active' ? 'relay · mail' : 'relay configured · not seen', start.x, start.y, { accent: PALETTE.amber, size: 12, color: PALETTE.amber, priority: 45, dash: relay.state === 'active' ? null : [3, 3] }));
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
       plates.push(textPlate('MAILROOM · llm-bus', hubAt.x, hubAt.y, { accent: PALETTE.amber, size: signSize(18), color: PALETTE.window, priority: 45 }));
@@ -1204,7 +1209,8 @@ const ObserverView = (() => {
       ctx.strokeStyle = PALETTE.rail; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(at.x, at.y); ctx.lineTo(at.x, at.y - 14); ctx.stroke(); ctx.lineWidth = 1;
       ctx.fillStyle = '#3a444e'; ctx.beginPath(); ctx.ellipse(at.x, at.y - 16, 14 * Math.abs(Math.cos(sweep)) + 3, 6, 0, 0, Math.PI * 2); ctx.fill();
       glow(ctx, { ...top, z: 3.9 }, 22, PALETTE.amber, animate ? 0.35 + 0.3 * Math.max(0, Math.sin(now / 4000 * Math.PI * 2)) : 0.35);
-      for (const bridge of scene.bridges || []) paintBridgeLights(bridge, now, animate);
+      for (const relay of scene.relays || []) paintRelay(relay, now, animate);
+      for (const link of scene.links || []) paintObservation(link, now, animate);
       // Depth-sorted solid furniture, apron posts and crew. Wholly offscreen furniture is never submitted; every crew
       // body is submitted so its sprite state advances, and the shared sprite seam skips its pixels when off stage.
       const items = [], zoom = camera.zoom;

@@ -22,7 +22,9 @@
   // Visibility: a hidden page owns no subscription, deadline or frame; resume proves freshness before inspection.
   let active = false, unsubscribe = null, resumedAt = 0, awaitingProof = false, cachedAtResume = null;
   const rowFor = id => byId.get(id);
-  const messageFor = id => (latest?.data?.bus?.messages || []).find(value => value.id === id);
+  // The mail panel lists the selected host's own bus (this machine's unless a remote host tab is chosen).
+  const panelBus = () => (selectedHost && latest?.data?.hostBus?.[selectedHost]) || (selectedHost ? null : latest?.data?.bus) || null;
+  const messageFor = id => (panelBus()?.messages || []).find(value => value.id === id);
   const FRESH_MS = 6000, fresh = at => Number.isFinite(at) && Date.now() - at <= FRESH_MS;
   // Inventory older than six seconds is stale even while a GET is still pending: the view asks on every paint.
   // Overall freshness means at least one source refreshed; it never makes another source's rows live.
@@ -47,6 +49,11 @@
   /* Multi-host: the panel lists one host's crew at a time (null = this machine). Chosen by a host tab, a ship click
      or selecting an agent; only meaningful when the hub reports remote hosts. */
   let selectedHost = null, hostList = [], pendingSpawn = null;
+  /* The chosen host tab survives a reload: only its id is stored (localStorage key observer.host), read once, and
+     honoured only if the hub still reports that host; storage failures are ignored. */
+  const HOST_KEY = 'observer.host';
+  let restoreHost = (() => { try { const value = window.localStorage?.getItem(HOST_KEY); return typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,31}$/.test(value) ? value : null; } catch (_) { return null; } })();
+  function rememberHost(host) { try { if (host) window.localStorage?.setItem(HOST_KEY, host); else window.localStorage?.removeItem(HOST_KEY); } catch (_) { /* private mode or blocked storage */ } }
   function toggleRepository(repoId) {
     if (typeof repoId !== 'string' || !(latest?.data?.sessions || []).some(row => row.repoId === repoId)) return;
     selectedRepoId = selectedRepoId === repoId ? null : repoId;
@@ -64,25 +71,36 @@
     idleVigour: id => { const row = rowFor(id); return row ? ObserverModel.idleAge(row).vigour : 1; },
     nameFor: id => { const row = rowFor(id); return row ? workerName(row) : ''; },
     onCamera: ({ canZoomIn, canZoomOut }) => { get('zoom-in').disabled = !canZoomIn; get('zoom-out').disabled = !canZoomOut; } });
-  /* One courier, stepped by the view's frame. A transition into stale or reduced grounds flights at once; the
-     reset makes the next live snapshot rebase instead of replaying what was missed. */
+  /* One courier per host's bus, stepped by the view's frame: this machine's, plus one for each remote ship, whose
+     flights stay inside that ship (its own mailroom and crew). A transition into stale or reduced grounds flights at
+     once; the reset makes the next live snapshot rebase instead of replaying what was missed. */
+  const remoteCouriers = new Map(), remotePending = new Map();
+  const courierFor = host => { if (!remoteCouriers.has(host)) remoteCouriers.set(host, ObserverMail.createCourier()); return remoteCouriers.get(host); };
+  const resetCouriers = () => { courier.reset(); for (const value of remoteCouriers.values()) value.reset(); };
   function mailFrame(now) {
     const ground = mailStale(latest) || reducedMotion();
-    if (ground && !grounded) courier.reset();
+    if (ground && !grounded) resetCouriers();
     grounded = ground;
     courier.step(now);
-    return courier.frame(now, { reduced: ground, pending: pendingSpots, pads: scene ? scene.mail.pads : [] });
+    const frame = courier.frame(now, { reduced: ground, pending: pendingSpots, pads: scene ? scene.mail.pads : [] });
+    for (const [host, remote] of remoteCouriers) {
+      const own = scene && ObserverScene.mailOf(scene, host); if (!own) continue;
+      remote.step(now);
+      const extra = remote.frame(now, { reduced: ground, pending: remotePending.get(host) || [], pads: own.pads });
+      frame.drones = [...(frame.drones || []), ...(extra.drones || [])]; frame.envelopes = [...(frame.envelopes || []), ...(extra.envelopes || [])];
+    }
+    return frame;
   }
 
   function setPage(next) {
     if (next === page) return;
-    page = next; courier.reset();
+    page = next; resetCouriers();
   }
   function select(id, scroll = false) {
     if (!byId.has(id)) return;
     selected = id;
     const row = byId.get(id);
-    if (hostList.length && (row.host || null) !== selectedHost) selectedHost = row.host || null;
+    if (hostList.length && (row.host || null) !== selectedHost) { selectedHost = row.host || null; rememberHost(selectedHost); }
     const target = layout.pageFor(id); if (Number.isInteger(target)) setPage(target);   // the overseer sits on every page
     render(latest, true);
     view.focus(id);
@@ -368,9 +386,9 @@
     entry = { item, button, route, state, read }; mailRows.set(id, entry);
     return entry;
   }
-  function renderMail(bus) {
+  function renderMail(bus, mailCourier = courier) {
     const messages = bus && Array.isArray(bus.messages) ? bus.messages : [], limit = bus?.window || 100;
-    const pending = messages.filter(message => !message.acknowledgedAt).length, skipped = courier.state().skipped;
+    const pending = messages.filter(message => !message.acknowledgedAt).length, skipped = mailCourier.state().skipped;
     setText(get('mail-health'), busHealth(bus));
     setText(get('mail-counts'), bus ? pending + ' pending · ' + (messages.length - pending) + ' acknowledged · in recent ' + limit +
       (skipped ? ' · ' + skipped + ' shown without animation' : '') : '');
@@ -429,7 +447,7 @@
     if (!hostList.length) return;
     const next = host && hostList.some(entry => entry.id === host) ? host : null;
     if (next === selectedHost) return;
-    selectedHost = next; selectedRepoId = null;
+    selectedHost = next; selectedRepoId = null; mailSelected = null; rememberHost(next);
     if (selected && (byId.get(selected)?.host || null) !== next) selected = null;
     if (latest) render(latest, true);
   }
@@ -690,7 +708,7 @@
 
   /* Health, freshness and ages follow every notification; content work follows changed content or an explicit
      view change. QuerySpine re-notifies the old data while a request is pending: that is metadata only. */
-  let sceneKey = null, contentKey = null, deadline = null, mailProof = null;
+  let sceneKey = null, contentKey = null, deadline = null, mailProof = null, ingestedHosts = null;
   const DESKTOP_REASONS = { 'permission-denied': 'accessibility permission is not granted to the observer reader', 'native-reader-building': 'the native reader is still starting',
     'native-reader-unavailable': 'the native reader is unavailable', 'unsupported-platform': 'not supported on this system', 'not-observed': 'not read yet' };
   function header(state, stale) {
@@ -792,8 +810,10 @@
     // Remote hosts (multi-host hub only): one ship each, in a stable order; health and last-seen come from the hub.
     const hostSources = data?.sources?.hosts || null;
     const hosts = hostSources ? Object.keys(hostSources).filter(id => id !== 'local').sort().map(id => ({ id, health: hostSources[id].health,
-      observedAt: hostSources[id].observedAt ?? null, reason: hostSources[id].reason || null, agents: hostSources[id].agents ?? 0 })) : [];
+      observedAt: hostSources[id].observedAt ?? null, reason: hostSources[id].reason || null, agents: hostSources[id].agents ?? 0, mail: hostSources[id].mail || null })) : [];
     hostList = hosts;
+    // The first roster that lists hosts decides a remembered tab: kept if that host is present, else this machine.
+    if (restoreHost !== null && hosts.length) { if (hosts.some(host => host.id === restoreHost)) selectedHost = restoreHost; restoreHost = null; }
     if (selectedHost !== null && !hosts.some(host => host.id === selectedHost)) selectedHost = null;
     // A just-spawned agent is selected once it appears in the roster.
     if (pendingSpawn) {
@@ -811,7 +831,8 @@
     const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider], ...(hosts.length ? [hosts.map(host => [host.id, host.health, host.agents, host.reason, host.health === 'available' ? null : Math.floor((clock() - (host.observedAt || 0)) / 60000)])] : [])], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
     const bus = data?.bus || null, messages = Array.isArray(bus?.messages) ? bus.messages : [];
     // Hover text, plates and pending envelopes read rows and bus live; a frozen floor repaints only when they change.
-    const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages]]);
+    const hostBus = data?.hostBus || {};
+    const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages], Object.entries(hostBus).map(([id, value]) => [id, value.health, value.messages])]);
     if (key !== sceneKey || !scene) {
       sceneKey = key; scene = ObserverScene.build(rooms, page, hosts.length ? { overseer: overseerRow, hosts, localHealth: hostSources.local?.health } : { overseer: overseerRow });
       // Row freshness is read from the current roster by id: the cached scene's row objects can be older.
@@ -825,6 +846,14 @@
     const parked = mailStale(state);
     if (data && (data !== ingested || parked !== ingestedStale)) { ingested = data; ingestedStale = parked; courier.update(bus, { now: clock(), deck: page, reduced: reducedMotion(), live: !parked, route: message => ObserverScene.route(scene, layout, message, rows) }); }
     pendingSpots = ObserverScene.pending(scene, layout, messages);
+    // Each remote host's own mail: its courier and pending envelopes stay on its own ship.
+    for (const id of [...remoteCouriers.keys()]) if (!hostBus[id]) { remoteCouriers.delete(id); remotePending.delete(id); }
+    for (const [id, value] of Object.entries(hostBus)) {
+      const list = Array.isArray(value.messages) ? value.messages : [];
+      if (data !== ingestedHosts) courierFor(id).update(value, { now: clock(), deck: page, reduced: reducedMotion(), live: !isStale(state) && value.health === 'available', route: message => ObserverScene.route(scene, layout, message, rows, id) });
+      remotePending.set(id, ObserverScene.pending(scene, layout, list, id));
+    }
+    ingestedHosts = data;
     setText(get('page-label'), 'Deck ' + (page + 1) + (layout.pages() > 1 ? ' / ' + layout.pages() : ''));
     get('previous-page').disabled = page === 0; get('next-page').disabled = page + 1 >= layout.pages();
     const projects = new Set(rows.map(ObserverModel.projectKey));
@@ -834,9 +863,10 @@
     const working = current.filter(row => row.status === 'working').length, blocked = current.filter(row => row.status === 'blocked').length;
     setText(get('counts'), (stale ? 'Last known: ' : '') + working + ' working · ' + blocked + ' waiting · ' + panelRows.length + ' total' + (behind ? ' · ' + behind + ' last known' : ''));
     renderHosts(hosts, hostSources, rows, panelRows);
-    renderMail(bus);
-    // Mail is read from this machine's bus only (remote mail is later work): say so while a remote host is listed.
-    if (hosts.length) setText(get('mail-title'), 'Mailroom · recent ' + (Number.isInteger(bus?.window) ? bus.window : 100) + (selectedHost ? ' · this machine' : ''));
+    // The mailroom section lists the selected host's own bus; with remotes, the title names whose it is.
+    const shownBus = hosts.length && selectedHost ? hostBus[selectedHost] || null : bus;
+    renderMail(shownBus, hosts.length && selectedHost ? courierFor(selectedHost) : courier);
+    if (hosts.length) setText(get('mail-title'), 'Mailroom · ' + (selectedHost || 'this machine') + ' · recent ' + (Number.isInteger(shownBus?.window) ? shownBus.window : 100));
     renderSessions(panelRows, stale, messages, bus);
     if (hosts.length && !panelRows.length && !stale) setText(get('empty'), 'No sessions on ' + (selectedHost || 'this machine') + '.');
     for (const entry of panels) if (entry.target.kind === 'agent') entry.view.roster();
@@ -851,7 +881,7 @@
     // A tab loaded or restored in the background acquires nothing until it is actually shown.
     if (active || document.hidden) return;
     active = true; resumedAt = Date.now(); awaitingProof = panels.some(entry => entry.target.kind === 'agent'); cachedAtResume = latest?.data;
-    courier.reset(); ingested = null;
+    resetCouriers(); ingested = null; ingestedHosts = null;
     unsubscribe = QuerySpine.subscribe('observer.sessions', snapshot => render(snapshot), { immediate: false, refresh: false });
     Promise.resolve(QuerySpine.invalidate('observer.sessions', { refresh: true })).catch(() => {});
     view.start();

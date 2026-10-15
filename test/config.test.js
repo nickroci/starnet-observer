@@ -66,8 +66,10 @@ try {
   validateConfig(example);
   // Remotes: validated ids, ssh targets that can never be read as ssh options, plain dirs, defaults.
   assert.deepEqual(loadConfig([], missing).remotes, []);
-  write({ remotes: [{ id: 'herdr-dev-2', ssh: 'nick@34.153.167.160' }, { id: 'box', ssh: 'devbox', dir: '/srv/observer' }] });
-  assert.deepEqual(loadConfig([], file).remotes, [{ id: 'herdr-dev-2', ssh: 'nick@34.153.167.160', dir: '~/starnet-observer' }, { id: 'box', ssh: 'devbox', dir: '/srv/observer' }]);
+  write({ remotes: [{ id: 'herdr-dev-2', ssh: 'nick@34.153.167.160' }, { id: 'box', ssh: 'devbox', dir: '/srv/observer', mail: 'relay' }, { id: 'c', ssh: 'c', mail: 'separate' }] });
+  assert.deepEqual(loadConfig([], file).remotes, [{ id: 'herdr-dev-2', ssh: 'nick@34.153.167.160', dir: '~/starnet-observer', mail: 'separate' },
+    { id: 'box', ssh: 'devbox', dir: '/srv/observer', mail: 'relay' }, { id: 'c', ssh: 'c', dir: '~/starnet-observer', mail: 'separate' }], 'mail defaults to separate; relay is kept');
+  for (const mail of ['shared', 'RELAY', '', true, null, ['relay']]) assert.throws(() => validateConfig({ remotes: [{ id: 'a', ssh: 'h', mail }] }), /mail must be "separate" or "relay"/, String(mail));
   for (const remotes of [{}, Array.from({ length: 17 }, (_, i) => ({ id: 'h' + i, ssh: 'h' })), [{ id: 'A', ssh: 'h' }], [{ id: 'local', ssh: 'h' }],
     [{ id: 'a', ssh: 'h' }, { id: 'a', ssh: 'g' }], [{ id: 'a', ssh: '-oProxyCommand=touch /tmp/x' }], [{ id: 'a', ssh: 'h; rm' }], [{ id: 'a', ssh: 'u@h@x' }],
     [{ id: 'a', ssh: 'h', dir: '~/x; rm -rf ~' }], [{ id: 'a', ssh: 'h', dir: '../up' }], [{ id: 'a', ssh: 'h', dir: '$HOME' }], [{ id: 'a', ssh: 'h', port: 22 }]])
