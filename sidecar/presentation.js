@@ -1,5 +1,6 @@
 'use strict';
 const { unavailable } = require('./observer-inspector.js');
+const { PANE } = require('./control.js');
 const { DEFAULT_LABELS } = require('./config.js');
 const TOOL_NAMES = new Set(['Bash', 'exec_command', 'shell', 'local_shell', 'write_stdin', 'Read', 'NotebookRead', 'view_image', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'apply_patch', 'Grep', 'Glob', 'LS', 'WebFetch', 'WebSearch', 'web_search', 'web__run', 'functions.exec', 'functions.wait', 'wait', 'Task', 'Agent', 'spawn_agent', 'TodoWrite', 'update_plan']);
 
@@ -7,7 +8,7 @@ const TOOL_NAMES = new Set(['Bash', 'exec_command', 'shell', 'local_shell', 'wri
 // Opaque ownership IDs and live status/freshness remain unchanged; aliases are display identities only.
 function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LABELS) {
   let closePromise = null;
-  const projects = new Map(), repos = new Map(), terminals = new Map(), worktrees = new Map();
+  const projects = new Map(), repos = new Map(), worktrees = new Map();
   const roomNames = new Set(labels.rooms.map(room => room.name.toLowerCase()));
   const repoNames = new Set(labels.rooms.flatMap(room => room.repos).map(name => name.toLowerCase()));
   function project(id) {
@@ -38,7 +39,6 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
   }
   function rowProjection(row) {
     const room = project(row.projectId), repoName = repo(row, room);
-    if (!terminals.has(row.id)) terminals.set(row.id, 'Terminal ' + (terminals.size + 1));
     const worktreeKey = row.repoId + '\0' + row.worktree;
     if (row.worktree && !worktrees.has(worktreeKey)) worktrees.set(worktreeKey, 'Worktree ' + (worktrees.size + 1));
     const helper = row.source === 'helper' || Object.hasOwn(row, 'parentId');
@@ -47,7 +47,8 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
       projectId: row.projectId, project: room.name, projectKind: row.projectKind,
       repoId: row.repoId, repo: repoName, repoKind: row.repoKind,
       worktree: row.worktree ? worktrees.get(worktreeKey) : null,
-      paneId: row.paneId ? terminals.get(row.id) : null,
+      paneId: typeof row.paneId === 'string' && PANE.test(row.paneId) ? row.paneId : null,
+      role: row.role === 'overseer' && row.source === 'herdr' ? 'overseer' : null,
       title: helper ? 'Helper' : 'Live ' + (row.provider === 'claude' ? 'Claude' : 'Codex') + ' session',
       inspectionIdentity: null, observedAt: row.observedAt, inventoryHealth: row.inventoryHealth,
       presence: row.presence, helperOverflow: row.helperOverflow, usage: row.usage, lastActivityAt: Number.isFinite(row.lastActivityAt) ? row.lastActivityAt : null,
@@ -64,6 +65,7 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
     return safe;
   }
   return {
+    presentation: true,
     async get() {
       const inventory = await observer.get();
       // Sort only alias allocation; preserve the source roster's order and room/repository ownership.

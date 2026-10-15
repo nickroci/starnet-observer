@@ -61,12 +61,12 @@ function sprites(extent = true) {
   const appearances = [];
   return { appearances, drawBody(ctx, body, now, appearance) { appearances.push({ id: body.id, ...appearance, state: body.state, sitting: body.sitting, dir: body.dir }); return extent ? { top: body.py - 60, w: 30, h: 60 } : null; } };
 }
-function setup({ dpr = 1, sprite = sprites(), width = 800, height = 500, reduced = () => false, statuses = ['working'] } = {}) {
+function setup({ dpr = 1, sprite = sprites(), width = 800, height = 500, reduced = () => false, statuses = ['working'], onObservatory = () => {} } = {}) {
   const layout = Model.createLayout(), rows = statuses.map((status, index) => ({ id: 'obs_' + index, project: 'Mama', projectId: 'mama', projectKind: 'group', repo: 'web', repoId: 'web', provider: index % 2 ? 'codex' : 'claude', status, worktree: 'wt-' + index }));
   layout.reconcile(rows);
   const scene = Scene.build(layout.onPage(0), 0), node = canvas(width, height), frames = [], selected = [], cameras = [], labels = { text: 'Claude — Ship it' };
   let staleNow = false;
-  const view = View.create({ canvas: node, onSelect: id => selected.push(id), hoverLabel: () => labels.text, nameFor: id => 'Worker ' + id, reducedMotion: reduced,
+  const view = View.create({ canvas: node, onObservatory, onSelect: id => selected.push(id), hoverLabel: () => labels.text, nameFor: id => 'Worker ' + id, reducedMotion: reduced,
     onCamera: limits => cameras.push(limits), env: { raf: fn => { frames.push(fn); return frames.length; }, caf() {}, dpr: () => dpr, createCanvas: () => canvas(), sprites: sprite, now: () => 0 } });
   const mail = [];
   view.start();
@@ -122,6 +122,25 @@ const regionOf = (view, id) => view.hitRegions().find(region => region.id === id
   node.handlers.get('keydown')({ key: 'ArrowLeft', preventDefault() { prevented = true; } }); assert(prevented); assert.notEqual(view.camera().tx, tx);
   prevented = false; node.handlers.get('keydown')({ key: 'ArrowLeft', ctrlKey: true, preventDefault() { prevented = true; } }); assert.equal(prevented, false);
   node.handlers.get('keydown')({ key: '0', preventDefault() {} }); assert.equal(view.mode(), 'overview');
+}
+
+// The focused station opens the observatory with O in either case, without stealing modified shortcuts.
+{
+  let opened = 0;
+  const { view, node } = setup({ onObservatory: () => { opened++; } });
+  for (const key of ['o', 'O']) {
+    let prevented = false;
+    node.handlers.get('keydown')({ key, preventDefault() { prevented = true; } });
+    assert(prevented, key + ' consumes the station shortcut');
+  }
+  assert.equal(opened, 2, 'both letter cases open the observatory through its public callback');
+  for (const modifier of ['altKey', 'ctrlKey', 'metaKey']) {
+    let prevented = false;
+    node.handlers.get('keydown')({ key: 'o', [modifier]: true, preventDefault() { prevented = true; } });
+    assert.equal(prevented, false, modifier + ' remains available to browser and system shortcuts');
+  }
+  assert.equal(opened, 2, 'modified shortcuts never open the observatory');
+  view.stop();
 }
 
 // Touch: pinch zooms around the midpoint exactly like zoomAt.
