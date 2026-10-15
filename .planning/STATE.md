@@ -27,6 +27,12 @@ Status: Loading-performance implementation and review complete; no phase started
 Last activity: 2026-10-15 — Completed loading-performance quick work for PR #7; all 20 test files passed on Bun 1.3.13 and final full-scope PR review approved.
 
 
+## Registered Work
+
+| # | Description | Status | Directory |
+| --- | --- | --- | --- |
+| 261015-l8s | PR4 mandatory control correctness and integration | Executing — M1 reviewed; PR #4 | .planning/quick/261015-l8s-pr4-mandatory-control-correctness-and-in |
+
 ## Quick Tasks Completed
 
 | # | Description | Date | Commit | Status | Directory |

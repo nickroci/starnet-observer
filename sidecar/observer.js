@@ -145,7 +145,7 @@ function makeObserver(options = {}) {
         const id = 'obs_' + crypto.createHash('sha256').update(endpoint + '\0' + pane.pane_id).digest('hex').slice(0, 24);
         const identity = resolved[index], sessionId = identity.sessionId;
         if (identity.proof) proofs.set(id, identity.proof);
-        rows.push({ id, paneId: pane.pane_id, provider: pane.agent,
+        rows.push({ id, paneId: pane.pane_id, provider: pane.agent, role: /^overseer(?:$|[-_:])/i.test(String(pane.name || '')) ? 'overseer' : null,
           title: text(redactText(String(pane.terminal_title_stripped || pane.agent)), 160),
           ...(projects.resolveMany ? projectRows[index] : await projects.resolve(cwds[index])),
           status: STATUSES.has(pane.agent_status) ? pane.agent_status : 'unknown', sessionId,

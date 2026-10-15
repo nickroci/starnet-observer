@@ -175,9 +175,31 @@ xcode-select --install
 
 The observer compiles its bundled Swift reader lazily. Grant Accessibility access to the terminal app running the server under **System Settings → Privacy & Security → Accessibility**, then restart the observer if needed. The desktop reader covers the Codex app; it does not monitor ordinary ChatGPT or Claude Desktop windows.
 
+## Optional control actions
+
+The observer is read-only by default. Launch it with `OBSERVER_CONTROL=1` to add three actions to the Live sessions panel, each sending only a pane id the page already shows:
+
+```sh
+OBSERVER_CONTROL=1 bun run start
+```
+
+| Button | Where | What it does |
+| --- | --- | --- |
+| `+` | project heading | Opens a new Herdr tab in that project's folder, starts `claude` in it, and opens a Terminal window attached to it. |
+| `⇱` | session row | Opens a Terminal window attached to that pane with `herdr agent attach --takeover`, so it takes input even if another terminal was attached. Detach with `ctrl+b q`; the agent keeps running. |
+| `✕` | session row | Closes the Herdr pane, ending that agent. The page asks you to confirm first. |
+
+Agents are grouped on the station by project (one deck), then by repository and sub-folder (one walled section per folder, with its own sign); idle agents stroll inside their own section whenever another agent from the same folder is there too.
+
+Clicking the **OBSERVATORY** sign on the station selects the overseer if one is running, or offers to start one. The overseer is an ordinary Claude session in a Herdr workspace named `overseer`, started in `~/.local/share/starnet-observer/overseer` with a `CLAUDE.md` brief on using Herdr and llm-bus to watch and coordinate the other agents (edit that file to change its standing orders; it is written once). Any Herdr agent named `overseer` takes the observatory chair instead of a project deck.
+
+Set `OBSERVER_CLAUDE_ARGS` to pass flags to the spawned `claude`, for example `OBSERVER_CLAUDE_ARGS="--dangerously-skip-permissions"`. Terminal launching uses macOS Terminal.app.
+
+The control routes are `POST`-only, require the same per-launch token and local origin as the read routes, validate the pane id shape, and ask Herdr to confirm an agent exists in the pane before attaching to or closing it. Without `OBSERVER_CONTROL=1` the server still rejects every non-GET request, and the buttons are not rendered.
+
 ## Privacy and limits
 
-- Observation is read-only: no agent launching, provider setup, message sending, acknowledgments, or session edits.
+- Observation is read-only unless you opt in with `OBSERVER_CONTROL=1`: no agent launching, provider setup, message sending, acknowledgments, or session edits. With control on, the page can start, attach to and close Herdr agent panes, and nothing else.
 - The server may prepare bounded, redacted transcript projections locally in memory before you open an inspector: at most 32 identities per enrichment sweep, with two background detail jobs at once. Opening an inspector still checks current session ownership and source contents. Message bodies and desktop text remain on demand; presentation mode disables transcript preparation. Recognized credential patterns are redacted; private prose and file paths may still be visible. Share the code, not your session data.
 - The local API requires a per-launch token delivered to the local page. Foreign origins and hostnames are rejected. Do not expose the server through a public proxy.
 - Missing sources appear unavailable. Old data is marked stale; absence of a source is not treated as a fresh empty roster.
