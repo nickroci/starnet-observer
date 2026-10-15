@@ -5,6 +5,8 @@ const Scene = require('../frontend/app/observer-scene.js');
 const View = require('../frontend/app/observer-view.js');
 
 // Pure helpers: zoom tiers, plate priority and the static-layer budget.
+assert.equal(View.idleFilter(0), 'none'); assert.equal(View.idleFilter(1), 'grayscale(0.85) brightness(0.45)', 'full age is mostly grey, 55% darker');
+assert.equal(View.idleFilter(1 / 3), 'grayscale(0.28) brightness(0.82)'); assert.equal(View.idleFilter(7), View.idleFilter(1), 'clamped');
 assert.deepEqual([View.lodFor(0.3), View.lodFor(0.8), View.lodFor(1.5)], ['overview', 'sections', 'detail']);
 const placed = View.placePlates([{ x: 0, y: 0, w: 50, h: 10, priority: 10, text: 'repo' }, { x: 20, y: 0, w: 50, h: 10, priority: 70, text: 'waiting' }, { x: 200, y: 0, w: 20, h: 10, priority: 1, text: 'far' }]);
 assert.deepEqual(placed.map(plate => plate.text), ['waiting', 'far'], 'a colliding lower-priority plate is dropped, not overlapped');
