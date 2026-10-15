@@ -4,6 +4,8 @@
 const ObserverMail = (() => {
   const LEG = 3200, SORT = 800, FLIGHT = LEG * 2 + SORT, FADE = 600, GAP = 6000;
   const MAX_AIRBORNE = 6, MAX_QUEUE = 24, MAX_STACK = 3;
+  const Themes = typeof module !== 'undefined' && module.exports ? require('./theme-pack.js') : ThemePack;
+  const MAIL_KEYS = ['mail-pending', 'mail-acknowledged', 'mail-unassigned'];
 
   // Point at `progress` (0..1) along a polyline of world tile coordinates.
   function along(points, progress) {
@@ -19,7 +21,12 @@ const ObserverMail = (() => {
     return { ...points[points.length - 1] };
   }
 
-  function createCourier() {
+  /* `colors` is a scene colour map; only the mail keys are read, each defaulting to the canonical pack. A route
+     without a recipient colour (an unassigned recipient) flies in `mail-unassigned`. */
+  function createCourier({ colors = {} } = {}) {
+    const defaults = Themes.getDefault().scene.colors;
+    const [pendingColor, acknowledgedColor, unassignedColor] = MAIL_KEYS.map(key => typeof colors[key] === 'string' ? colors[key] : defaults[key]);
+    const tint = route => route.color || unassignedColor;
     let known = new Map(), top = 0, lastAt = null, deck = null, resume = true, primed = false;
     let airborne = [], queue = [], fades = [], skipped = 0;
     const clear = () => { airborne = []; queue = []; fades = []; };
@@ -30,7 +37,7 @@ const ObserverMail = (() => {
       const joining = airborne.find(flight => flight.key === route.key && flight.start === now) || queue.find(flight => flight.key === route.key);
       if (joining) { joining.ids.push(message.id); return; }
       if (queue.length >= MAX_QUEUE) { skipped++; return; }
-      queue.push({ key: route.key, ids: [message.id], from: route.from, to: route.to, color: route.color, start: null });
+      queue.push({ key: route.key, ids: [message.id], from: route.from, to: route.to, color: tint(route), start: null });
       step(now);
     }
     /* `route(message)` returns { key, from, to, color }: `from`/`to` are world waypoints that end at the hub.
@@ -48,7 +55,7 @@ const ObserverMail = (() => {
         for (const message of messages.filter(value => value.id > top && !known.has(value.id)).sort((a, b) => a.id - b.id)) enqueue(message, route(message), now);
         for (const message of messages) {
           const previous = known.get(message.id);
-          if (previous && !previous.acked && message.acknowledgedAt) { const path = route(message); fades.push({ at: now, point: path.to[0], color: path.color }); }
+          if (previous && !previous.acked && message.acknowledgedAt) { const path = route(message); fades.push({ at: now, point: path.to[0], color: tint(path) }); }
         }
       }
       known = new Map(messages.map(message => [message.id, { acked: !!message.acknowledgedAt }]));
@@ -83,9 +90,9 @@ const ObserverMail = (() => {
         drones.push({ point: { ...point, z: phase === 'sort' ? 0.4 : 2.2 }, parked: false, phase,
           parcels: Array(Math.min(MAX_STACK, flight.ids.length)).fill(flight.color) });
       }
-      const envelopes = pending.map(spot => ({ ...spot, point: { ...spot.point, z: 1.2 }, alpha: 1, color: '#ffbd5c' }));
+      const envelopes = pending.map(spot => ({ ...spot, point: { ...spot.point, z: 1.2 }, alpha: 1, color: pendingColor }));
       if (!reduced) for (const fade of fades) envelopes.push({ point: { ...fade.point, z: 1.2 }, count: 1, mark: false, label: '',
-        alpha: Math.max(0, Math.min(1, 1 - (now - fade.at) / FADE)), color: '#9fe7b9' });
+        alpha: Math.max(0, Math.min(1, 1 - (now - fade.at) / FADE)), color: acknowledgedColor });
       return { drones, envelopes };
     }
 

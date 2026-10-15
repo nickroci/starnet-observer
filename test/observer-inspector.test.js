@@ -348,7 +348,6 @@ const bindingChecks = coverChecks.then(async () => {
     helpers: { children: async () => ({ rows: [], annotations: new Map(), overflow: new Map() }) }, bus: { read: () => ({ rows: [], health: 'available' }) },
     transcripts: { read: async () => ({ available: false }), retain() {},
       inspect: async (id, provider, sid) => ({ available: true, health: 'available', stats: {}, generation: 'g_' + sid, window: {}, turns: [{ id: 't_' + sid, role: 'user', text: 'body for ' + sid }] }) } });
-  const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
   let reply = null;   // when set, the next read answers with this crafted reply instead of the server
   Q._setGetForTest(path => {
     const url = new URL(path, 'http://observer'), id = decodeURIComponent(url.pathname.split('/')[4]), identity = url.searchParams.get('identity');
@@ -361,39 +360,43 @@ const bindingChecks = coverChecks.then(async () => {
   for (const id of ids.slice(1)) own.inspector.append(own[id]);
   const view = Inspector.createInspector({ get: id => own[id], document, QuerySpine: Q,
     describe: () => ({ name: 'Codex · 1', status: 'working', stale: false, title: 'Task', meta: [], ...browser }) });
-  const text = () => own['inspector-log'].children.map(node => node.children[1].textContent);
-  view.open(row.id, browser.identity); await flush();
-  assert.deepEqual(text(), ['body for ' + A], 'the bound read shows its own session');
-  own['inspector-pause'].handlers.click();
-  // The pane now runs B; the browser roster still shows A. The panel's next read reaches the server first.
-  session = B; time += 3000;
-  Q.refresh('observer.inspect.' + row.id).catch(() => {}); await flush();
-  assert.deepEqual(text(), [], 'B is never shown in the A panel'); assert.equal(own['inspector-buffer'].textContent, 'Paused', 'nor held by Pause');
-  assert(!JSON.stringify(own['inspector-log'].children.map(node => node.children.map(child => child.textContent))).includes('body for ' + B));
-  assert.match(own['inspector-health'].textContent, /different session/, 'the panel locks');
-  assert.throws(() => Q.state('observer.inspect.' + row.id), /unknown query resource/, 'its read is gone, so nothing can revive it'); await flush(); assert.deepEqual(text(), []);
-  view.close(); Q._resetForTest();
-  // Control: the server-side expectation is what protects it; an unbound legacy read would have returned B's body.
-  assert.equal((await observer.inspect(row.id)).turns[0].text, 'body for ' + B, 'fixture: an unbound read finds B');
-  // A paused panel never buffers a reply that proves another target, and a helper's parent is part of its target.
-  for (const [label, expected, foreign] of [['foreign session', 'codex:' + A, 'codex:' + B],
-    ['helper parent', 'helper:obs_' + '1'.repeat(24) + '|obs_' + 'a'.repeat(24), 'helper:obs_' + '1'.repeat(24) + '|obs_' + 'b'.repeat(24)]]) {
-    browser.identity = expected;
-    const answer = (proof, texts) => (id, identity) => ({ id, inspectionIdentity: proof, health: 'available', asOf: new Date().toISOString(), reason: null, stats: { model: { value: 'm', state: 'available' } },
-      generation: 'g1', truncated: false, window: {}, turns: texts.map(value => ({ id: value, role: 'user', at: null, text: value })), asked: identity });
-    reply = answer(expected, ['mine']); view.open(row.id, expected); await flush();
-    assert.deepEqual(text(), ['mine'], label + ': own proof shows');
-    assert.equal(Q.state('observer.inspect.' + row.id).data.asked, expected, label + ': the read named the exact target');
+  try {
+    const text = () => own['inspector-log'].children.map(node => node.children[1].textContent);
+    view.open(row.id, browser.identity); await Q.get('observer.inspect.' + row.id);
+    assert.deepEqual(text(), ['body for ' + A], 'the bound read shows its own session');
     own['inspector-pause'].handlers.click();
-    reply = answer(foreign, ['mine', 'foreign']); Q.refresh('observer.inspect.' + row.id).catch(() => {}); await flush();
-    assert.deepEqual(text(), [], label + ': a reply proving another target withdraws the panel');
-    assert.equal(own['inspector-buffer'].textContent, 'Paused', label + ': and nothing is held');
-    assert(own['inspector-stats'].children.every(stat => stat.dataset.state === 'unavailable'), label + ': stats withdrawn too');
+    // The pane now runs B; the browser roster still shows A. The panel's next read reaches the server first.
+    session = B; time += 3000;
+    await Q.refresh('observer.inspect.' + row.id);
+    assert.deepEqual(text(), [], 'B is never shown in the A panel'); assert.equal(own['inspector-buffer'].textContent, 'Paused', 'nor held by Pause');
+    assert(!JSON.stringify(own['inspector-log'].children.map(node => node.children.map(child => child.textContent))).includes('body for ' + B));
+    assert.match(own['inspector-health'].textContent, /different session/, 'the panel locks');
+    assert.throws(() => Q.state('observer.inspect.' + row.id), /unknown query resource/, 'its read is gone, so nothing can revive it'); assert.deepEqual(text(), []);
     view.close(); Q._resetForTest();
+    // Control: the server-side expectation is what protects it; an unbound legacy read would have returned B's body.
+    assert.equal((await observer.inspect(row.id)).turns[0].text, 'body for ' + B, 'fixture: an unbound read finds B');
+    // A paused panel never buffers a reply that proves another target, and a helper's parent is part of its target.
+    for (const [label, expected, foreign] of [['foreign session', 'codex:' + A, 'codex:' + B],
+      ['helper parent', 'helper:obs_' + '1'.repeat(24) + '|obs_' + 'a'.repeat(24), 'helper:obs_' + '1'.repeat(24) + '|obs_' + 'b'.repeat(24)]]) {
+      browser.identity = expected;
+      const answer = (proof, texts) => (id, identity) => ({ id, inspectionIdentity: proof, health: 'available', asOf: new Date().toISOString(), reason: null, stats: { model: { value: 'm', state: 'available' } },
+        generation: 'g1', truncated: false, window: {}, turns: texts.map(value => ({ id: value, role: 'user', at: null, text: value })), asked: identity });
+      reply = answer(expected, ['mine']); view.open(row.id, expected); await Q.get('observer.inspect.' + row.id);
+      assert.deepEqual(text(), ['mine'], label + ': own proof shows');
+      assert.equal(Q.state('observer.inspect.' + row.id).data.asked, expected, label + ': the read named the exact target');
+      own['inspector-pause'].handlers.click();
+      reply = answer(foreign, ['mine', 'foreign']); await Q.refresh('observer.inspect.' + row.id);
+      assert.deepEqual(text(), [], label + ': a reply proving another target withdraws the panel');
+      assert.equal(own['inspector-buffer'].textContent, 'Paused', label + ': and nothing is held');
+      assert(own['inspector-stats'].children.every(stat => stat.dataset.state === 'unavailable'), label + ': stats withdrawn too');
+      view.close(); Q._resetForTest();
+    }
+    // A reply with no proof at all is treated the same way.
+    browser.identity = 'codex:' + A; reply = (id) => ({ id, health: 'available', asOf: new Date().toISOString(), reason: null, stats: {}, generation: 'g1', truncated: false, window: {}, turns: [{ id: 'x', role: 'user', at: null, text: 'unproven' }] });
+    view.open(row.id, 'codex:' + A); await Q.get('observer.inspect.' + row.id); assert.deepEqual(text(), [], 'an unproven reply is never shown'); view.close(); Q._resetForTest();
+  } finally {
+    view.close(); Q._resetForTest(); await observer.close();
   }
-  // A reply with no proof at all is treated the same way.
-  browser.identity = 'codex:' + A; reply = (id) => ({ id, health: 'available', asOf: new Date().toISOString(), reason: null, stats: {}, generation: 'g1', truncated: false, window: {}, turns: [{ id: 'x', role: 'user', at: null, text: 'unproven' }] });
-  view.open(row.id, 'codex:' + A); await flush(); assert.deepEqual(text(), [], 'an unproven reply is never shown'); view.close(); Q._resetForTest();
 });
 bindingChecks.then(() => console.log('observer inspector: reads name their exact target; server-found replacement, foreign/unproven proof and helper parent change lock the panel, never shown or held OK'), error => { console.error(error); process.exitCode = 1; });
 coverChecks.then(() => console.log('observer inspector: covered panels stop reading, keep transcript state, drop late answers, lock on replacement and re-read window snapshots OK'), error => { console.error(error); process.exitCode = 1; });
