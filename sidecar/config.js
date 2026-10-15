@@ -26,6 +26,8 @@ const HELP = `Usage: bun --no-env-file server.js [options]
 Flags override config; config overrides defaults. Mode defaults to off.
 If present, observer.config.json next to server.js is loaded automatically.
 Use PORT to change the listening port (default 4319).
+Config "remotes": [{ "id": "vm1", "ssh": "user@host", "dir": "~/starnet-observer" }] adds remote hosts, each
+streamed read-only over the operator's ssh (key auth, BatchMode) and drawn as its own ship.
 `;
 
 function object(value, field) {
@@ -39,7 +41,7 @@ function label(value, field) {
   return value.trim();
 }
 function validateConfig(input) {
-  object(input, 'Config'); keys(input, ['presentation', 'company', 'repoPrefix', 'rooms', 'theme'], 'config');
+  object(input, 'Config'); keys(input, ['presentation', 'company', 'repoPrefix', 'rooms', 'theme', 'remotes'], 'config');
   const result = {};
   if (Object.hasOwn(input, 'presentation')) {
     if (typeof input.presentation !== 'boolean') throw new Error('presentation must be a boolean');
@@ -64,6 +66,22 @@ function validateConfig(input) {
         if (repos.has(name.toLowerCase())) throw new Error('Repository names must be unique');
         repos.add(name.toLowerCase()); return name;
       }) };
+    });
+  }
+  if (Object.hasOwn(input, 'remotes')) {
+    // Each remote is reached by the hub's own ssh; the target is passed as one argv entry after `--`, and a leading
+    // '-' is refused so it can never be read as an ssh option.
+    if (!Array.isArray(input.remotes) || input.remotes.length > 16) throw new Error('remotes must be an array of at most 16 remote objects');
+    const ids = new Set();
+    result.remotes = input.remotes.map((remote, index) => {
+      const field = 'remotes[' + index + ']'; object(remote, field); keys(remote, ['id', 'ssh', 'dir'], field);
+      if (typeof remote.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(remote.id) || remote.id === 'local') throw new Error(field + '.id must be 1–32 lowercase letters, digits, or hyphens, and not "local"');
+      if (ids.has(remote.id)) throw new Error('Remote ids must be unique');
+      ids.add(remote.id);
+      if (typeof remote.ssh !== 'string' || remote.ssh.startsWith('-') || !/^[A-Za-z0-9._-]+(@[A-Za-z0-9.-]+)?$/.test(remote.ssh)) throw new Error(field + '.ssh must be host, alias or user@host');
+      const dir = remote.dir === undefined ? '~/starnet-observer' : remote.dir;
+      if (typeof dir !== 'string' || !/^~?[A-Za-z0-9._\/-]+$/.test(dir) || dir.length > 200 || dir.split('/').includes('..')) throw new Error(field + '.dir must be a plain path');
+      return { id: remote.id, ssh: remote.ssh, dir };
     });
   }
   if (Object.hasOwn(input, 'theme')) {
@@ -117,6 +135,7 @@ function loadConfig(args = process.argv.slice(2), defaultPath = DEFAULT_CONFIG) 
   if (!settings.rooms) labels.rooms = DEFAULT_LABELS.rooms.map(room => ({ name: room.name, repos: room.repos.map(repo => labels.repoPrefix + repo.slice('helio'.length)) }));
   return { presentation: values.presentation ? true : values['no-presentation'] ? false : settings.presentation || false,
     labels: { company: labels.company, repoPrefix: labels.repoPrefix, rooms: labels.rooms },
-    theme: { ...settings.theme, ...(values.fx ? { fx: true } : values['no-fx'] ? { fx: false } : {}) } };
+    theme: { ...settings.theme, ...(values.fx ? { fx: true } : values['no-fx'] ? { fx: false } : {}) },
+    remotes: settings.remotes || [] };
 }
 module.exports = { DEFAULT_LABELS, HELP, validateConfig, loadConfig };

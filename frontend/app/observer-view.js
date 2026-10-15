@@ -5,6 +5,7 @@
 'use strict';
 const ObserverView = (() => {
   const Scene = typeof module !== 'undefined' && module.exports ? require('./observer-scene.js') : ObserverScene;
+  const Model = typeof module !== 'undefined' && module.exports ? require('./observer-model.js') : ObserverModel;
   const PALETTE = Object.freeze({
     space: '#020406', hullTop: '#1b2026', hullSeam: '#12161a', hullLeft: '#0c0f12', hullRight: '#13171c', wall: '#151a1f',
     wallCap: '#2a3138', grate: '#161a1f', grateDark: '#0f1215', window: '#ff9d3a', amber: '#c8781c', cyan: '#3fd8e8', rail: '#3a424c',
@@ -227,8 +228,21 @@ const ObserverView = (() => {
     line(ctx, { x: t.x + t.w, y: t.y, z: 2.4 }, { x: t.x + t.w, y: t.y + t.h, z: 2.4 }, PALETTE.cyan, 2, 0.8);
     for (let z = 0.6; z < 2.2; z += 0.5) line(ctx, { x: t.x + 0.6, y: t.y + t.h, z }, { x: t.x + t.w - 0.6, y: t.y + t.h, z }, 'rgba(255,157,58,0.55)', 2);
   }
+  // A ship's hull: a faint plate well below the decks with a dashed rim. Only drawn when remote hosts exist.
+  const shipLive = ship => ship.health === 'available';
+  function paintHull(ctx, ship) {
+    const r = ship.rect, rim = ship.local ? PALETTE.cyan : shipLive(ship) ? PALETTE.amber : STATUS.unknown;
+    poly(ctx, rectPoly(r, -2.4), ship.local ? 'rgba(63,216,232,0.035)' : 'rgba(255,157,58,0.03)');
+    ctx.save(); ctx.globalAlpha = shipLive(ship) ? 0.7 : 0.4; ctx.setLineDash([6, 5]); ctx.lineWidth = 1.5;
+    poly(ctx, rectPoly(r, -2.4), null, rim); ctx.restore();
+    if (ship.dock) {
+      box(ctx, ship.dock, 0.3, { top: '#232a31', left: '#0d1013', right: '#151a1f' });
+      isoEllipse(ctx, { x: ship.dock.x + ship.dock.w / 2, y: ship.dock.y + ship.dock.h / 2, z: 0.32 }, 0.8, rim, null, 2);
+    }
+  }
   function paintStatic(ctx, scene) {
     const hub = scene.mail.rect;
+    for (const ship of scene.ships || []) paintHull(ctx, ship);
     const pieces = [
       ...scene.platforms.map(platform => ({ key: center(platform.rect).x + center(platform.rect).y, paint: () => paintDeck(ctx, platform.rect, platform.accent, platform.sections.map(s => s.rect)) })),
       ...scene.walkways.map(walkway => {
@@ -244,6 +258,8 @@ const ObserverView = (() => {
       paintRearWalls(ctx, platform.rect);
       platform.decorationRegions.forEach((region, index) => { if (region.kind === 'wall' || region.kind === 'corner') paintWallRegion(ctx, platform, region, index); });
     }
+    // An unreachable or stale remote ship is dimmed as a whole: its last rows are shown, never as live.
+    for (const ship of scene.ships || []) if (!ship.local && !shipLive(ship)) poly(ctx, rectPoly(ship.rect, 0), 'rgba(5,8,10,0.55)');
     // Status-driven light pools: the screen glow on a seated worker, never title or timestamp driven.
     for (const worker of scene.workers) {
       const status = worker.row.status, scale = worker.scale || 1;
@@ -1013,6 +1029,14 @@ const ObserverView = (() => {
           const repo = repositories.has(section.repo) ? section.repo : null, chosen = repo !== null && repo === selectedRepo;
           if (text) plates.push({ ...textPlate(text, point.x, point.y - 2, { accent: chosen ? PALETTE.repo : shade(platform.accent, -0.3), size: 13, color: chosen ? PALETTE.repo : '#c7d4cc', priority: 30 }), repo });
         }
+      }
+      for (const ship of scene.ships || []) {
+        const r = ship.rect, at = screen({ x: r.x + r.w / 2, y: r.y, z: 4 }), live = shipLive(ship);
+        const seen = !live && ship.observedAt ? ' · last seen ' + Model.age(ship.observedAt) : '';
+        const label = ship.local ? '● THIS MACHINE' : (live ? '● ' : '○ ') + String(ship.id).toUpperCase() + ' · ' + (ship.agents || 0) + ' agent' + (ship.agents === 1 ? '' : 's') +
+          (live ? '' : ship.health === 'stale' ? ' · STALE' + seen : ' · ' + (ship.reason || 'unreachable')) ;
+        const color = ship.local ? PALETTE.cyan : live ? PALETTE.amber : STATUS.unknown;
+        plates.push(textPlate(clipText(label, viewport.width * 0.5, signSize(20)), at.x, at.y, { accent: color, size: signSize(20), color, priority: 48, dash: live ? null : [3, 3] }));
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
       plates.push(textPlate('MAILROOM · llm-bus', hubAt.x, hubAt.y, { accent: PALETTE.amber, size: signSize(18), color: PALETTE.window, priority: 45 }));

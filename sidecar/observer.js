@@ -252,4 +252,4 @@ function makeObserver(options = {}) {
   }
   return { get, inspect, inspectMessage: (id, expectedIdentity) => bus.inspect(id, expectedIdentity) };
 }
-module.exports = { makeObserver };
+module.exports = { makeObserver, aggregateRows };

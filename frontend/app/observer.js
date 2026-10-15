@@ -417,7 +417,7 @@
   }
   /* Observatory click: select the seated overseer, or (with control on) offer to start one. */
   function observatoryClicked() {
-    const row = (latest?.data?.sessions || []).find(entry => entry.role === 'overseer' && entry.source === 'herdr');
+    const row = (latest?.data?.sessions || []).find(entry => entry.role === 'overseer' && entry.source === 'herdr' && !entry.host);
     if (row) { select(row.id, true); return; }
     if (!CONTROL) { notice('No overseer. Start the observer with OBSERVER_CONTROL=1 to spawn one from here.', true); return; }
     if (!window.confirm('Start an overseer agent in the observatory?\n\nThis opens a Herdr workspace named "overseer" in its own folder, starts Claude there with a brief on watching the other agents, and opens a terminal attached to it.')) return;
@@ -431,11 +431,11 @@
     const section = text('section', 'project-group', ''), heading = text('h3', 'project-heading', ''), label = text('span', '', ''), kind = text('span', 'project-kind', ''), total = text('span', 'project-total', '');
     const zoom = text('button', 'project-zoom', '⤢'); zoom.type = 'button'; zoom.addEventListener('click', () => zoomProject(key));
     heading.append(text('span', 'project-swatch', ''), label, kind, total, zoom);
-    if (CONTROL) {
+    if (CONTROL && !String(key).startsWith('host:')) {   // remote hosts are view-only
       const spawn = text('button', 'project-spawn', '+'); spawn.type = 'button'; spawn.title = 'Start a new Claude agent in this project (new Herdr tab, terminal opens)';
       spawn.setAttribute('aria-label', 'Start a new Claude agent in this project');
       spawn.addEventListener('click', () => {
-        const seed = (lastGroups.get(key) || []).find(row => row.source === 'herdr' && row.paneId);
+        const seed = (lastGroups.get(key) || []).find(row => row.source === 'herdr' && row.paneId && !row.host);
         if (!seed) { notice('No Herdr pane in this project to start from', true); return; }
         controlAction(spawn, 'spawn', seed.paneId, 'Starting a new agent next to ' + seed.paneId + '…');
       });
@@ -481,10 +481,10 @@
     let attach = null, close = null;
     if (CONTROL) {
       attach = text('button', 'row-attach', '⇱'); attach.type = 'button'; attach.title = 'Open a terminal attached to this agent'; attach.setAttribute('aria-label', 'Open a terminal attached to this agent');
-      attach.addEventListener('click', () => { const row = byId.get(id); if (row && row.source === 'herdr' && row.paneId) controlAction(attach, 'attach', row.paneId, 'Opening a terminal for ' + row.paneId + '…'); });
+      attach.addEventListener('click', () => { const row = byId.get(id); if (row && row.source === 'herdr' && row.paneId && !row.host) controlAction(attach, 'attach', row.paneId, 'Opening a terminal for ' + row.paneId + '…'); });
       close = text('button', 'row-close', '✕'); close.type = 'button'; close.title = 'Stop this agent (closes its Herdr pane)'; close.setAttribute('aria-label', 'Stop this agent');
       close.addEventListener('click', () => {
-        const row = byId.get(id); if (!row || row.source !== 'herdr' || !row.paneId) return;
+        const row = byId.get(id); if (!row || row.source !== 'herdr' || !row.paneId || row.host) return;
         const what = (workerName(row) || 'this agent') + (row.title ? ' · ' + row.title : '');
         if (!window.confirm('Stop ' + what + ' in pane ' + row.paneId + '?\n\nThis closes the Herdr pane and ends the Claude session. Unsaved conversation state is kept in its transcript; you can resume it later with claude --resume.')) return;
         controlAction(close, 'close', row.paneId, 'Closing ' + row.paneId + '…');
@@ -507,7 +507,7 @@
     entry.provider.className = 'provider ' + row.provider; setText(entry.provider, workerName(row)); if (entry.provider.title !== workerName(row)) entry.provider.title = workerName(row);
     entry.status.className = 'status ' + row.status; setText(entry.status, (stale ? 'was ' : '') + (row.status === 'blocked' ? 'waiting' : row.status));
     entry.source.hidden = !chip; setText(entry.source, chip);
-    if (entry.attach) { const can = row.source === 'herdr' && !!row.paneId && !stale; entry.attach.hidden = !can; entry.close.hidden = !can; }
+    if (entry.attach) { const can = row.source === 'herdr' && !!row.paneId && !stale && !row.host; entry.attach.hidden = !can; entry.close.hidden = !can; }
     setText(entry.title, composedTask(row) ? taskText(row) : row.title);
     const last = row.tool?.available && row.tool.last;
     entry.summary.className = 'row-summary' + (!last ? ' unavailable' : ''); setText(entry.summary, ObserverModel.activity(row));
@@ -714,19 +714,23 @@
     if (badge) setText(badge, data?.presentation ? 'LIVE · FICTIONAL LABELS' : 'READ ONLY');
     // A repository whose last row left clears its highlight.
     if (selectedRepoId !== null && !rows.some(row => row.repoId === selectedRepoId)) selectedRepoId = null;
-    const overseerRow = rows.find(row => row.role === 'overseer' && row.source === 'herdr') || null;
+    const overseerRow = rows.find(row => row.role === 'overseer' && row.source === 'herdr' && !row.host) || null;
+    // Remote hosts (multi-host hub only): one ship each, in a stable order; health and last-seen come from the hub.
+    const hostSources = data?.sources?.hosts || null;
+    const hosts = hostSources ? Object.keys(hostSources).filter(id => id !== 'local').sort().map(id => ({ id, health: hostSources[id].health,
+      observedAt: hostSources[id].observedAt ?? null, reason: hostSources[id].reason || null, agents: hostSources[id].agents ?? 0 })) : [];
     layout.reconcile(rows.filter(row => row !== overseerRow));
     if (selected && !byId.has(selected)) { overview(); }
     if (page >= layout.pages()) setPage(layout.pages() - 1);
     if (!layout.onPage(page).length && rows.length) setPage(layout.pageFor(rows[0].id));
     const rooms = layout.onPage(page), onFloor = rooms.flatMap(room => room.rows.map(value => value.row));
     // Geometry and row fields consumed by floor paint or movement; titles and tools are read live by the hover callbacks.
-    const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider]], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
+    const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider], ...(hosts.length ? [hosts.map(host => [host.id, host.health, host.agents, host.reason, host.health === 'available' ? null : Math.floor((clock() - (host.observedAt || 0)) / 60000)])] : [])], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
     const bus = data?.bus || null, messages = Array.isArray(bus?.messages) ? bus.messages : [];
     // Hover text, plates and pending envelopes read rows and bus live; a frozen floor repaints only when they change.
     const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages]]);
     if (key !== sceneKey || !scene) {
-      sceneKey = key; scene = ObserverScene.build(rooms, page, { overseer: overseerRow });
+      sceneKey = key; scene = ObserverScene.build(rooms, page, hosts.length ? { overseer: overseerRow, hosts, localHealth: hostSources.local?.health } : { overseer: overseerRow });
       // Row freshness is read from the current roster by id: the cached scene's row objects can be older.
       view.update(scene, { stale: () => isStale(latest), rowStale: worker => rowStale(rowFor(worker.id)), mailFrame, inspected: inspectedAgent,
         repositorySelection: () => selectedRepoId, onRepositoryToggle: toggleRepository });

@@ -197,6 +197,20 @@ Set `OBSERVER_CLAUDE_ARGS` to pass flags to the spawned `claude`, for example `O
 
 The control routes are `POST`-only, require the same per-launch token and local origin as the read routes, validate the pane id shape, and ask Herdr to confirm an agent exists in the pane before attaching to or closing it. Without `OBSERVER_CONTROL=1` the server still rejects every non-GET request, and the buttons are not rendered.
 
+## Optional remote hosts (multi-host)
+
+Agents on other machines (for example a VPS running Herdr) can appear as their own ships next to this machine's
+station. Install the observer on each remote as usual, then list the remotes in `observer.config.json`:
+
+```json
+{ "remotes": [{ "id": "vm1", "ssh": "nick@203.0.113.10", "dir": "~/starnet-observer" }] }
+```
+
+The hub keeps one `ssh -o BatchMode=yes` stream per remote running `bun --no-env-file scripts/stream.js`, which prints
+one snapshot per line and opens no port. Key authentication must already work non-interactively. Remote rows are
+sanitised and re-identified per host, remote ships dim with "last seen" when their stream goes quiet, transcript
+inspection and control actions never reach a remote, and llm-bus mail is shown for this machine only.
+
 ## Privacy and limits
 
 - Observation is read-only unless you opt in with `OBSERVER_CONTROL=1`: no agent launching, provider setup, message sending, acknowledgments, or session edits. With control on, the page can start, attach to and close Herdr agent panes, and nothing else.

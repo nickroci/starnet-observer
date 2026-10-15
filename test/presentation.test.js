@@ -58,5 +58,12 @@ const { createServer } = require('../server.js');
     assert.equal(mail.reason, 'presentation-mode'); assert.equal(mail.text, null);
     assert.equal(inspected, 0, 'inspection never delegates to private transcript/message readers');
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+  // Remote host names are private: rows and host sources carry fictional ship names, never the configured id.
+  const remote = makePresentationObserver({ get: async () => ({ ...inventory, sessions: [...inventory.sessions.map(r => ({ ...r, host: null })), { ...inventory.sessions[0], id: 'obs_' + 'f'.repeat(24), host: 'herdr-dev-2' }],
+    sources: { ...inventory.sources, hosts: { local: { health: 'available', observedAt: 1, reason: null, agents: 1 }, 'herdr-dev-2': { health: 'stale', observedAt: 1, reason: 'SSH connection timed out', agents: 1 } } } }) }, () => 1000);
+  const masked = await remote.get();
+  assert.equal(JSON.stringify(masked).includes('herdr-dev-2'), false);
+  assert.equal(masked.sessions.at(-1).host, 'Ship 1'); assert.equal(masked.sessions[0].host, null);
+  assert.deepEqual(masked.sources.hosts['Ship 1'], { health: 'stale', observedAt: 1, agents: 1 }, 'host reasons are not shown in presentation');
   console.log('presentation: stable fictional labels, real status/topology/totals/mail, no private fields, source immutability, and blocked HTTP inspectors passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

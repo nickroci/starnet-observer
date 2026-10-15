@@ -70,6 +70,8 @@ const { createServer } = require('../server.js');
     assert.equal((await post(on.base, '/api/control/attach', { paneId: 'w1:p2' }, { 'X-Observer-Token': 'wrong' })).status, 403);
     assert.equal((await post(on.base, '/api/control/attach', 'not json')).status, 400);
     assert.equal((await post(on.base, '/api/control/attach', { paneId: 'w1 p2' })).status, 400);
+    // A remote row's pane id is host-namespaced ("vm/w1:p2") and is refused before any control call.
+    for (const action of ['attach', 'spawn', 'close']) assert.equal((await post(on.base, '/api/control/' + action, { paneId: 'herdr-dev-2/w1:p2' })).status, 400, 'remote panes are never control targets');
     assert.equal((await post(on.base, '/api/control/attach', { paneId: 'w1:p2' }, { 'Content-Type': 'text/plain' })).status, 400);
     assert.equal((await post(on.base, '/api/control/reboot', { paneId: 'w1:p2' })).status, 405);
     assert.equal((await fetch(on.base + '/api/control/attach', { headers: { 'X-Observer-Token': 't' } })).status, 404, 'GET never reaches an action');

@@ -4,7 +4,9 @@ const ObserverModel = (() => {
   const ROOMS_PER_PAGE = 8, BLOCK_SEATS = 8, BLOCKS_PER_ROOM = 3;
   const palette = [['cobalt', '#78add7'], ['teal', '#70c5bc'], ['verdant', '#84c98d'], ['moss', '#b3c184'], ['amber', '#dbbd79'],
     ['ember', '#e39a6c'], ['crimson', '#d68e98'], ['orchid', '#d89bd0'], ['violet', '#b49be3'], ['indigo', '#9aa2ee']];
-  const projectKey = row => row.projectId || 'folder:' + (row.project || 'Unassigned');
+  // A remote host's rows never join a local room: their key carries the host (ids are already host-scoped by the hub).
+  const hostOf = row => typeof row.host === 'string' && row.host ? row.host : null;
+  const projectKey = row => (hostOf(row) ? 'host:' + hostOf(row) + '|' : '') + (row.projectId || 'folder:' + (row.project || 'Unassigned'));
   const repoKey = row => row.repoId || projectKey(row);
   // Agents in different sub-folders of one repository sit in different sections (low walls between them).
   const folderOf = row => typeof row.folder === 'string' ? row.folder : '';
@@ -61,7 +63,7 @@ const ObserverModel = (() => {
       + (age(row.observedAt, now) ? ' · last observed ' + age(row.observedAt, now) : '');
   }
   function createLayout() {
-    const panes = new Map(), helpers = new Map(), wings = new Map(), names = new Map(), roomSlots = new Map();
+    const panes = new Map(), helpers = new Map(), wings = new Map(), names = new Map(), roomSlots = new Map(), owners = new Map();
     let hues = new Map(), rooms = [];
     // Holes are reused but surviving desks never move; a new block is appended only when none is free.
     function allocate(project, repo, label, section = repo) {
@@ -81,8 +83,10 @@ const ObserverModel = (() => {
        shows that hue, so the annex keeps its colour and nobody else is recoloured. Each deck holds at most eight
        rooms, so the search ends at the first deck without that hue. */
     function freeSlot(project) {
-      const used = new Set(roomSlots.values()), hue = hues.get(project);
-      const clash = slot => hue !== undefined && Array.from(roomSlots).some(([key, other]) =>
+      // Each host (ship) has its own slot space, so a remote room never pushes a local room to another deck.
+      const host = owners.get(project) ?? null, mine = Array.from(roomSlots).filter(([key]) => (owners.get(ownerOf(key)) ?? null) === host);
+      const used = new Set(mine.map(([, slot]) => slot)), hue = hues.get(project);
+      const clash = slot => hue !== undefined && mine.some(([key, other]) =>
         deckOf(other) === deckOf(slot) && ownerOf(key) !== project && hues.get(ownerOf(key)) === hue);
       let slot = 0; while (used.has(slot) || clash(slot)) slot++;
       return slot;
@@ -115,7 +119,7 @@ const ObserverModel = (() => {
       for (const id of panes.keys()) if (!live.has(id)) { panes.delete(id); removed.push(id); changed = true; }
       for (const row of roots) {
         const project = projectKey(row), repo = repoKey(row), section = sectionKey(row), previous = panes.get(row.id);
-        names.set(project, row.project || 'Unassigned');
+        names.set(project, row.project || 'Unassigned'); owners.set(project, hostOf(row));
         if (previous && previous.project === project && previous.repo === repo && (previous.section || previous.repo) === section) continue;
         if (previous) { panes.delete(row.id); moved.push(row.id); }
         panes.set(row.id, { project, repo, section, ...allocate(project, repo, sectionLabel(row), section) }); changed = true;
@@ -123,11 +127,11 @@ const ObserverModel = (() => {
       for (const [project, blocks] of wings) {
         const used = new Set(Array.from(panes.values()).filter(pane => pane.project === project).map(pane => pane.block));
         while (blocks.length && !used.has(blocks.length - 1)) { blocks.pop(); changed = true; }
-        if (!blocks.length) { wings.delete(project); names.delete(project); }
+        if (!blocks.length) { wings.delete(project); names.delete(project); owners.delete(project); }
       }
       const units = new Map();
       for (const [project, blocks] of wings) for (let annex = 0; annex * BLOCKS_PER_ROOM < blocks.length; annex++) {
-        units.set(project + ':' + annex, { key: project + ':' + annex, projectId: project, name: names.get(project), annex,
+        units.set(project + ':' + annex, { key: project + ':' + annex, projectId: project, name: names.get(project), annex, ...(owners.get(project) ? { host: owners.get(project) } : {}),
           blocks: blocks.slice(annex * BLOCKS_PER_ROOM, (annex + 1) * BLOCKS_PER_ROOM), rows: [] });
       }
       for (const [id, pane] of panes) {
@@ -183,6 +187,6 @@ const ObserverModel = (() => {
     return { reconcile, pages, onPage, pageFor, colorFor,
       seatFor: id => { const pane = panes.get(id); return pane ? pane.block * BLOCK_SEATS + pane.seat : undefined; } };
   }
-  return { projectKey, repoKey, helperStations, hash, palette, activity, age, taskTitle, hoverLabel, createLayout };
+  return { projectKey, hostOf, repoKey, helperStations, hash, palette, activity, age, taskTitle, hoverLabel, createLayout };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverModel;
