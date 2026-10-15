@@ -8,6 +8,7 @@ const ObserverMail = require('../frontend/app/observer-mail.js');
 const ObserverInspector = require('../frontend/app/observer-inspector.js');
 const ObserverMailInspector = require('../frontend/app/observer-mail-inspector.js');
 const ObserverScene = require('../frontend/app/observer-scene.js');
+const ThemePack = require('../frontend/app/theme-pack.js');
 let document;
 // DOM double with real move semantics: inserting an attached node detaches it first, as the browser does.
 let created = 0, listenersAdded = 0;
@@ -31,6 +32,25 @@ const fireTimers = () => { const due = [...timers.values()]; timers.clear(); for
 // Panels are built per stack entry with numbered ids; tests find a named part of a panel (default: the top one).
 const findPart = (node, name) => { if (new RegExp('^' + name + '-\\d+$').test(node.id || '')) return node; for (const child of node.children || []) { const hit = findPart(child, name); if (hit) return hit; } return null; };
 const panelPart = (host, name, index = -1) => { const root = host.children.at(index); return root ? findPart(root, name) : null; };
+// Theme status and logo slots: fixed markup, separate from source health, empty and hidden until a theme reports.
+{
+  const page = fs.readFileSync(require.resolve('../frontend/observer.html'), 'utf8');
+  const status = page.match(/<div id="theme-status"[^>]*><\/div>/)?.[0] || '';
+  assert.ok(/role="status"/.test(status) && /aria-live="polite"/.test(status) && / hidden>/.test(status), 'theme status is a polite, initially hidden status region');
+  const health = page.match(/<p id="health"[^>]*>[^<]*<\/p>/)[0], connection = page.match(/<div class="connection">.*?<\/div>/)[0];
+  assert.ok(connection.includes(health) && !connection.includes('theme-status') && page.indexOf(status) > page.indexOf(connection), 'theme status sits outside #health and the connection group');
+  assert.ok(page.indexOf('id="source-health"') > page.indexOf(status), 'console source health stays a separate region');
+  const brand = page.match(/<div class="brand">.*?<\/div>/)[0];
+  assert.ok(brand.includes('<span class="brand-mark" aria-hidden="true">✦</span><img id="brand-logo" class="brand-logo" alt="" hidden><h1>Local observer</h1><span class="read-only">READ ONLY</span>'), 'logo slot follows the mark without replacing heading or READ ONLY label');
+  // Office art: the role table, then the loader/composition, both before the view that owns the load.
+  const scripts = [...page.matchAll(/<script src="([^"]+)"><\/script>/g)].map(match => match[1]);
+  const at = name => scripts.indexOf(name);
+  assert.ok(at('app/scene-art-roles.js') >= 0 && at('app/scene-art-roles.js') < at('app/observer-office-art.js') && at('app/observer-office-art.js') < at('app/observer-view.js'),
+    'scene-art-roles.js and observer-office-art.js load once, before observer-view.js');
+  assert.equal(scripts.filter(name => name === 'app/observer-office-art.js' || name === 'app/scene-art-roles.js').length, 2);
+  const controller = fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8');
+  assert.ok(!controller.includes('theme-status') && !controller.includes('brand-logo'), 'the session controller never writes theme slots');
+}
 (async () => {
   const elements = Object.fromEntries(['world', 'health', 'observed', 'sessions', 'empty', 'filters', 'overview', 'previous-page', 'next-page', 'search', 'page-label', 'room-count', 'counts',
     'zoom-in', 'zoom-out', 'fx-toggle', 'mail-health', 'mail-counts', 'mail-ledger', 'mail-empty', 'mail-detail', 'inspector', 'inspector-log', 'inspector-title', 'inspector-status', 'inspector-task', 'inspector-meta',
@@ -48,7 +68,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   const bodyStyles = new Map(); document.body.style.setProperty = (key, value) => bodyStyles.set(key, value);
   const ObserverView = { create(created) { viewOptions = created; return { setFx(on) { fxState = on; }, fx() { return fxState; }, update(next, payload) { updates.push({ scene: next, options: payload }); }, focus(id) { focuses.push(id); },
     overview() { focuses.push(null); }, zoomBy(factor) { zooms.push(factor); }, start() { lifecycle.push('start'); }, stop() { lifecycle.push('stop'); }, invalidate() { invalidations.push(1); } }; } };
-  const context = { console, Date, Set, Map, document, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, encodeURIComponent,
+  const context = { console, Date, Set, Map, document, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, ThemePack, encodeURIComponent,
     window: { __OBSERVER_THEME__: { fx: false, colors: { accent: '#77dce8', background: '#02060b' } }, localStorage: { getItem() { return 'on'; }, setItem() {} }, addEventListener(name, fn) { events[name] = fn; } }, SPRITES: { init: async () => {} },
     Harness: { api: { get: path => { reads.push(path); return new Promise(() => {}); } } },
     QuerySpine: { define(key, options) { specs.set(key, options); if (key === 'observer.sessions') spec = options; },
@@ -63,9 +83,10 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   // A real poll always parses a new data object; tests that edit rows in place republish them the same way.
   const poll = () => ({ ...snapshot, data: { ...snapshot.data } });
   assert.equal(viewOptions.canvas, elements.world); assert.deepEqual(lifecycle, ['start'], 'one view, started once');
+  assert.equal(viewOptions.theme, ThemePack.getDefault(), 'without a selected snapshot the view paints the canonical default');
   assert.equal(fxState, false, 'explicit theme FX wins over saved browser preference');
   assert.equal(elements['fx-toggle'].attributes['aria-pressed'], 'false');
-  assert.equal(themedStyles.get('--phosphor'), '#77dce8'); assert.equal(themedStyles.get('--bg'), '#02060b');
+  assert.equal(themedStyles.size, 0, 'interface colours come from the theme pack helper, not observer.js');
   assert.equal(bodyStyles.has('--chrome'), false); assert.equal(bodyStyles.has('--glow'), false, 'theme inheritance leaves body stale-state overrides in control');
   elements['fx-toggle'].handlers.click(); assert.equal(fxState, true, 'manual FX toggle remains available');
   listener(snapshot); assert.equal(scene().workers.length, 16); assert.equal(elements.sessions.children.length, 1);
@@ -264,6 +285,39 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     await new Promise(resolve => setImmediate(resolve));
   }
   console.log('observer UI: unresolved, rejected and throwing sprite init never block startup OK');
+  // The selected snapshot reaches the view, layout accents, courier colours and crew init; crew failure warns once and repaints.
+  {
+    const base = ThemePack.getDefault(), accents = Array.from({ length: 10 }, (_, index) => '#c0' + String(index).padStart(2, '0') + 'c' + index);
+    const pack = { version: 1, requestedId: 'synthetic', effectiveId: 'synthetic', warnings: [], ui: base.ui, crew: { blank: base.crew.blank },
+      scene: { ...base.scene, colors: { ...base.scene.colors, 'mail-pending': '#102030' }, projectAccents: accents, backgroundFx: 'none', ambientFx: 'none' } };
+    const own = Object.fromEntries(Object.keys(elements).map(id => [id, element()])), renders = [], inits = [], warnings = [];
+    let created = null, invalidated = 0, live = null, options = null;
+    const ownDocument = { documentElement: element(), body: element(), activeElement: null, hidden: false, getElementById: id => own[id], createElement: element, addEventListener() {} };
+    own.filters.children = ['all', 'working', 'blocked'].map(value => { const node = element(); node.dataset.filter = value; return node; });
+    vm.runInNewContext(fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8'), { ...context, document: ownDocument,
+      window: { ...context.window, __OBSERVER_THEME_PACK__: pack }, SPRITES: { init: arg => { inits.push(arg); return Promise.resolve(); } },
+      ThemePack: { ...ThemePack, reportWarning: warning => warnings.push(warning) },
+      ObserverView: { create: value => { created = value; return { update: (next, payload) => { renders.push(next); options = payload; }, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate: () => { invalidated++; } }; } },
+      QuerySpine: { define() {}, invalidate: () => Promise.resolve(), subscribe(key, fn) { if (key === 'observer.sessions') live = fn; return () => {}; } } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(created.theme, pack, 'the view receives the selected snapshot'); assert(Object.isFrozen(pack.scene.colors), 'and it is frozen');
+    assert.equal(inits.length, 1); assert.equal(inits[0].crew, pack.crew, 'sprite init receives the snapshot crew'); assert.equal(typeof inits[0].onDegraded, 'function');
+    const settled = invalidated;
+    const rows = sessions.slice(0, 2).map(row => ({ ...row, sessionId: 'mail-' + row.id }));
+    live({ data: { sessions: rows, health: 'available', observedAt: Date.now(), bus: { health: 'available', reason: null, observedAt: Date.now(), window: 100,
+      messages: [{ id: 1, from: 'obs_1', to: 'obs_0', sentAt: new Date().toISOString(), acknowledgedAt: null, wake: 'none', identity: 'mail_' + '1'.repeat(64) }] } } });
+    const accent = renders.at(-1).platforms[0].accent;
+    assert(accents.includes(accent) && !base.scene.projectAccents.includes(accent), 'platform accents come from the snapshot slots');
+    assert.deepEqual(options.mailFrame(1000).envelopes.map(envelope => envelope.color), ['#102030'], 'pending envelopes use the snapshot mail colour');
+    inits[0].onDegraded({ skin: 'blank', reason: 'image-load' });
+    assert.equal(warnings.length, 1); assert.equal(invalidated, settled + 1, 'a degraded crew group repaints the scene once');
+    assert.deepEqual({ code: warnings[0].code, pack: warnings[0].pack, group: warnings[0].group }, { code: 'crew-load', pack: 'synthetic', group: 'blank' });
+    assert.equal(warnings[0].message, 'Theme pack synthetic crew blank did not load; showing fallback crew.');
+    inits[0].onDegraded({ skin: '../assets/x.png', reason: 'image-dimensions', error: new Error('/private/path') });
+    assert.deepEqual([warnings[1].code, warnings[1].group], ['crew-dimensions', 'unknown'], 'unsafe group names never reach the warning');
+    assert(!warnings[1].message.includes('/') && !warnings[1].message.includes('Error'), 'no paths or raw errors');
+  }
+  console.log('observer UI: snapshot reaches view, layout accents, courier colours and crew init; crew degradation warns and repaints OK');
 
   // ---------- Task 2: work follows visible change ----------
   {

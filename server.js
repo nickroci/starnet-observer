@@ -9,6 +9,8 @@ const { makePresentationObserver } = require('./sidecar/presentation.js');
 const { redact, setKnownSecretSource } = require('./sidecar/redaction.js');
 const { setClock } = require('./sidecar/failopen.js');
 const { loadConfig, HELP } = require('./sidecar/config.js');
+const { loadThemePack } = require('./sidecar/theme-packs.js');
+const canonicalTheme = require('./frontend/assets/themes/starnet/theme.json');
 const { makeOverseerState, resolveEndpoint } = require('./sidecar/overseer-state.js');
 const { makeControl, PANE } = require('./sidecar/control.js');
 const ROOT = path.join(__dirname, 'frontend');
@@ -16,6 +18,7 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 const SESSION_IDENTITY = /^(?:(?:codex|claude):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|(?:helper:)?obs_[a-f0-9]{24})(?:\|obs_[a-f0-9]{24})?$/i;
 
 function createServer({ observer = makeObserver({ now: Date.now }), token = crypto.randomBytes(32).toString('hex'), theme = {}, control = null } = {}) {
+  const themePack = loadThemePack(theme, ROOT);
   const presentation = observer.presentation === true;
   const safePane = value => typeof value === 'string' && PANE.test(value) ? value : undefined;
   const publicErrors = new Set(['invalid-pane', 'target-unavailable', 'overseer-unavailable', 'overseer-exists']);
@@ -78,8 +81,9 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       if (!canonical.startsWith(ROOT + path.sep)) return json(403, { error: 'Forbidden path' });
       let data = await fs.readFile(canonical);
       if (canonical === path.join(ROOT, 'observer.html')) {
-        const boot = '<script nonce="' + nonce + '">window.__OBSERVER_TOKEN__=' + JSON.stringify(token) + ';window.__OBSERVER_THEME__=' + JSON.stringify(theme).replace(/</g, '\\u003c') + ';window.__OBSERVER_CONTROL__=' + (control ? 'true' : 'false') + ';</script>';
-        data = Buffer.from(data.toString().replace('</head>', boot + '</head>'));
+        const boot = '<script nonce="' + nonce + '">window.__OBSERVER_TOKEN__=' + JSON.stringify(token) + ';window.__OBSERVER_THEME__=' + JSON.stringify(theme).replace(/</g, '\\u003c') + ';window.__OBSERVER_THEME_DEFAULT__=' + JSON.stringify(canonicalTheme).replace(/</g, '\\u003c') + ';window.__OBSERVER_THEME_PACK__=' + JSON.stringify(themePack).replace(/</g, '\\u003c') + ';window.__OBSERVER_CONTROL__=' + (control ? 'true' : 'false') + ';</script>';
+        const html = data.toString();
+        data = Buffer.from(html.replace('<!--observer-boot-->', boot));
       }
       // Stable asset filenames require byte revalidation; HTML and its aliases
       // retain no-store, including pages containing per-launch bootstrap secrets.
@@ -135,7 +139,9 @@ if (require.main === module) {
   const overseerState = makeOverseerState({ endpoint });
   const observer = makeObserver({ now: Date.now, warmDetails: !config.presentation, endpoint, overseerState });
   const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ endpoint, overseerState, target: paneId => observer.controlTarget(paneId), claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean) }) : null;
-  const server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme, control });
+  let server;
+  try { server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme, control }); }
+  catch (error) { console.error('[observer theme]', error.themeReason || redact(String(error.message))); process.exit(1); }
   server.on('error', error => { console.error('[observer]', redact(String(error.message))); process.exitCode = 1; });
   server.listen(port, '127.0.0.1', () => console.log('Local Observer: http://127.0.0.1:' + port + '\nPrivate labels: ' + (config.presentation ? 'on (' + config.labels.company + ')' : 'off') + (control ? '\nControl actions: on (OBSERVER_CONTROL=1): attach, spawn and close Herdr agents from the page.' : '\nRead only.') + ' Stop with Ctrl+C.'));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { server.close(); server.closeAllConnections(); });
