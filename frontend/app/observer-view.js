@@ -7,6 +7,7 @@ const ObserverView = (() => {
   const Scene = typeof module !== 'undefined' && module.exports ? require('./observer-scene.js') : ObserverScene;
   const Themes = typeof module !== 'undefined' && module.exports ? require('./theme-pack.js') : ThemePack;
   const OfficeArt = typeof module !== 'undefined' && module.exports ? require('./observer-office-art.js') : ObserverOfficeArt;
+  const ROLES = typeof module !== 'undefined' && module.exports ? require('./scene-art-roles.js').SCENE_ART_ROLES : SCENE_ART_ROLES;
   /* Every scene colour comes from the canonical default pack, overlaid per view by a resolved snapshot. PALETTE and
      STATUS are read-only views of that default for helpers and tests; no view ever mutates them. */
   const DEFAULT_SCENE = Themes.getDefault().scene;
@@ -255,36 +256,16 @@ const ObserverView = (() => {
     line(ctx, { x: t.x + t.w, y: t.y, z: 2.4 }, { x: t.x + t.w, y: t.y + t.h, z: 2.4 }, C.cyan, 2, 0.8);
     for (let z = 0.6; z < 2.2; z += 0.5) line(ctx, { x: t.x + 0.6, y: t.y + t.h, z }, { x: t.x + t.w - 0.6, y: t.y + t.h, z }, C['tower-window'], 2);
   }
-  function paintStatic(ctx, scene) {
-    const hub = scene.mail.rect;
-    const pieces = [
-      ...scene.platforms.map(platform => ({ key: center(platform.rect).x + center(platform.rect).y, paint: () => paintDeck(ctx, platform.rect, platform.accent, platform.sections.map(s => s.rect)) })),
-      ...scene.walkways.map(walkway => {
-        // Hub links stop at the hub edge so the grate never paints over the pad.
-        const r = walkway.rect, rect = walkway.kind !== 'hub-link' ? r : r.x < hub.x ? { ...r, w: Math.max(0, hub.x - r.x) } : { ...r, x: hub.x + hub.w, w: Math.max(0, r.x + r.w - hub.x - hub.w) };
-        return { key: center(rect).x + center(rect).y + (walkway.kind === 'connector' ? 40 : 0), paint: () => rect.w > 0 && paintWalkway(ctx, { ...walkway, rect }) };
-      }),
-      { key: center(hub).x + center(hub).y + 0.01, paint: () => paintHub(ctx, scene.mail) },
-      ...(scene.observatory ? [{ key: middle(scene.observatory.rect), paint: () => paintObservatoryDeck(ctx, scene.observatory) }] : [])
-    ].sort((a, b) => a.key - b.key);
-    for (const piece of pieces) piece.paint();
-    for (const platform of scene.platforms) {
-      paintRearWalls(ctx, platform.rect);
-      platform.decorationRegions.forEach((region, index) => { if (region.kind === 'wall' || region.kind === 'corner') paintWallRegion(ctx, platform, region, index); });
-    }
-    // Status-driven light pools: the screen glow on a seated worker, never title or timestamp driven.
-    if (decor) for (const worker of scene.workers) {
+  // Status-driven light pools: the screen glow on a seated worker, never title or timestamp driven.
+  function paintPools(ctx, scene) {
+    for (const worker of scene.workers) {
       const status = worker.row.status, scale = worker.scale || 1;
       glow(ctx, { ...worker.chair, y: worker.chair.y + 0.4 }, 44 * scale, C.cyan, status === 'working' ? 0.35 : status === 'blocked' ? 0.12 : 0.06);
       if (status === 'blocked') glow(ctx, { x: worker.desk.x + worker.desk.w - 0.2, y: worker.desk.y + 0.2 }, 26 * scale, S.blocked, 0.25);
     }
-    // Helper tethers: a dashed floor line from the helper's chair to its exact immediate parent's chair.
-    for (const worker of scene.workers) if (worker.connector) {
-      const from = P(worker.connector.from), to = P(worker.connector.to);
-      ctx.save(); ctx.globalAlpha = 0.6; ctx.strokeStyle = worker.accent; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
-      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); ctx.restore();
-    }
   }
+  const paintStatic = (ctx, scene) => staticPass(ctx, scene, { deck: (c, platform) => paintDeck(c, platform.rect, platform.accent, platform.sections.map(s => s.rect)),
+    walkway: paintWalkway, hub: paintHub, observatory: paintObservatoryDeck, walls: paintRearWalls, region: paintWallRegion, pools: decor ? paintPools : null });
   // Observatory deck: a cool counterweight to the amber mailroom. Tall props are depth items, never cached here.
   function paintObservatoryDeck(ctx, observatory) {
     const r = observatory.rect;
@@ -389,8 +370,136 @@ const ObserverView = (() => {
     isoEllipse(ctx, { ...post, z: 1.65 }, 0.14, null, C.window);
     if (decor) glow(ctx, { ...post, z: 0 }, 40, C.amber, 0.22);
   }
+  function paintPlanningDesk(ctx, desk) {
+    box(ctx, desk, 0.55, { top: C['planning-desk-top'], left: C['planning-desk-left'], right: C['planning-desk-right'], edge: C['planning-desk-edge'] });
+    line(ctx, { x: desk.x + 0.3, y: desk.y + desk.h, z: 0.6 }, { x: desk.x + desk.w - 0.3, y: desk.y + desk.h, z: 0.6 }, C.cyan, 1.5, 0.5);
+  }
+  function paintDrone(ctx, drone, now, animate) {
+    const at = P(drone.point), bob = drone.parked && animate ? Math.sin(now / 500) : 0;
+    isoEllipse(ctx, { ...drone.point, z: 0 }, 0.25, null, C['drone-shadow']);
+    ctx.fillStyle = C['drone-body']; ctx.fillRect(at.x - 9, at.y - 4 + bob, 18, 6);
+    ctx.fillStyle = C['drone-wing']; ctx.fillRect(at.x - 12, at.y - 6 + bob, 6, 2); ctx.fillRect(at.x + 6, at.y - 6 + bob, 6, 2);
+    const running = drone.parcels[0] || C.cyan; ctx.fillStyle = running; ctx.fillRect(at.x - 1, at.y - 3 + bob, 2, 2);
+    drone.parcels.forEach((color, index) => { ctx.fillStyle = color; ctx.fillRect(at.x - 4, at.y + 3 + index * 3 + bob, 8, 2); });
+  }
   return { glow, furnishing, furnishings, paintStatic, paintObservatoryScreen, paintTelescope, paintPlant, paintLamp, paintViewer,
-    paintDesk, paintHelperDesk, paintChair, paintPartition, paintApronProp };
+    paintDesk, paintHelperDesk, paintChair, paintPartition, paintApronProp, paintPlanningDesk, paintDrone };
+  }
+  /* One static pass for both art strategies: decks, walkways, hub and observatory sorted by the same keys, then each
+     platform's rear walls and hashed wall/corner units, the station's status pools, and the helper tethers. */
+  function staticPass(ctx, scene, art) {
+    const hub = scene.mail.rect;
+    const pieces = [
+      ...scene.platforms.map(platform => ({ key: center(platform.rect).x + center(platform.rect).y, paint: () => art.deck(ctx, platform) })),
+      ...scene.walkways.map(walkway => {
+        // Hub links stop at the hub edge so the walkway never paints over the pad.
+        const r = walkway.rect, rect = walkway.kind !== 'hub-link' ? r : r.x < hub.x ? { ...r, w: Math.max(0, hub.x - r.x) } : { ...r, x: hub.x + hub.w, w: Math.max(0, r.x + r.w - hub.x - hub.w) };
+        return { key: center(rect).x + center(rect).y + (walkway.kind === 'connector' ? 40 : 0), paint: () => rect.w > 0 && art.walkway(ctx, { ...walkway, rect }) };
+      }),
+      { key: center(hub).x + center(hub).y + 0.01, paint: () => art.hub(ctx, scene.mail) },
+      ...(scene.observatory ? [{ key: middle(scene.observatory.rect), paint: () => art.observatory(ctx, scene.observatory) }] : [])
+    ].sort((a, b) => a.key - b.key);
+    for (const piece of pieces) piece.paint();
+    for (const platform of scene.platforms) {
+      art.walls(ctx, platform.rect);
+      platform.decorationRegions.forEach((region, index) => { if (region.kind === 'wall' || region.kind === 'corner') art.region(ctx, platform, region, index); });
+    }
+    if (art.pools) art.pools(ctx, scene);
+    // Helper tethers: a dashed floor line from the helper's chair to its exact immediate parent's chair.
+    for (const worker of scene.workers) if (worker.connector) {
+      const from = P(worker.connector.from), to = P(worker.connector.to);
+      ctx.save(); ctx.globalAlpha = 0.6; ctx.strokeStyle = worker.accent; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); ctx.restore();
+    }
+  }
+
+  /* Home-office painters: the station's passes, footprints, hashes and depth keys drawn with the fixed role PNGs at
+     native size (ObserverOfficeArt.create). Procedural overlays stay application-owned and flat: two-tone outlined side
+     faces, project-hue rugs and trims, steady status lamps and contact shadows. Nothing glows, sparks or animates. */
+  // Each station wall/corner kind keeps its hashed slot: [role, along inset, depth inset] inside its reserved unit.
+  const OFFICE_WALL = { rack: ['cabinet', 0.1, 0.1], screen: ['bookcase', 0.1, 0.05], vent: ['radiator', 0.3, 0.2], board: ['board', 0.2, 0.2] };
+  const OFFICE_CORNER = { tank: ['waterCooler', 0.1, 0.2], planter: ['plant', 0, 0.5], crates: ['basket', 0.1, 0.3], mast: ['lamp', 0, 0.5] };
+  // Pure placement: the role and its extent rect (origin = role foot), fitted against the wall, never past the unit.
+  function officeFurnishing(kind, unit, edge) {
+    if (OFFICE_CORNER[kind]) { const [role, a, d] = OFFICE_CORNER[kind], e = ROLES[role].extent; return { role, rect: { x: unit.x + a, y: unit.y + d, w: e.w, h: e.h } }; }
+    const [stem, along, inset] = OFFICE_WALL[kind], rearX = edge === 'rear-x', role = stem + (rearX ? 'X' : 'Y'), e = ROLES[role].extent;
+    const depth = Math.max(0, Math.min(inset, rearX ? unit.w - e.w : unit.h - e.h));
+    return { role, rect: rearX ? { x: unit.x + depth, y: unit.y + along, w: e.w, h: e.h } : { x: unit.x + along, y: unit.y + depth, w: e.w, h: e.h } };
+  }
+  function officePaintersFor({ colors: C, status: S }, art) {
+    const outline = C['body-outline'];
+    // Flat skirts: the shaded (+y) face and the lit (+x, chamfer) face, each with a crisp one-pixel outline.
+    function faces(ctx, points, top, bottom) {
+      ctx.lineWidth = 1;
+      for (const { a, b, side } of visibleFaces(points))
+        poly(ctx, [P({ ...a, z: top }), P({ ...b, z: top }), P({ ...b, z: bottom }), P({ ...a, z: bottom })], side === 'left' ? C.hullLeft : C.hullRight, outline);
+    }
+    function floor(ctx, points, role, rect) {
+      ctx.save(); ctx.beginPath(); points.map(point => P(point)).forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)); ctx.closePath(); ctx.clip();
+      art.tile(ctx, role, rect); ctx.restore();
+      poly(ctx, points.map(point => P(point)), null, outline);
+    }
+    // Project hue appears only as a rug and a skirting stripe, never as a lit edge.
+    function rug(ctx, rect, accent) {
+      poly(ctx, rectPoly({ x: rect.x + 0.75, y: rect.y + 0.75, w: rect.w - 1.5, h: rect.h - 1.5 }), withAlpha(accent, 0.16), withAlpha(accent, 0.7));
+    }
+    function stripe(ctx, rect, accent, z) {
+      line(ctx, { x: rect.x, y: rect.y + rect.h, z }, { x: rect.x + rect.w, y: rect.y + rect.h, z }, accent);
+      line(ctx, { x: rect.x + rect.w, y: rect.y + rect.h, z }, { x: rect.x + rect.w, y: rect.y, z }, accent);
+    }
+    // The corner owns the first rear-x and rear-y cells; whole wall units repeat from there along both rear edges.
+    function walls(ctx, r) {
+      art.draw(ctx, 'wallCorner', r);
+      art.edge(ctx, 'wallRearX', { x: r.x, y: r.y + 2, w: 0, h: r.h - 2 });
+      art.edge(ctx, 'wallRearY', { x: r.x + 1, y: r.y, w: r.w - 1, h: 0 });
+    }
+    function deck(ctx, platform) {
+      const r = platform.rect;
+      faces(ctx, corners(r), 0, -1); stripe(ctx, r, platform.accent, -0.25);
+      floor(ctx, corners(r), 'floor', r);
+      platform.sections.forEach((section, index) => { if (index % 2) art.tile(ctx, 'floorAlt', section.rect); rug(ctx, section.rect, platform.accent); });
+    }
+    function region(ctx, platform, value, index) {
+      const kinds = value.kind === 'corner' ? CORNER_KINDS : WALL_KINDS;
+      wallUnits(value).forEach((unit, slot) => { const { role, rect } = officeFurnishing(kinds[hash(platform.key + ':' + index + ':' + slot) % kinds.length], unit, value.edge); art.draw(ctx, role, rect); });
+    }
+    function walkway(ctx, value) { const r = value.rect; faces(ctx, corners(r), 0, -0.35); floor(ctx, corners(r), 'corridor', r); }
+    // Mail room: round mats on the pads, reception and sorting cabinet at the rear, tray at the pod, counter at the chute.
+    function hub(ctx, mail) {
+      const r = mail.rect, c = 2, oct = [{ x: r.x + c, y: r.y }, { x: r.x, y: r.y + c }, { x: r.x, y: r.y + r.h - c }, { x: r.x + c, y: r.y + r.h },
+        { x: r.x + r.w - c, y: r.y + r.h }, { x: r.x + r.w, y: r.y + r.h - c }, { x: r.x + r.w, y: r.y + c }, { x: r.x + r.w - c, y: r.y }];
+      faces(ctx, oct, 0, -1.5); floor(ctx, oct, 'floorAlt', r);
+      for (const pad of mail.pads) art.draw(ctx, 'mailPad', { x: pad.x - 1.1, y: pad.y - 1.1 });
+      const pod = mail.pod[0], chute = mail.chute[0];
+      [['mailReception', { x: r.x + 1, y: r.y + 1, w: 4, h: 3 }], ['mailSorter', mail.tower], ['dispatchCounter', { x: r.x - 1.5, y: chute.y - 0.35, w: 4, h: 0.7 }],
+        ['mailTray', { x: pod.x - 0.6, y: pod.y - 0.5, w: 1.2, h: 1 }]].sort((a, b) => middle(a[1]) - middle(b[1])).forEach(([role, rect]) => art.draw(ctx, role, rect));
+    }
+    function observatory(ctx, o) { const r = o.rect; faces(ctx, corners(r), 0, -1); floor(ctx, corners(r), 'floor', r); walls(ctx, r); }
+    const paintStatic = (ctx, scene) => staticPass(ctx, scene, { deck, walkway, hub, observatory, walls, region, pools: null });
+    // Observed status lamp: a steady outlined dot in the status colour, never a glow or blink.
+    const lamp = (ctx, point, radius, status) => isoEllipse(ctx, point, radius, outline, S[status] || S.unknown, 1);
+    return {
+      paintStatic,
+      desk: (ctx, worker) => { const d = worker.desk; art.draw(ctx, 'desk', d); lamp(ctx, { x: d.x + 1.85, y: d.y + 0.9, z: 0.6 }, 0.09, worker.row.status); },
+      helperDesk: (ctx, worker) => { const d = worker.desk; art.draw(ctx, 'helperDesk', d); lamp(ctx, { x: d.x + 0.15, y: d.y + d.h - 0.15, z: 0.5 }, 0.07, worker.row.status); },
+      // Native chairs at the seat anchor: the smaller helper PNG for scaled helpers, the root chair otherwise.
+      chair: (ctx, worker) => art.draw(ctx, worker.scale && worker.scale !== 1 ? 'helperChair' : 'chair', worker.chair),
+      partition: (ctx, unit, accent, end) => { art.draw(ctx, end ? 'partitionX' : 'partitionY', unit); line(ctx, { x: unit.x, y: unit.y + unit.h, z: 0.6 }, { x: unit.x + unit.w, y: unit.y + unit.h, z: 0.6 }, accent, 1, 0.55); },
+      apron: (ctx, value) => art.draw(ctx, 'apron', value.rect),
+      planningDesk: (ctx, desk) => art.draw(ctx, 'desk', desk),
+      viewer: (ctx, viewer) => { isoEllipse(ctx, viewer.point, 0.28, null, C['contact-shadow']); art.draw(ctx, 'viewer', viewer.point); },
+      screen: (ctx, screen) => art.draw(ctx, 'planningBoard', screen.rect),
+      telescope: (ctx, telescope) => art.draw(ctx, 'planningShelf', telescope.rect),
+      plant: (ctx, plant) => art.draw(ctx, 'plant', plant.rect),
+      lamp: (ctx, light) => art.draw(ctx, 'lamp', light.rect),
+      // Paper carrier at the exact airborne point; parcel colours and counts as observed, no bob or running light.
+      drone: (ctx, drone) => {
+        isoEllipse(ctx, { ...drone.point, z: 0 }, 0.25, null, C['drone-shadow']);
+        art.draw(ctx, 'carrier', drone.point);
+        const at = P(drone.point), x = Math.round(at.x), y = Math.round(at.y);
+        drone.parcels.forEach((color, index) => { ctx.fillStyle = color; ctx.fillRect(x - 4, y + 5 + index * 3, 8, 2); });
+      }
+    };
   }
   // Default-look painters back the exported helpers, so omitting a theme keeps the canonical station.
   const DEFAULT_ART = paintersFor(resolveLook());
@@ -405,7 +514,7 @@ const ObserverView = (() => {
     const ctx = canvas.getContext('2d');
     // Instance-local look: another view on the page, themed or not, never shares or changes it.
     const look = resolveLook(theme), C = look.colors, S = look.status, decor = look.ambientFx === 'station', rain = look.backgroundFx === 'rain';
-    const { glow, paintStatic, paintObservatoryScreen, paintTelescope, paintPlant, paintLamp, paintViewer, paintDesk, paintHelperDesk, paintChair, paintPartition, paintApronProp } = paintersFor(look);
+    const station = paintersFor(look), { glow } = station;
     const movement = Scene.createMovement(), bodies = new Map();
     /* stale: the whole inventory (scene ambience). rowStale: one worker's own source health and observation time;
        a fresh Desktop source never animates or blesses a stale Herdr or helper row. */
@@ -459,6 +568,7 @@ const ObserverView = (() => {
       status.reportNotice('scene-art', null);
       if (result.state === 'ready') {
         office.composition = OfficeArt.create({ images: result.images, colors: C, project: P, crewHeight: CREW_HEIGHT });
+        office.painters = officePaintersFor(look, office.composition);
         office.state = 'ready';
         invalidate();
         return;
@@ -468,10 +578,13 @@ const ObserverView = (() => {
       status.reportWarning({ code: reason, pack: packId, message: 'Theme pack ' + packId + (reason === 'scene-art-dimensions'
         ? ' office art has the wrong image sizes; showing station art.' : ' office art did not load; showing station art.') });
     }
-    /* The single art dispatch point: 'office' only once the complete group is ready. Slice 4b replaces the office
-       entry with the fixed role painters; until then office mode reuses the station static painter. */
+    /* The single art dispatch point: 'office' only once the complete group is ready, then every scene role paints
+       through the office painters in the same passes, footprints and depth keys; otherwise the complete station. */
     const artMode = () => (office && office.state === 'ready' ? 'office' : 'station');
-    const artPainters = { station: { paintStatic }, office: { paintStatic } };
+    const stationArt = { paintStatic: station.paintStatic, desk: station.paintDesk, helperDesk: station.paintHelperDesk, chair: station.paintChair,
+      partition: station.paintPartition, apron: station.paintApronProp, planningDesk: station.paintPlanningDesk, viewer: station.paintViewer,
+      screen: station.paintObservatoryScreen, telescope: station.paintTelescope, plant: station.paintPlant, lamp: station.paintLamp, drone: station.paintDrone };
+    const artPainters = () => (artMode() === 'office' ? office.painters : stationArt);
 
     function measure() {
       const width = canvas.clientWidth || canvas.width || 1, height = canvas.clientHeight || canvas.height || 1, ratio = dprOf();
@@ -567,7 +680,9 @@ const ObserverView = (() => {
       const width = Math.max(1, Math.floor(spanX * resolution)), height = Math.max(1, Math.floor(spanY * resolution));
       const layer = makeCanvas(width, height), layerCtx = layer.getContext('2d'), sx = width / spanX, sy = height / spanY;
       layerCtx.setTransform(sx, 0, 0, sy, -b.minX * sx, -b.minY * sy);
-      artPainters[artMode()].paintStatic(layerCtx, scene);
+      // Office pixel art stays crisp when magnified; it is only smoothed when the bucket shrinks it.
+      if (artMode() === 'office') layerCtx.imageSmoothingEnabled = resolution < 1;
+      artPainters().paintStatic(layerCtx, scene);
       staticLayer = { key, canvas: layer, resolution, bounds: b, builds: (staticLayer ? staticLayer.builds : 0) + 1 };
       return staticLayer;
     }
@@ -744,6 +859,8 @@ const ObserverView = (() => {
     }
     function paintSpace(now, animate) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // Office art: one flat warm backdrop, with or without FX; no sky, rain or motes.
+      if (artMode() === 'office') { ctx.fillStyle = C['office-backdrop']; ctx.fillRect(0, 0, viewport.width, viewport.height); return; }
       ctx.fillStyle = C.space; ctx.fillRect(0, 0, viewport.width, viewport.height);
       // ambientFx none keeps only the backdrop fill (and rain when FX are on); backgroundFx none drops only the rain.
       if (!decor) { if (fx && rain) paintMatrixRain(now, animate); return; }
@@ -977,7 +1094,9 @@ const ObserverView = (() => {
       if (onStage({ x: actor.point.x - 0.3, y: actor.point.y - 0.3, w: 0.6, h: 0.6 }, 0, 2)) isoEllipse(ctx, actor.point, 0.28 * size, null, C['contact-shadow']);
       body.px = foot.x; body.py = foot.y; body.dir = actor.direction;
       body.state = actor.pose === 'walk' ? 'walk' : 'idle'; body.working = actor.pose === 'working'; body.sitting = actor.pose === 'working';
-      if (fx && decor) paintAgentAura(worker, foot, null, now, !reduced, true);
+      // Auras are station decoration; office crew carry only their contact shadow, plates and rings.
+      const art = artMode(), aura = fx && decor && art === 'station';
+      if (aura) paintAgentAura(worker, foot, null, now, !reduced, true);
       ctx.save(); ctx.translate(foot.x, foot.y); ctx.scale(scale, scale); ctx.translate(-foot.x, -foot.y);
       let extent = null;
       // The stateful sprite call always runs (pose, facing, frame and skin loading advance); the shared seam rejects
@@ -990,7 +1109,7 @@ const ObserverView = (() => {
       };
       /* Station art (and pending/failed office art) draws through the sprite engine; office art only with a ready
          replacement group, since default android frames never stand in an office. */
-      const art = artMode(), appearance = { reducedMotion: reduced, skipGroundShadow: true, shouldPaint };
+      const appearance = { reducedMotion: reduced, skipGroundShadow: true, shouldPaint };
       if (office && art === 'station') appearance.group = 'default';
       if (art === 'station' || replacementReady(body.skin)) {
         try { extent = sprites && sprites.drawBody ? sprites.drawBody(ctx, body, now, appearance) : null; } catch (_) { extent = null; }
@@ -1011,7 +1130,7 @@ const ObserverView = (() => {
         ctx.beginPath(); ctx.arc(foot.x, foot.y - h * 0.84, 6 * size, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore();
         extent = { top: foot.y - h, w, h, fallback: true };
       } else if (!extent.fallback) extent = { top: foot.y + (extent.top - foot.y) * scale, w: extent.w * scale, h: extent.h * scale, painted: extent.painted };
-      if (fx && decor) paintAgentAura(worker, foot, extent, now, !reduced, false);
+      if (aura) paintAgentAura(worker, foot, extent, now, !reduced, false);
       // Hit regions are in CSS pixels; DPR only touches the backing store.
       const left = camera.tx + (foot.x - extent.w / 2) * camera.zoom, top = camera.ty + extent.top * camera.zoom;
       const width = extent.w * camera.zoom, height = extent.h * camera.zoom, padX = Math.max(0, (MIN_HIT - width) / 2), padY = Math.max(0, (MIN_HIT - height) / 2);
@@ -1053,14 +1172,8 @@ const ObserverView = (() => {
         }
         ctx.restore();
       }
-      for (const drone of mail.drones) {
-        const at = P(drone.point), bob = drone.parked && animate ? Math.sin(now / 500) : 0;
-        isoEllipse(ctx, { ...drone.point, z: 0 }, 0.25, null, C['drone-shadow']);
-        ctx.fillStyle = C['drone-body']; ctx.fillRect(at.x - 9, at.y - 4 + bob, 18, 6);
-        ctx.fillStyle = C['drone-wing']; ctx.fillRect(at.x - 12, at.y - 6 + bob, 6, 2); ctx.fillRect(at.x + 6, at.y - 6 + bob, 6, 2);
-        const running = drone.parcels[0] || C.cyan; ctx.fillStyle = running; ctx.fillRect(at.x - 1, at.y - 3 + bob, 2, 2);
-        drone.parcels.forEach((color, index) => { ctx.fillStyle = color; ctx.fillRect(at.x - 4, at.y + 3 + index * 3 + bob, 8, 2); });
-      }
+      const art = artPainters();
+      for (const drone of mail.drones) art.drone(ctx, drone, now, animate);
     }
 
     // ---------- plates (screen space) ----------
@@ -1162,54 +1275,57 @@ const ObserverView = (() => {
       const mail = mailFrame ? mailFrame(now) : { drones: [], envelopes: [] };
       paintSpace(now, animate);
       ctx.setTransform(dpr * camera.zoom, 0, 0, dpr * camera.zoom, dpr * camera.tx, dpr * camera.ty);
-      const layer = staticFor(), b = layer.bounds;
+      const layer = staticFor(), b = layer.bounds, A = artPainters(), stationArt = A !== office?.painters, ambient = fx && decor && stationArt;
+      // Office art: nearest-neighbour while magnified (crisp pixel outlines), smoothed only when shrunk.
+      if (!stationArt) ctx.imageSmoothingEnabled = camera.zoom * dpr <= layer.resolution;
       ctx.drawImage(layer.canvas, b.minX, b.minY, b.maxX - b.minX, b.maxY - b.minY);
-      // Hub ambience: radar dish and beacon sweep (cosmetic).
-      const t = scene.mail.tower, top = { x: t.x + t.w / 2, y: t.y + t.h / 2, z: 3.2 }, at = P(top);
-      const sweep = animate ? (now / 20000) * Math.PI * 2 : 0.6;
-      ctx.strokeStyle = C.rail; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(at.x, at.y); ctx.lineTo(at.x, at.y - 14); ctx.stroke(); ctx.lineWidth = 1;
-      ctx.fillStyle = C['radar-sweep']; ctx.beginPath(); ctx.ellipse(at.x, at.y - 16, 14 * Math.abs(Math.cos(sweep)) + 3, 6, 0, 0, Math.PI * 2); ctx.fill();
-      if (decor) glow(ctx, { ...top, z: 3.9 }, 22, C.amber, animate ? 0.35 + 0.3 * Math.max(0, Math.sin(now / 4000 * Math.PI * 2)) : 0.35);
+      if (!stationArt) ctx.imageSmoothingEnabled = camera.zoom * dpr < 1;
+      // Hub ambience: radar dish and beacon sweep (cosmetic, station only).
+      if (stationArt) {
+        const t = scene.mail.tower, top = { x: t.x + t.w / 2, y: t.y + t.h / 2, z: 3.2 }, at = P(top);
+        const sweep = animate ? (now / 20000) * Math.PI * 2 : 0.6;
+        ctx.strokeStyle = C.rail; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(at.x, at.y); ctx.lineTo(at.x, at.y - 14); ctx.stroke(); ctx.lineWidth = 1;
+        ctx.fillStyle = C['radar-sweep']; ctx.beginPath(); ctx.ellipse(at.x, at.y - 16, 14 * Math.abs(Math.cos(sweep)) + 3, 6, 0, 0, Math.PI * 2); ctx.fill();
+        if (decor) glow(ctx, { ...top, z: 3.9 }, 22, C.amber, animate ? 0.35 + 0.3 * Math.max(0, Math.sin(now / 4000 * Math.PI * 2)) : 0.35);
+      }
       // Depth-sorted solid furniture, apron posts and crew. Wholly offscreen furniture is never submitted; every crew
       // body is submitted so its sprite state advances, and the shared sprite seam skips its pixels when off stage.
       const items = [], zoom = camera.zoom;
       visibleArea = { left: -camera.tx / zoom, top: -camera.ty / zoom, right: (viewport.width - camera.tx) / zoom, bottom: (viewport.height - camera.ty) / zoom };
-      if (fx && decor) paintPlatformGlow(now, animate);
-      if (fx && decor) paintFurnitureFx(now, animate);
+      if (ambient) paintPlatformGlow(now, animate);
+      if (ambient) paintFurnitureFx(now, animate);
       const byId = new Map(actors.map(actor => [actor.id, actor])), staleKeys = new Set();
       for (const worker of scene.workers) {
         // Each worker animates on its own row's freshness; a stale row freezes its desk, sprite breathing and blinks.
         const own = workerStale(worker), live = animate && !own;
         if (own) staleKeys.add(worker.platformKey);
-        const paintStation = worker.kind === 'helper' ? paintHelperDesk : paintDesk;
+        const paintStation = worker.kind === 'helper' ? A.helperDesk : A.desk;
         if (onStage(worker.desk, 1.1, 16)) items.push({ depth: middle(worker.desk), draw: () => paintStation(ctx, worker, now, live) });
-        if (fx && decor && onStage(worker.desk, 1.1, 24)) items.push({ depth: middle(worker.desk) + 0.01, draw: () => paintDeskFx(worker, now, live) });
+        if (ambient && onStage(worker.desk, 1.1, 24)) items.push({ depth: middle(worker.desk) + 0.01, draw: () => paintDeskFx(worker, now, live) });
         const c = worker.chair;
-        if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: c.x + c.y - 0.6, draw: () => paintChair(ctx, worker) });
+        if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: c.x + c.y - 0.6, draw: () => A.chair(ctx, worker) });
         const actor = byId.get(worker.id);
         if (actor) items.push({ depth: actor.point.x + actor.point.y, tie: worker.id, draw: () => paintCrew(worker, actor, now, !live) });
       }
       const observatory = scene.observatory;
       if (observatory) {
         const { desk, chair, viewer } = observatory;
-        if (onStage(desk, 1.1, 16)) items.push({ depth: middle(desk), draw: () => {
-          box(ctx, desk, 0.55, { top: C['planning-desk-top'], left: C['planning-desk-left'], right: C['planning-desk-right'], edge: C['planning-desk-edge'] });
-          line(ctx, { x: desk.x + 0.3, y: desk.y + desk.h, z: 0.6 }, { x: desk.x + desk.w - 0.3, y: desk.y + desk.h, z: 0.6 }, C.cyan, 1.5, 0.5);
-        } });
-        if (onStage({ x: chair.x - 0.3, y: chair.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: chair.x + chair.y - 0.6, draw: () => paintChair(ctx, { chair }) });
-        if (onStage({ x: viewer.point.x - 0.5, y: viewer.point.y - 0.5, w: 1, h: 1 }, 2, 12)) items.push({ depth: viewer.point.x + viewer.point.y, tie: viewer.id, draw: () => paintViewer(ctx, viewer) });
-        for (const screen of observatory.screens) if (onStage(screen.rect, screen.height, 8)) items.push({ depth: middle(screen.rect), draw: () => paintObservatoryScreen(ctx, screen, now, animate) });
-        for (const telescope of observatory.telescopes) if (onStage(telescope.rect, telescope.height, 8)) items.push({ depth: middle(telescope.rect), draw: () => paintTelescope(ctx, telescope, now, animate) });
-        if (onStage(observatory.plant.rect, observatory.plant.height, 8)) items.push({ depth: middle(observatory.plant.rect), draw: () => paintPlant(ctx, observatory.plant) });
-        if (onStage(observatory.light.rect, observatory.light.height, 8)) items.push({ depth: middle(observatory.light.rect), draw: () => paintLamp(ctx, observatory.light) });
+        if (onStage(desk, 1.1, 16)) items.push({ depth: middle(desk), draw: () => A.planningDesk(ctx, desk) });
+        if (onStage({ x: chair.x - 0.3, y: chair.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: chair.x + chair.y - 0.6, draw: () => A.chair(ctx, { chair }) });
+        if (onStage({ x: viewer.point.x - 0.5, y: viewer.point.y - 0.5, w: 1, h: 1 }, 2, 12)) items.push({ depth: viewer.point.x + viewer.point.y, tie: viewer.id, draw: () => A.viewer(ctx, viewer) });
+        for (const screen of observatory.screens) if (onStage(screen.rect, screen.height, 8)) items.push({ depth: middle(screen.rect), draw: () => A.screen(ctx, screen, now, animate) });
+        for (const telescope of observatory.telescopes) if (onStage(telescope.rect, telescope.height, 8)) items.push({ depth: middle(telescope.rect), draw: () => A.telescope(ctx, telescope, now, animate) });
+        if (onStage(observatory.plant.rect, observatory.plant.height, 8)) items.push({ depth: middle(observatory.plant.rect), draw: () => A.plant(ctx, observatory.plant) });
+        if (onStage(observatory.light.rect, observatory.light.height, 8)) items.push({ depth: middle(observatory.light.rect), draw: () => A.lamp(ctx, observatory.light) });
       }
+      // Partition runs are cut into whole units so they depth-sort with crew; `end` marks a run's exposed last unit.
       for (const platform of scene.platforms) for (const section of platform.sections) for (const wall of section.partitions || [])
         for (let x = wall.x; x < wall.x + wall.w - 1e-6; x++) {
-          const unit = { x, y: wall.y, w: Math.min(1, wall.x + wall.w - x), h: wall.h };
-          if (onStage(unit, 0.6, 4)) items.push({ depth: unit.x + unit.w / 2 + unit.y + unit.h / 2, draw: () => paintPartition(ctx, unit, platform.accent) });
+          const unit = { x, y: wall.y, w: Math.min(1, wall.x + wall.w - x), h: wall.h }, end = x + 1 >= wall.x + wall.w - 1e-6;
+          if (onStage(unit, 0.6, 4)) items.push({ depth: unit.x + unit.w / 2 + unit.y + unit.h / 2, draw: () => A.partition(ctx, unit, platform.accent, end) });
         }
       for (const platform of scene.platforms) for (const region of platform.decorationRegions) if (region.kind === 'apron' && onStage(region.rect, 1.8, 44))
-        items.push({ depth: region.rect.x + region.rect.y + 1, draw: () => paintApronProp(ctx, region) });
+        items.push({ depth: region.rect.x + region.rect.y + 1, draw: () => A.apron(ctx, region) });
       items.sort((a, b) => a.depth - b.depth || String(a.tie || '').localeCompare(String(b.tie || '')));
       for (const item of items) item.draw();
       /* The selected repository's crew, roots and helpers alike, each get a ring; a worker whose own fresh status is
@@ -1218,7 +1334,7 @@ const ObserverView = (() => {
       if (selectedRepo != null) for (const worker of scene.workers) {
         const point = worker.row.repoId === selectedRepo && pointOf(worker.id); if (!point) continue;
         const working = worker.row.status === 'working' && !workerStale(worker), radius = 0.62 * worker.scale;
-        if (working) glow(ctx, point, 40 * worker.scale, C.repo, 0.4);
+        if (working && stationArt) glow(ctx, point, 40 * worker.scale, C.repo, 0.4);
         isoEllipse(ctx, point, radius, C.repo, null, working ? 3 : 1.5);
         if (working) isoEllipse(ctx, point, radius + 0.16, C.repo, null, 1);
       }
@@ -1233,6 +1349,7 @@ const ObserverView = (() => {
       const zoomed = mode === 'platform' && scene.platforms.find(value => value.key === platform);
       if (zoomed) { ctx.save(); ctx.lineWidth = 2 / zoom; poly(ctx, rectPoly(zoomed.rect, 0.02), null, zoomed.accent); ctx.restore(); }
       paintMail(mail, now, animate);
+      if (!stationArt) ctx.imageSmoothingEnabled = true;
       if (isStale) { ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.save(); ctx.globalCompositeOperation = 'saturation'; ctx.fillStyle = C['stale-overlay']; ctx.fillRect(0, 0, viewport.width, viewport.height); ctx.restore(); }
       // Hovering a worker's own name plate keeps it hovered, so the plate stays put to be clicked.
       if (pointer) { hovered = Scene.hitTest(pointer, regions) || titleAt(pointer); canvas.style.cursor = drag && drag.moved ? 'grabbing' : hovered || signAt(pointer) ? 'pointer' : 'grab'; }
@@ -1355,6 +1472,6 @@ const ObserverView = (() => {
       signRegions: () => signRegions.map(region => ({ ...region })) };
   }
   const { furnishing, furnishings, paintDesk, paintHelperDesk } = DEFAULT_ART;
-  return { create, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
+  return { create, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, officeFurnishing, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverView;
