@@ -56,7 +56,7 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
         const mail = url.pathname.match(/^\/api\/observer\/messages\/([1-9][0-9]{0,15})\/inspect$/);
         if (mail && Number.isSafeInteger(Number(mail[1]))) {
           if (identities.length > 1 || identities.length === 1 && !/^mail_[a-f0-9]{64}$/.test(identities[0])) return json(400, { id: Number(mail[1]), identity: null, health: 'unavailable', reason: 'invalid-identity', text: null });
-          const data = observer.inspectMessage(Number(mail[1]), identities[0]);
+          const data = await observer.inspectMessage(Number(mail[1]), identities[0]);
           return json(data.reason === 'missing-message' ? 404 : 200, data);
         }
         return json(404, { error: 'Unknown observer route' });
@@ -72,6 +72,21 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
         const boot = '<script nonce="' + nonce + '">window.__OBSERVER_TOKEN__=' + JSON.stringify(token) + ';window.__OBSERVER_THEME__=' + JSON.stringify(theme).replace(/</g, '\\u003c') + ';window.__OBSERVER_CONTROL__=' + (control ? 'true' : 'false') + ';</script>';
         data = Buffer.from(data.toString().replace('</head>', boot + '</head>'));
       }
+      // Stable asset filenames require byte revalidation; HTML and its aliases
+      // retain no-store, including pages containing per-launch bootstrap secrets.
+      if (!/\.html?$/i.test(file) && !/\.html?$/i.test(canonical)) {
+        const etag = '"' + crypto.createHash('sha256').update(data).digest('hex') + '"';
+        res.setHeader('Cache-Control', 'private, no-cache');
+        res.setHeader('ETag', etag);
+        const matches = (req.headers['if-none-match'] || '').split(',').some(value => {
+          const candidate = value.trim();
+          return candidate === '*' || candidate.replace(/^W\//, '') === etag;
+        });
+        if (matches) {
+          res.writeHead(304);
+          return res.end();
+        }
+      }
       res.writeHead(200, { 'Content-Type': MIME[path.extname(canonical)] || 'application/octet-stream' });
       res.end(data);
     } catch (error) {
@@ -81,6 +96,18 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       json(500, { error: 'Observer request failed' });
     }
   });
+  const closeHttp = server.close.bind(server);
+  let closing = null;
+  server.close = function close(callback) {
+    if (!closing) {
+      closing = Promise.all([
+        new Promise((resolve, reject) => closeHttp(error => error && error.code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolve())),
+        Promise.resolve().then(() => observer.close?.())
+      ]).then(() => {});
+    }
+    if (callback) closing.then(() => callback(), callback);
+    return server;
+  };
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
   return server;
@@ -95,7 +122,7 @@ if (require.main === module) {
   const heldSecrets = () => Object.entries(process.env).filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY/i.test(name)).map(([, value]) => value);
   setKnownSecretSource(heldSecrets);
   setClock(Date.now);
-  const local = makeObserver({ now: Date.now });
+  const local = makeObserver({ now: Date.now, warmDetails: !config.presentation });
   const remoteHosts = config.remotes.length ? makeRemoteHosts({ remotes: config.remotes, now: Date.now }) : null;
   const observer = remoteHosts ? makeFederatedObserver(local, remoteHosts, Date.now) : local;
   const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean) }) : null;

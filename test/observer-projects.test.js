@@ -18,6 +18,37 @@ assert.throws(() => makeProjectResolver({ execute: execFile }), /requires an inj
     const root = path.join(temp, 'a', 'same name'), other = path.join(temp, 'b', 'same name');
     await repository(root, true); await fs.mkdir(path.join(root, 'nested')); await repository(other);
     const worktree = path.join(temp, 'linked checkout'); await git(root, ['worktree', 'add', '-q', '--detach', worktree]);
+    const batch = makeProjectResolver({ now: () => 1000, execute: execFile });
+    const batchRows = await batch.resolveMany([worktree, root, worktree]);
+    assert.equal(batchRows[0].repoId, batchRows[1].repoId, 'linked-first batch uses observed main proof');
+    assert.deepEqual(batchRows[0], batchRows[2], 'duplicate cwd keeps input alignment');
+    assert.equal(batchRows[0].worktree, 'linked checkout');
+    const cachePressure = Array.from({ length: 257 }, (_, index) => temp + '/.'.repeat(index + 1));
+    const pressured = makeProjectResolver({ now: () => 1000, execute: async (...args) => {
+      if (args[1][1] === await fs.realpath(temp)) throw new Error('Fixture folder is not a checkout');
+      return execFile(...args);
+    } });
+    const pressuredRows = await pressured.resolveMany([worktree, root, ...cachePressure]);
+    assert.equal(pressuredRows[0].repoId, pressuredRows[1].repoId, 'current main proof survives bounded-cache eviction within batch');
+    let active = 0, maximum = 0, calls = 0;
+    const gates = [];
+    const bounded = makeProjectResolver({ now: () => 1000, execute: async (...args) => {
+      calls++; maximum = Math.max(maximum, ++active);
+      await new Promise(resolve => gates.push(resolve));
+      try { return await execFile(...args); } finally { active--; }
+    } });
+    const folders = Array.from({ length: 9 }, (_, index) => path.join(temp, 'batch-' + index));
+    for (const folder of folders) await fs.mkdir(folder);
+    let complete = false;
+    const resolving = bounded.resolveMany([...folders, folders[0]]).then(value => { complete = true; return value; });
+    while (!complete) {
+      await new Promise(resolve => setImmediate(resolve));
+      if (gates.length) gates.splice(0).reverse().forEach(release => release());
+    }
+    const boundedRows = await resolving;
+    assert.equal(maximum, 4, 'discovery runs concurrently with four active operations');
+    assert.equal(calls, folders.length, 'batch deduplicates cwd discovery');
+    assert.deepEqual(boundedRows.map(row => row.repo), [...folders, folders[0]].map(folder => path.basename(folder)));
 
     // A projects root reached through a symlink, holding a two-repository group, Personal and direct repositories.
     const projects = path.join(temp, 'Projects'), alias = path.join(temp, 'ProjectsAlias');

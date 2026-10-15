@@ -3,11 +3,13 @@ const assert = require('node:assert/strict');
 const { makePresentationObserver } = require('../sidecar/presentation.js');
 const { createServer } = require('../server.js');
 (async () => {
-  let inspected = 0;
+  let inspected = 0, closes = 0;
+  let releaseClose;
+  const closeGate = new Promise(resolve => { releaseClose = resolve; });
   const secret = 'PRIVATE-COMPANY-CANARY';
   const parent = { id: 'obs_' + 'a'.repeat(24), provider: 'codex', source: 'herdr', status: 'working', projectId: 'prj_1', project: secret,
     repoId: 'repo_1', repo: secret, worktree: secret, paneId: secret, title: secret, sessionId: secret, inspectionIdentity: secret,
-    inventoryHealth: 'available', observedAt: 1000, presence: 'pane', tool: { available: true, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: 1000, text: secret }, raw: secret }, unexpected: secret };
+    inventoryHealth: 'available', observedAt: 1000, presence: 'pane', tool: { available: true, observedAt: 1000, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: 1000, text: secret }, raw: secret }, unexpected: secret };
   const helper = { ...parent, id: 'obs_' + 'b'.repeat(24), source: 'helper', parentId: parent.id, status: 'idle', lineageState: 'open',
     taskEvidence: { state: 'available', summary: secret, source: secret }, taskStatusEvidence: { status: 'completed', source: secret },
     lifecycleEvidence: { state: 'closed', reason: 'killed' }, tool: { available: true, last: { name: secret, phase: 'started', outcome: 'unknown', at: 1000 } } };
@@ -15,7 +17,7 @@ const { createServer } = require('../server.js');
     health: 'available', observedAt: 1000, error: null, sources: { herdr: { health: 'available', observedAt: 1000, reason: secret }, desktop: { health: 'unavailable', observedAt: null, reason: secret } },
     bus: { health: 'available', reason: null, observedAt: 1000, window: 100, messages: [{ id: 1, identity: secret, from: parent.id, to: helper.id, sentAt: '2026-01-01T00:00:00.000Z', acknowledgedAt: null, wake: 'requested', body: secret }] } };
   const original = structuredClone(inventory);
-  const presentation = makePresentationObserver({ get: async () => inventory, inspect: () => { inspected++; }, inspectMessage: () => { inspected++; } }, () => 1000);
+  const presentation = makePresentationObserver({ close: async () => { closes++; await closeGate; }, get: async () => inventory, inspect: () => { inspected++; }, inspectMessage: () => { inspected++; } }, () => 1000);
   const first = await presentation.get();
   assert.equal(JSON.stringify(first).includes(secret), false, 'mask names, task text, nicknames, identities, diagnostics, bodies, and unknown fields');
   assert.deepEqual(inventory, original, 'masking never mutates live identities or source snapshots');
@@ -24,6 +26,16 @@ const { createServer } = require('../server.js');
   assert.equal(first.sessions[1].project, 'Product'); assert.equal(first.sessions[1].repo, 'helio-web');
   assert.equal(first.sessions[0].title, 'Helper'); assert.equal(first.sessions[0].tool.last.name, 'Tool');
   assert.equal(first.sessions[1].tool.last.name, 'exec_command');
+  assert.equal(first.sessions[1].tool.observedAt, 1000, 'forward original tool source time independently of inventory time');
+  assert.equal(Object.hasOwn(first.sessions[0].tool, 'observedAt'), false, 'legacy input keeps its missing tool timestamp');
+  for (const observedAt of [0, secret, { private: secret }, NaN, Infinity, -Infinity, null]) {
+    const projected = await makePresentationObserver({ get: async () => ({ ...inventory,
+      sessions: [{ ...parent, tool: { ...parent.tool, observedAt } }] }) }).get();
+    const tool = projected.sessions[0].tool;
+    assert.equal(Object.hasOwn(tool, 'observedAt'), observedAt === 0, 'only finite numeric tool timestamps cross the allowlist');
+    if (observedAt === 0) assert.equal(tool.observedAt, 0, 'zero is a valid numeric timestamp');
+    assert.equal(JSON.stringify(projected).includes(secret), false, 'malformed timestamps cannot expose private strings or objects');
+  }
   assert.equal(first.sessions[1].inspectionIdentity, null);
   assert.deepEqual(first.bus.messages[0], { id: 1, from: parent.id, to: helper.id, sentAt: '2026-01-01T00:00:00.000Z', acknowledgedAt: null, wake: 'requested' });
   const byId = new Map(first.sessions.map(row => [row.id, row]));
@@ -57,7 +69,17 @@ const { createServer } = require('../server.js');
     assert.equal(session.reason, 'presentation-mode'); assert.deepEqual(session.turns, []);
     assert.equal(mail.reason, 'presentation-mode'); assert.equal(mail.text, null);
     assert.equal(inspected, 0, 'inspection never delegates to private transcript/message readers');
-  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+  } finally {
+    server.closeAllConnections();
+    let closed = false;
+    const closing = new Promise(resolve => server.close(() => { closed = true; resolve(); }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed, false, 'HTTP close waits for forwarded observer teardown');
+    releaseClose(); await closing;
+    const firstClose = presentation.close(); assert.equal(presentation.close(), firstClose);
+    await firstClose; assert.equal(closes, 1, 'presentation close delegates exactly once');
+    await new Promise(resolve => server.close(resolve));
+  }
   // Remote host names are private: rows and host sources carry fictional ship names, never the configured id.
   const remote = makePresentationObserver({ get: async () => ({ ...inventory, sessions: [...inventory.sessions.map(r => ({ ...r, host: null })), { ...inventory.sessions[0], id: 'obs_' + 'f'.repeat(24), host: 'herdr-dev-2' }],
     sources: { ...inventory.sources, hosts: { local: { health: 'available', observedAt: 1, reason: null, agents: 1 }, 'herdr-dev-2': { health: 'stale', observedAt: 1, reason: 'SSH connection timed out', agents: 1 } } } }) }, () => 1000);

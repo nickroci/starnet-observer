@@ -199,7 +199,7 @@ function makeFederatedObserver(local, remoteHosts, now = Date.now) {
     if (remoteHosts.snapshot().rows.some(row => row.id === id)) return unavailable(id, 'remote-inspect', now());
     return local.inspect(id, expectedIdentity);
   }
-  return { get, inspect, inspectMessage: (id, expectedIdentity) => local.inspectMessage(id, expectedIdentity), close: () => remoteHosts.close() };
+  return { get, inspect, inspectMessage: (id, expectedIdentity) => local.inspectMessage(id, expectedIdentity), close: async () => { remoteHosts.close(); await local.close?.(); } };
 }
 
 module.exports = { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sshArgs, remoteCommand, reasonFrom, MAX_LINE, FRESH_MS, BACKOFF };

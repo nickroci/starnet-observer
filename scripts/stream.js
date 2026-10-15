@@ -31,9 +31,15 @@ if (require.main === module) {
   const heldSecrets = () => Object.entries(process.env).filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY/i.test(name)).map(([, value]) => value);
   setKnownSecretSource(heldSecrets);
   setClock(Date.now);
-  let stream = null;
-  const exit = () => { stream?.stop(); process.exit(0); };
-  stream = startStream({ observer: makeObserver({ now: Date.now }), write: line => new Promise(resolve => process.stdout.write(line, () => resolve())) });
+  // Remote inspect is not offered, so no transcript detail is prepared here.
+  const observer = makeObserver({ now: Date.now, warmDetails: false });
+  let stream = null, exiting = false;
+  const exit = () => {
+    if (exiting) return; exiting = true; stream?.stop();
+    const timer = setTimeout(() => process.exit(0), 3000); timer.unref?.();
+    Promise.resolve(observer.close?.()).catch(() => {}).finally(() => process.exit(0));
+  };
+  stream = startStream({ observer, write: line => new Promise(resolve => process.stdout.write(line, () => resolve())) });
   process.stdout.on('error', exit);   // EPIPE: the hub is gone
   process.stdin.on('end', exit); process.stdin.on('close', exit); process.stdin.resume();
   for (const signal of ['SIGTERM', 'SIGHUP', 'SIGPIPE', 'SIGINT']) process.once(signal, exit);

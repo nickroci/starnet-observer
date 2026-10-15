@@ -67,7 +67,7 @@ Launch `codex` or `claude` inside a Herdr pane. Check discovery from another ter
 herdr agent list
 ```
 
-Keep using those terminals normally. The browser observer refreshes about every two seconds. It reads sessions across the active Herdr inventory, not just the folder where you launched the observer.
+Keep using those terminals normally. The browser observer refreshes about every two seconds. Verified repository rooms appear first; transcript summaries, helpers, desktop windows, and bus metadata fill in independently. It reads sessions across the active Herdr inventory, not just the folder where you launched the observer.
 
 For a named/non-default Herdr server, launch the observer with `HERDR_SOCKET_PATH` set to that server's Unix socket. The default is `~/.config/herdr/herdr.sock`.
 
@@ -180,7 +180,7 @@ The observer compiles its bundled Swift reader lazily. Grant Accessibility acces
 The observer is read-only by default. Launch it with `OBSERVER_CONTROL=1` to add three actions to the Live sessions panel, each sending only a pane id the page already shows:
 
 ```sh
-OBSERVER_CONTROL=1 npm start
+OBSERVER_CONTROL=1 bun run start
 ```
 
 | Button | Where | What it does |
@@ -214,7 +214,7 @@ inspection and control actions never reach a remote, and llm-bus mail is shown f
 ## Privacy and limits
 
 - Observation is read-only unless you opt in with `OBSERVER_CONTROL=1`: no agent launching, provider setup, message sending, acknowledgments, or session edits. With control on, the page can start, attach to and close Herdr agent panes, and nothing else.
-- Session and message text is read on demand when you open its inspector. Recognized credential patterns are redacted; private prose and file paths may still be visible. Share the code, not your session data.
+- The server may prepare bounded, redacted transcript projections locally in memory before you open an inspector: at most 32 identities per enrichment sweep, with two background detail jobs at once. Opening an inspector still checks current session ownership and source contents. Message bodies and desktop text remain on demand; presentation mode disables transcript preparation. Recognized credential patterns are redacted; private prose and file paths may still be visible. Share the code, not your session data.
 - The local API requires a per-launch token delivered to the local page. Foreign origins and hostnames are rejected. Do not expose the server through a public proxy.
 - Missing sources appear unavailable. Old data is marked stale; absence of a source is not treated as a fresh empty roster.
 - macOS terminal use is the supported initial target. Other platforms are not validated; native Codex desktop observation is macOS-only.
