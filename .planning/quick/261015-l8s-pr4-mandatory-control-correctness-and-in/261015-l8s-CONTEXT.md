@@ -45,3 +45,7 @@ Update existing PR4 on fork nickroci/starnet-observer, branch control-actions; m
 ## Order clarification — revision4
 
 User answered "before": mandatory PR4 merges before unfinished theme work. This replaces the earlier theme-merge prerequisite and resolves that pending question. Use fresh origin/main (inspected 3dbf16a with loading PR7), never copy partial theme code/assets. Mandatory QA exercises shipped default; future theme compatibility is source/diff evidence and concrete follow-on integration notes. Theme controller owns later integration onto merged PR4; additions may execute after PR4 independently of theme, preserving any theme already merged in then-main. Existing delivery authorization remains: update/review/merge existing fork PR4; delegate additions into separate worktree/new review-ready PR, no second merge authorization. Revision4 independent gate remains PENDING.
+
+## Final execution evidence
+
+Revision4 was independently approved and implemented. Earlier planning-only/pending/theme-wait statements above are historical; revision4 controls. Mandatory tasks and two pushed PR review loops passed with no unresolved High/Medium issues. Full24file Bun suite passed after final source edits. PR #4 is the authorized delivery; additions follow its merge in a separate PR, with no second merge authorization. The final SUMMARY records verification limits and the Low observatory-helper visual residual.

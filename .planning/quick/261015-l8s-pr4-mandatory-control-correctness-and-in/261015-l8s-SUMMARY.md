@@ -1,17 +1,22 @@
-# PR4 mandatory fixes status
+# PR4 mandatory fixes results
 
-Status: executing; M1 integration reviewed.
+Status: implementation and review complete; authorized PR #4 merge is the remaining release action. This final tracking commit contains no source changes.
 
-M1: merged original PR4 f423ded7 with main3dbf16a without unfinished themes. Preserved progressive loading/resolveMany, SQLite, private ETag/no-store, nonce and shutdown. Fresh suite: all23files passed. Independent /root/pr4_m1_review: requirements Pass, quality Pass, Clean Approved. M2–M4 pending.
+- Integrated contributor PR history and shipped loading work from main without importing unfinished themes. Preserved Bun/native SQLite, progressive loading, cache/security boundaries, and stable inspector identity.
+- Replaced name-based overseer guesses with a private bounded atomic launch record and native endpoint/pane/workspace/terminal/provider proof. Restart and concurrent-launch handling fail closed on uncertainty.
+- Retained real pane targets, validated fresh server-owned identity before actions, and masked every presentation control response/error. Corrected checkout-relative folders, stale seed selection, and overseer deck retention.
+- Added O/o keyboard access to the observatory and accurate optional-control/privacy documentation. Existing brief content is unchanged.
+- Fixed review regressions for valid `..drafts` child folders and scene cache invalidation when folder section topology changes. Both regressions failed before their fixes.
+
+Verification: fresh `bun run test` on Bun 1.3.13 passed all 24 test files, including mandatory native SQLite fixtures. Focused control, state, presentation, project, scene, view, and UI suites passed. Diff check passed. No dependencies added; no configured CI checks.
+
+Review: M1–M3 task reviews, final aggregate review, keyboard correction review, final plan conformance, and two full-scope pushed PR loops completed. Loop 2 reviewed all 28 files at c71412ec54d5279fb1bff8fd548d8686a9b2b574: requirements and quality approved, zero unresolved High/Medium issues. Required dead-code audit found no obsolete leftovers. Selected independent reviewer gpt-6.1-sol, medium; exact resolved model identity unavailable.
+
+PR: https://github.com/wnz99/starnet-observer/pull/4
+Review evidence: https://github.com/wnz99/starnet-observer/pull/4#issuecomment-6192887677
+
+Limits/residuals: Chrome automation blocked the local mock page with ERR_BLOCKED_BY_CLIENT. User confirmed page/start affordance; the mock handler recorded the click. No full browser, screen-reader, live control launch, or desktop integration claim. A crash-held `.owner` requires documented verified-safe manual recovery. Low visual residual: overseer helpers remain listed/inspectable but lack station workers.
+
+Follow-up: delegate approved provider selection/equivalent initial briefs and checkout sections in a new worktree/separate PR after PR #4 merges. New brief content requires independent review and user approval. Second PR merge is not authorized. Theme owner integrates its unfinished work later, preserving shared state/role, opt-in control wiring, privacy projection, loading, and scene metadata.
 
 Private draft: .planning/drafts/pr4-merge-readiness
-
-M2: private bounded atomic overseer record, native endpoint/pane/workspace/terminal/provider proof, rename/restart and concurrent-launch exclusion implemented. Fresh suite all24files passed including SQLite; /root/pr4_m2_review requirements/quality Pass, Clean Approved. Name detector/startup duplication removed. Residual crash-held .owner needs verified-safe manual cleanup; M4 documents it. M3/M4 pending.
-
-M3: real pane IDs retained in presentation; fixed response allowlists/errors and private observer proof plus fresh native validation for ordinary actions. Checkout-relative folders corrected; stale seed/role deck/UI mode truth fixed. Controller-authorized SQLite test-only public admission synchronization replaces racy sleep0; production SQLite unchanged. Fresh all24 files passed; /root/pr4_m3_review Clean Approved both verdicts, 11 files. Real-browser mock QA currently blocked Chrome ERR_BLOCKED_BY_CLIENT; manual user check requested. M4 pending.
-
-M4 pre-delivery: README corrected against code; aggregate /root/pr4_aggregate_review approved full26file scope. Controller then found pointer-only overseer accessibility gap; O/o canvas shortcut/help/ARIA added and fresh /root/pr4_keyboard_review Clean Approved. Final all24tests passed /tmp/pr4-final-keyboard-tests.log. User manually confirmed mock presentation loads/start affordance; Chrome automation ERR_BLOCKED_BY_CLIENT, no full browser/screenreader/live launch claim. Contributor c44fe7f ancestry merged at8d64639 with identical source tree to reviewed8f39. Ready to push existingPR4 and final full-scope PR review; not merged yet.
-
-PR loop1 c077ab7: independentLow requirement gap for valid ..drafts children; controllerMedium confirmed section topology changed without scene revision, retaining old wall/movement caches. Four-file bounded fixes/tests in progress; merge held for fresh fullscope loop2. Review comment: https://github.com/wnz99/starnet-observer/pull/4#issuecomment-6192675211
-
-Loop1 fixes: valid ..drafts child accepted with separator-aware containment; section identity enters existing scene revision so changed partitions invalidate static/movement caches. Both original regressions failed first; focused project/scene/view/UI suites and final all24files passed /tmp/pr4-folder-fix-tests.log. Four source/test files only; ready for fresh pushed loop2.
