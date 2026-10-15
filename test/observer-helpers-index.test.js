@@ -59,6 +59,27 @@ const notification = (child, status) => line({ type: 'queue-operation', operatio
     assert(names(result).includes('appended'), 'appended spawn found through the incremental index');
     assert(names(result).includes('early2'));
 
+    // Rewrite only middle bytes, preserving the inode, length, prefix and entire bounded tail.
+    // A previously granted private binding must be revoked before a refresh can commit new bindings.
+    for (const append of [false, true]) {
+      await child('revoked');
+      const before = head + padding(500, 'h') + spawn('revoked') + padding(1700, 'z');
+      await fs.writeFile(parentFile, before);
+      result = await helpers.children([parent]);
+      const revoked = result.rows.find(row => row.sessionId === 'revoked');
+      assert(revoked);
+      assert.equal((await helpers.inspect(revoked)).available, true);
+      const after = before.replace('"Agent"', '"Other"');
+      assert.equal(Buffer.byteLength(after), Buffer.byteLength(before));
+      await fs.writeFile(parentFile, after + (append ? padding(20, 'appended-after-rewrite') : ''));
+      assert.equal((await helpers.inspect(revoked)).available, false, 'middle rewrite revokes private inspection, including when followed by append');
+      result = await helpers.children([parent]);
+      assert(!names(result).includes('revoked'), 'middle rewrite removes the helper relationship');
+    }
+    // Restore the append/event scenario after the independent rewrite cases.
+    await fs.writeFile(parentFile, head + padding(500, 'h') + spawn('early1') + spawn('early2') + padding(1700));
+    result = await helpers.children([parent]);
+
     // Terminal events outside the tail are indexed too, so a finished early helper reads done, not unknown.
     await fs.appendFile(parentFile, notification('early2', 'completed'));
     result = await helpers.children([parent]);
@@ -89,6 +110,71 @@ const notification = (child, status) => line({ type: 'queue-operation', operatio
     await fs.appendFile(parentFile, notification('live', 'completed'));
     result = await helpers.children([parent]);
     assert.equal(result.rows.find(row => row.sessionId === 'live').status, 'done', 'terminal event wins over a recent row');
+
+    // Root ambiguity lives outside both bounded windows. A nested valid claim cannot
+    // choose a parent for that same canonical child, even when root's merged value is null.
+    await child('scout'); await child('nested');
+    const scoutFile = path.join(directory, 'agent-scout.jsonl');
+    const nestedSpawn = spawn('nested', 'spawn-nested', 'Nested task').split('\n').filter(Boolean).map(row =>
+      line({ ...JSON.parse(row), agentId: 'scout', isSidechain: true })).join('');
+    await fs.appendFile(scoutFile, nestedSpawn);
+    await fs.writeFile(parentFile, head + padding(500, 'h') + spawn('scout') + padding(1700));
+    result = await helpers.children([parent]);
+    await transcripts.spawnIndexIdle();
+    result = await helpers.children([parent]);
+    const nested = result.rows.find(row => row.sessionId === 'nested');
+    assert(nested, 'nested helper starts with an unambiguous immediate parent');
+    assert.equal((await helpers.inspect(nested)).available, true);
+    await fs.writeFile(parentFile, head + padding(500, 'h') + spawn('scout') +
+      spawn('nested', 'root-one') + spawn('nested', 'root-two') + padding(1700));
+    assert.equal((await helpers.inspect(nested)).available, false, 'indexed ambiguous ancestor revokes the existing private binding');
+    result = await helpers.children([parent]);
+    assert.deepEqual(names(result), ['scout'], 'indexed ambiguous ancestor claim prevents a guessed nested parent');
+
+    // Delay only the root's full index read. The first snapshot must finish with
+    // its valid tail helper, but no guessed nested ancestry or private transcript.
+    await fs.writeFile(parentFile, head + padding(500, 'h') + spawn('nested', 'root-one') +
+      spawn('nested', 'root-two') + padding(1700) + spawn('scout'));
+    const indexedFile = await fs.realpath(parentFile);
+    let releaseIndex, indexStarted;
+    const indexGate = new Promise(resolve => { releaseIndex = resolve; });
+    const started = new Promise(resolve => { indexStarted = resolve; });
+    const delayedFs = Object.create(fs);
+    delayedFs.open = async (file, ...args) => {
+      const handle = await fs.open(file, ...args);
+      return new Proxy(handle, { get(target, name) {
+        if (name === 'read') return async (buffer, offset, length, position) => {
+          if (file === indexedFile && length > 256 * 1024) { indexStarted(); await indexGate; }
+          return target.read(buffer, offset, length, position);
+        };
+        const value = target[name];
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+    };
+    const coldTranscripts = makeTranscriptObserver({ now, fs: delayedFs, roots: { claude, codex } });
+    const coldHelpers = makeHelperObserver({ now, transcripts: coldTranscripts, readEdges: () => ({ rows: [] }) });
+    let deadline;
+    const timeout = new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('Cold-index snapshot or inspection blocked on background scan')), 3000); });
+    try {
+      await Promise.race([(async () => {
+        result = await coldHelpers.children([parent]);
+        await started;
+        assert.deepEqual(names(result), ['scout'], 'cold snapshot keeps tail helper but withholds nested ancestry until ancestor claims are complete');
+        assert.equal((await coldHelpers.inspect(result.rows[0])).available, false, 'pending full index denies private inspection even for a valid tail helper');
+        // Exercise the private transcript boundary using real proved child bindings,
+        // independently of traversal's new rule withholding the nested public row.
+        const scoutCandidate = (await coldTranscripts.claudeCandidates(ID, undefined, parent.id)).find(value => value.sessionId === 'scout');
+        const scoutBinding = await coldTranscripts.bindChild('claude', 'scout', ID, scoutCandidate.file, scoutCandidate.spawn);
+        const nestedCandidate = (await coldTranscripts.claudeCandidates('scout', scoutBinding, 'cold-scout')).find(value => value.sessionId === 'nested');
+        assert(nestedCandidate);
+        const nestedBinding = await coldTranscripts.bindChild('claude', 'nested', ID, nestedCandidate.file, nestedCandidate.spawn);
+        assert(nestedBinding);
+        assert.equal((await coldTranscripts.inspectChild('cold-nested', nestedBinding)).available, false, 'pending ancestor index cannot authorize private nested content');
+      })(), timeout]);
+    } finally { clearTimeout(deadline); releaseIndex(); await coldTranscripts.spawnIndexIdle(); }
+    result = await coldHelpers.children([parent]);
+    assert.deepEqual(names(result), ['scout'], 'completed root ambiguity continues to suppress nested helper');
+    assert.equal((await coldHelpers.inspect(result.rows[0])).available, true, 'complete proof unlocks valid tail helper inspection');
 
     console.log('observer helpers index: spawns outside the tail, append, conflict, rewrite/replacement reset, sidecar corroboration and activity status PASS');
   } finally { await fs.rm(root, { recursive: true, force: true }); }

@@ -47,7 +47,8 @@ const ObserverScene = (() => {
       for (let block = 0; block < room.blocks.length; block++) {
         const value = room.blocks[block], previous = sections.at(-1);
         if (previous && (previous.section || previous.repo) === (value.section || value.repo)) previous.rect.h += 7;
-        else sections.push({ repo: value.repo, section: value.section || value.repo, label: value.label, partitions: block ? partitionsFor(rect, block) : [], rect: { x: rect.x + 1, y: rect.y + 4 + block * 7, w: 18, h: 7 }, sign: pointAt(rect, 1.5, 4 + block * 7, 1.25) });
+        else sections.push({ repo: value.repo, section: value.section || value.repo, label: value.label, checkoutId: value.checkoutId ?? null, checkoutKind: value.checkoutKind ?? null,
+          repoLabel: value.repoLabel, checkoutLabel: value.checkoutLabel, worktree: value.worktree, folder: value.folder, partitions: block ? partitionsFor(rect, block) : [], rect: { x: rect.x + 1, y: rect.y + 4 + block * 7, w: 18, h: 7 }, sign: pointAt(rect, 1.5, 4 + block * 7, 1.25) });
       }
       const decorationRegions = [
         { kind: 'wall', edge: 'rear-y', rect: { x: rect.x + 2, y: rect.y + 0.5, w: 16, h: 2 } },
@@ -106,13 +107,13 @@ const ObserverScene = (() => {
     const overseerRow = extras.overseer || null;
     if (overseerRow) {
       observatory.viewer = null; observatory.overseer = overseerRow.id;
-      workers.push({ id: overseerRow.id, row: overseerRow, kind: 'session', role: 'overseer', parentId: null, scale: 1, platformKey: 'observatory', accent: '#3fd8e8',
+      workers.push({ id: overseerRow.id, row: overseerRow, kind: 'session', role: 'overseer', parentId: null, scale: 1, platformKey: 'observatory', accent: extras.overseerAccent || '#3fd8e8',
         desk: observatory.desk, chair: observatory.chair, route: [observatory.chair, { x: observatory.chair.x, y: -11, z: 0 }, { x: 12, y: -11, z: 0 }, ...observatory.link, mail.hub] });
     }
     const extents = [mail.rect, ...platforms.map(p => p.rect), ...walkways.map(w => w.rect)].map(rect => ({ rect }))
       .concat(observatory.extents);
     const bounds = projectedBounds(extents);
-    const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.section || b.repo)]).sort(),
+    const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => [b.section || b.repo, b.label, b.checkoutKind])]).sort(),
       workers.map(w => [w.id, w.kind, w.parentId, w.chair.x, w.chair.y]).sort()]);
     return { page, revision, platforms, walkways, workers, helperOverflow, observatory, mail, bounds };
   }
@@ -172,7 +173,7 @@ const ObserverScene = (() => {
   }
   function route(scene, layout, message, rows) {
     const from = endpoint(scene, layout, message.from), to = endpoint(scene, layout, message.to), recipient = rows.find(r => r.id === message.to);
-    return { key: from.key + '>' + to.key, from: from.points, to: to.points, color: recipient ? layout.colorFor(Model.projectKey(recipient)).accent : '#c9d3da' };
+    return { key: from.key + '>' + to.key, from: from.points, to: to.points, color: recipient ? layout.colorFor(Model.projectKey(recipient)).accent : null };   // the courier colours unassigned recipients
   }
   function pending(scene, layout, messages) {
     const spots = new Map();

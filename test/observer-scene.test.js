@@ -593,5 +593,7 @@ console.log('Compact historical pair/turn/passage/regroup oracle, eligible gaps,
   const worker = seated.workers.find(w => w.id === boss.id);
   require('node:assert/strict').deepEqual([worker.role, worker.platformKey, worker.chair], ['overseer', 'observatory', plain.observatory.chair]);
   require('node:assert/strict').notEqual(plain.revision, seated.revision, 'seating the overseer rebuilds the floor');
+  require('node:assert/strict').equal(worker.accent, '#3fd8e8', 'the default overseer accent is the canonical cyan');
+  require('node:assert/strict').equal(Scene.build([], 0, { overseer: boss, overseerAccent: '#34518f' }).workers.find(entry => entry.role === 'overseer').accent, '#34518f', 'a theme supplies the overseer accent');
   console.log('observer scene: overseer seating OK');
 }

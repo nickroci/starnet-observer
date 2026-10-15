@@ -8,7 +8,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const MAX_HELPERS = 64, MAX_DEPTH = 3, NEARBY = 8, MAX_EDGES = 4096;
 const identity = row => row.provider + ':' + row.sessionId;
 const grouping = row => ({ projectId: row.projectId, project: row.project, projectKind: row.projectKind,
-  repoId: row.repoId, repo: row.repo, worktreeId: row.worktreeId, worktree: row.worktree });
+  repoId: row.repoId, repo: row.repo, worktreeId: row.worktreeId, checkoutId: row.checkoutId, checkoutKind: row.checkoutKind, folder: row.folder, worktree: row.worktree });
 const helperId = binding => 'obs_' + crypto.createHash('sha256')
   .update(JSON.stringify([binding.provider, binding.parentSessionId, binding.sessionId])).digest('hex').slice(0, 24);
 
@@ -110,6 +110,7 @@ function makeHelperObserver(options = {}) {
       const candidates = parent.provider === 'codex' ? (byParent.get(parent.sessionId) || [])
         .sort((a, b) => a.child.localeCompare(b.child)) : parent.provider === 'claude' ?
         (await transcripts.claudeCandidates(parent.sessionId, nextBindings.get(parent.id), parent.id)).map(value => ({ ...value, child: value.sessionId, state: 'verified' })) : [];
+      const parentClaims = parent.provider === 'claude' ? transcripts.claudeClaims?.(parent.id) : null;
       for (const candidate of candidates) {
         const key = parent.provider + ':' + (parent.provider === 'claude' ? candidate.canonical + ':' : '') + candidate.child;
         if (parent.provider === 'codex' && invalid.has(candidate.child) || ancestry.has(key) || exact.has(key) && !exact.get(key)) continue;
@@ -118,7 +119,7 @@ function makeHelperObserver(options = {}) {
         const existing = exact.get(key);
         const id = existing?.id || helperId(binding);
         if (parent.provider === 'claude' && claudeAncestors.some(ancestor =>
-          ancestor.canonical === binding.parentSessionId && ancestor.projection?.helperSpawns.has(candidate.child))) {
+          ancestor.canonical === binding.parentSessionId && (!ancestor.claims?.available || ancestor.claims.has(candidate.child)))) {
           ambiguousBindings.add(id);
           if (nextBindings.delete(id)) accepted--;
           annotations.delete(id); continue;
@@ -153,7 +154,7 @@ function makeHelperObserver(options = {}) {
         };
         if (existing) annotations.set(id, lineage); else rows.push(child);
         await visit(child, depth + 1, ancestry, parent.provider === 'claude' ?
-          [...claudeAncestors, { canonical: parentBinding?.parentSessionId || parent.sessionId, projection: parentProjection }] : []);
+          [...claudeAncestors, { canonical: parentBinding?.parentSessionId || parent.sessionId, claims: parentClaims }] : []);
       }
     }
     function lineageDepth(row) {

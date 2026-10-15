@@ -10,7 +10,7 @@ const READ_BYTES = 256 * 1024;
 // Claude spawn index: the bounded tail window loses the Agent spawn records of long-running parents, so their
 // helpers vanish while still running. The index streams the whole parent transcript once, keeps only the records
 // consumeHelperMetadata reads (same rules, same bounded maps), then follows appends by offset.
-const SPAWN_INDEX_BYTES = 128 * 1024 * 1024, SPAWN_CHUNK = 1024 * 1024, SPAWN_ANCHOR = 4096;
+const SPAWN_INDEX_BYTES = 128 * 1024 * 1024, SPAWN_CHUNK = 1024 * 1024;
 const SPAWN_MARKERS = ['"Agent"', '"Task"', 'async_launched', 'task-notification', 'task_status'];
 const cleanName = value => typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 120) : '';
 
@@ -249,18 +249,23 @@ function makeTranscriptObserver(options = {}) {
       const stat = await handle.stat();
       await verifyPath(resource, stat);
       if (stat.size > SPAWN_INDEX_BYTES) { state.projection = null; state.ready = true; return; }
-      const prefix = Buffer.alloc(Math.min(stat.size, SPAWN_ANCHOR));
-      await handle.read(prefix, 0, prefix.length, 0);
-      let anchorMatches = !!state.anchor;
-      if (state.anchor && state.offset >= state.anchor.length && stat.size >= state.offset) {
-        const previous = Buffer.alloc(state.anchor.length);
-        const read = await handle.read(previous, 0, previous.length, state.offset - previous.length);
-        anchorMatches = read.bytesRead === previous.length && previous.equals(state.anchor);
+      // Reuse metadata only after proving every previously indexed byte is unchanged.
+      // Size/mtime and sampled sentinels cannot distinguish an append from a middle rewrite.
+      let hash = crypto.createHash('sha256');
+      let reusable = !!state.projection && state.device === stat.dev && state.inode === stat.ino && stat.size >= state.offset;
+      if (reusable) {
+        for (let position = 0; position < state.offset;) {
+          const chunk = Buffer.alloc(Math.min(SPAWN_CHUNK, state.offset - position));
+          const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+          if (!bytesRead) throw new Error('Incomplete spawn index proof');
+          hash.update(chunk.subarray(0, bytesRead));
+          position += bytesRead;
+        }
+        reusable = hash.copy().digest('hex') === state.digest;
       }
-      // Any rewrite, replacement, truncation or changed prefix restarts from the first byte.
-      if (!state.projection || state.device !== stat.dev || state.inode !== stat.ino || stat.size < state.offset ||
-        !state.prefix || !prefix.subarray(0, state.prefix.length).equals(state.prefix) || state.offset && !anchorMatches) {
-        Object.assign(state, { projection: inspector.createProjection(), offset: 0, carry: null, skipping: false, anchor: null });
+      if (!reusable) {
+        Object.assign(state, { projection: inspector.createProjection(), offset: 0, carry: null, skipping: false });
+        hash = crypto.createHash('sha256');
       }
       let offset = state.offset, carry = state.carry, skipping = state.skipping;
       const consumeLine = bytes => {
@@ -271,7 +276,8 @@ function makeTranscriptObserver(options = {}) {
       while (offset < stat.size) {
         const chunk = Buffer.alloc(Math.min(SPAWN_CHUNK, stat.size - offset));
         const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset);
-        if (!bytesRead) break;
+        if (!bytesRead) throw new Error('Incomplete spawn index read');
+        hash.update(chunk.subarray(0, bytesRead));
         offset += bytesRead;
         let data = chunk.subarray(0, bytesRead), start = 0, end;
         if (carry) { data = Buffer.concat([carry, data]); carry = null; }
@@ -284,15 +290,13 @@ function makeTranscriptObserver(options = {}) {
         if (rest.length > READ_BYTES) skipping = true; else if (rest.length && !skipping) carry = Buffer.from(rest);
       }
       await verifyPath(resource, await handle.stat());
-      const anchor = Buffer.alloc(Math.min(offset, SPAWN_ANCHOR));
-      await handle.read(anchor, 0, anchor.length, offset - anchor.length);
-      Object.assign(state, { offset, carry, skipping, anchor, prefix: Buffer.from(prefix), device: stat.dev, inode: stat.ino, ready: true });
+      Object.assign(state, { offset, carry, skipping, digest: hash.digest('hex'), device: stat.dev, inode: stat.ino, ready: true });
     } catch (_) {
-      Object.assign(state, { projection: null, offset: 0, carry: null, skipping: false, anchor: null, prefix: null, ready: true });
+      Object.assign(state, { projection: null, offset: 0, carry: null, skipping: false, digest: null, ready: true });
     } finally { if (handle) await handle.close().catch(() => failNote('observer.transcripts.close', new Error('Transcript handle cleanup failed'))); }
   }
   // The first full scan runs off the discovery path, so helpers outside the tail appear on a later poll; once an
-  // index exists, following appends is bounded by what was appended and is awaited for a consistent view.
+  // index exists, its complete prefix is verified before parsing appends, awaited for a consistent view.
   async function spawnIndex(file, sessionId, binding) {
     const key = spawnIndexKey(file, sessionId, binding);
     let state = spawnIndices.get(key);
@@ -320,7 +324,21 @@ function makeTranscriptObserver(options = {}) {
     if (!tail || !indexed) return tail || indexed;
     return indexed.observedAt != null && (tail.observedAt == null || indexed.observedAt > tail.observedAt) ? indexed : tail;
   }
+  // Hide the mutable maps: traversal receives only an immutable claim-presence lookup.
+  // Null is still a claim, so an ambiguous ancestor cannot be guessed away.
+  const claudeClaimSnapshots = new Map();
+  function mergedClaims(projection, index) {
+    const spawns = new Map(), events = new Map();
+    for (const child of new Set([...(projection?.helperSpawns.keys() || []), ...(index?.helperSpawns.keys() || [])])) {
+      const spawn = mergedSpawn(projection, index, child);
+      spawns.set(child, spawn && Object.freeze({ ...spawn }));
+      const event = mergedEvent(projection, index, child);
+      if (event) events.set(child, Object.freeze({ ...event }));
+    }
+    return Object.freeze({ available: !!index, has: child => spawns.has(child), spawn: child => spawns.get(child), event: child => events.get(child) });
+  }
   async function claudeCandidates(parentSessionId, parentBinding, parentId) {
+    claudeClaimSnapshots.delete(parentId);
     try {
       const canonical = parentBinding?.parentSessionId || parentSessionId;
       const parentFile = parentBinding?.file || await locate('claude', canonical);
@@ -328,17 +346,19 @@ function makeTranscriptObserver(options = {}) {
       const projection = parentBinding?.projection || states.get(parentId)?.projection;
       if (!projection) return [];
       const index = await spawnIndex(parentFile, parentSessionId, parentBinding);
+      const claims = mergedClaims(projection, index);
+      claudeClaimSnapshots.set(parentId, Object.freeze({ available: claims.available, has: claims.has }));
       const directory = path.join(path.dirname(parentBinding ? path.dirname(path.dirname(parentFile)) : parentFile), canonical, 'subagents');
       await containedChild('claude', directory);
       const entries = await io.readdir(directory, { withFileTypes: true });
       if (entries.length > 256) return [];
       const result = [];
       for (const entry of entries.filter(entry => entry.isFile() && /^agent-[A-Za-z0-9_-]{1,100}\.jsonl$/.test(entry.name)).sort((a, b) => a.name.localeCompare(b.name))) {
-        const sessionId = entry.name.slice(6, -6), spawn = mergedSpawn(projection, index, sessionId);
+        const sessionId = entry.name.slice(6, -6), spawn = claims.spawn(sessionId);
         if (!spawn) continue;
         const file = path.join(directory, entry.name);
         if (!await corroborateClaudeSpawn(file, spawn, parentBinding)) continue;
-        const event = mergedEvent(projection, index, sessionId);
+        const event = claims.event(sessionId);
         result.push({ sessionId, file, canonical, spawn: { ...spawn, parentId, parentBinding: parentBinding || null,
           parentSessionId: parentSessionId, parentFile }, event: event && (!event.toolUseId || event.toolUseId === spawn.toolUseId) ? event : null });
       }
@@ -367,7 +387,8 @@ function makeTranscriptObserver(options = {}) {
       const stats = inspector.metadata(state.projection, provider, now());
       return { available: true, last: state.tool ? { ...state.tool } : null, usage: {
         ...Object.fromEntries(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'].map(key => [key, stats[key]])),
-        coverage: 'bounded-transcript', observedAt: state.observedAt } };
+        coverage: 'bounded-transcript', observedAt: state.observedAt },
+        lastEntryAt: state.projection.lastEntryAt ? Date.parse(state.projection.lastEntryAt) : null };
     };
     let handle;
     try {
@@ -494,11 +515,13 @@ function makeTranscriptObserver(options = {}) {
       const parent = await read(spawn.parentId, 'claude', spawn.parentSessionId, false, spawn.parentBinding);
       const projection = states.get(spawn.parentId)?.projection;
       const index = spawn.parentFile ? await spawnIndex(spawn.parentFile, spawn.parentSessionId, spawn.parentBinding || undefined) : null;
-      const proof = mergedSpawn(projection, index, current.sessionId);
+      const claims = mergedClaims(projection, index);
+      if (!claims.available) return false;
+      const proof = claims.spawn(current.sessionId);
       // The selected chain is already in seen before its ancestors are reread.
       // Even a null (ambiguous) claim contradicts another immediate parent.
       const conflictingParent = [...seen].some(child => child.parentSessionId === current.parentSessionId &&
-        child.spawn?.parentId !== spawn.parentId && mergedSpawn(projection, index, child.sessionId) !== undefined);
+        child.spawn?.parentId !== spawn.parentId && claims.has(child.sessionId));
       return parent.available && !conflictingParent && proof?.toolUseId === spawn.toolUseId &&
         await corroborateClaudeSpawn(current.file, spawn, spawn.parentBinding);
     }
@@ -507,12 +530,13 @@ function makeTranscriptObserver(options = {}) {
     return await verifySpawn() ? result : { available: false };
   }
   function retain(ids) {
+    for (const id of claudeClaimSnapshots.keys()) if (!ids.has(id)) claudeClaimSnapshots.delete(id);
     for (const selected of [states, detailStates]) for (const id of selected.keys()) if (!ids.has(id)) selected.delete(id);
     for (const [key, state] of spawnIndices) if (!state.promise && now() - state.usedAt > 10 * 60000) spawnIndices.delete(key);
   }
   // Test and shutdown hook: settles any spawn index scan still running in the background.
   const spawnIndexIdle = () => Promise.all([...spawnIndices.values()].map(state => state.promise).filter(Boolean));
   return { beginDiscovery, helperMetadata: id => states.get(id)?.projection, read, inspect: (id, provider, sessionId) => read(id, provider, sessionId, true), retain,
-    bindChild, claudeCandidates, inspectChild, spawnIndexIdle };
+    bindChild, claudeCandidates, claudeClaims: id => claudeClaimSnapshots.get(id), inspectChild, spawnIndexIdle };
 }
 module.exports = { makeTranscriptObserver };

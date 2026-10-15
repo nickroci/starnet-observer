@@ -1,4 +1,5 @@
 'use strict';
+const sessionItems = node => node.className?.split(' ').includes('session-item') ? [node] : (node.children || []).flatMap(sessionItems);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -7,6 +8,7 @@ const ObserverMail = require('../frontend/app/observer-mail.js');
 const ObserverInspector = require('../frontend/app/observer-inspector.js');
 const ObserverMailInspector = require('../frontend/app/observer-mail-inspector.js');
 const ObserverScene = require('../frontend/app/observer-scene.js');
+const ThemePack = require('../frontend/app/theme-pack.js');
 let document;
 // DOM double with real move semantics: inserting an attached node detaches it first, as the browser does.
 let created = 0, listenersAdded = 0;
@@ -30,6 +32,25 @@ const fireTimers = () => { const due = [...timers.values()]; timers.clear(); for
 // Panels are built per stack entry with numbered ids; tests find a named part of a panel (default: the top one).
 const findPart = (node, name) => { if (new RegExp('^' + name + '-\\d+$').test(node.id || '')) return node; for (const child of node.children || []) { const hit = findPart(child, name); if (hit) return hit; } return null; };
 const panelPart = (host, name, index = -1) => { const root = host.children.at(index); return root ? findPart(root, name) : null; };
+// Theme status and logo slots: fixed markup, separate from source health, empty and hidden until a theme reports.
+{
+  const page = fs.readFileSync(require.resolve('../frontend/observer.html'), 'utf8');
+  const status = page.match(/<div id="theme-status"[^>]*><\/div>/)?.[0] || '';
+  assert.ok(/role="status"/.test(status) && /aria-live="polite"/.test(status) && / hidden>/.test(status), 'theme status is a polite, initially hidden status region');
+  const health = page.match(/<p id="health"[^>]*>[^<]*<\/p>/)[0], connection = page.match(/<div class="connection">.*?<\/div>/)[0];
+  assert.ok(connection.includes(health) && !connection.includes('theme-status') && page.indexOf(status) > page.indexOf(connection), 'theme status sits outside #health and the connection group');
+  assert.ok(page.indexOf('id="source-health"') > page.indexOf(status), 'console source health stays a separate region');
+  const brand = page.match(/<div class="brand">.*?<\/div>/)[0];
+  assert.ok(brand.includes('<span class="brand-mark" aria-hidden="true">✦</span><img id="brand-logo" class="brand-logo" alt="" hidden><h1>Local observer</h1><span class="read-only">READ ONLY</span>'), 'logo slot follows the mark without replacing heading or READ ONLY label');
+  // Office art: the role table, then the loader/composition, both before the view that owns the load.
+  const scripts = [...page.matchAll(/<script src="([^"]+)"><\/script>/g)].map(match => match[1]);
+  const at = name => scripts.indexOf(name);
+  assert.ok(at('app/scene-art-roles.js') >= 0 && at('app/scene-art-roles.js') < at('app/observer-office-art.js') && at('app/observer-office-art.js') < at('app/observer-view.js'),
+    'scene-art-roles.js and observer-office-art.js load once, before observer-view.js');
+  assert.equal(scripts.filter(name => name === 'app/observer-office-art.js' || name === 'app/scene-art-roles.js').length, 2);
+  const controller = fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8');
+  assert.ok(!controller.includes('theme-status') && !controller.includes('brand-logo'), 'the session controller never writes theme slots');
+}
 (async () => {
   const elements = Object.fromEntries(['world', 'health', 'observed', 'sessions', 'empty', 'filters', 'overview', 'previous-page', 'next-page', 'search', 'page-label', 'room-count', 'counts',
     'zoom-in', 'zoom-out', 'fx-toggle', 'mail-health', 'mail-counts', 'mail-ledger', 'mail-empty', 'mail-detail', 'inspector', 'inspector-log', 'inspector-title', 'inspector-status', 'inspector-task', 'inspector-meta',
@@ -47,7 +68,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   const bodyStyles = new Map(); document.body.style.setProperty = (key, value) => bodyStyles.set(key, value);
   const ObserverView = { create(created) { viewOptions = created; return { setFx(on) { fxState = on; }, fx() { return fxState; }, update(next, payload) { updates.push({ scene: next, options: payload }); }, focus(id) { focuses.push(id); },
     overview() { focuses.push(null); }, zoomBy(factor) { zooms.push(factor); }, start() { lifecycle.push('start'); }, stop() { lifecycle.push('stop'); }, invalidate() { invalidations.push(1); } }; } };
-  const context = { console, Date, Set, Map, document, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, encodeURIComponent,
+  const context = { console, Date, Set, Map, document, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, ThemePack, encodeURIComponent,
     window: { __OBSERVER_THEME__: { fx: false, colors: { accent: '#77dce8', background: '#02060b' } }, localStorage: { getItem() { return 'on'; }, setItem() {} }, addEventListener(name, fn) { events[name] = fn; } }, SPRITES: { init: async () => {} },
     Harness: { api: { get: path => { reads.push(path); return new Promise(() => {}); } } },
     QuerySpine: { define(key, options) { specs.set(key, options); if (key === 'observer.sessions') spec = options; },
@@ -62,16 +83,48 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   // A real poll always parses a new data object; tests that edit rows in place republish them the same way.
   const poll = () => ({ ...snapshot, data: { ...snapshot.data } });
   assert.equal(viewOptions.canvas, elements.world); assert.deepEqual(lifecycle, ['start'], 'one view, started once');
+  assert.equal(viewOptions.theme, ThemePack.getDefault(), 'without a selected snapshot the view paints the canonical default');
   assert.equal(fxState, false, 'explicit theme FX wins over saved browser preference');
   assert.equal(elements['fx-toggle'].attributes['aria-pressed'], 'false');
-  assert.equal(themedStyles.get('--phosphor'), '#77dce8'); assert.equal(themedStyles.get('--bg'), '#02060b');
+  assert.equal(themedStyles.size, 0, 'interface colours come from the theme pack helper, not observer.js');
   assert.equal(bodyStyles.has('--chrome'), false); assert.equal(bodyStyles.has('--glow'), false, 'theme inheritance leaves body stale-state overrides in control');
   elements['fx-toggle'].handlers.click(); assert.equal(fxState, true, 'manual FX toggle remains available');
   listener(snapshot); assert.equal(scene().workers.length, 16); assert.equal(elements.sessions.children.length, 1);
   assert.equal(scene().platforms.length, 1); assert(scene().workers.every(worker => worker.platformKey === scene().platforms[0].key), 'every worker stands on its project platform');
   assert.equal(new Set(scene().workers.map(worker => worker.chair.x + ',' + worker.chair.y)).size, 16, '16 distinct desks');
+  const allItems = node => node.className?.split(' ').includes('session-item') ? [node] : node.children.flatMap(allItems);
+  const originalItem = allItems(elements.sessions)[0], originalButton = originalItem.children[0];
+  originalButton.focus();
+  const checkoutRows = ['main', 'checkout_7785594026262a4b150b', 'checkout_95a43a6b39b11304150b', null].map((checkoutId, i) => ({ ...sessions[i], repoId: 'same-repo', repo: 'shared', checkoutId,
+    checkoutKind: i === 0 ? 'main' : i < 3 ? 'worktree' : null, worktree: i ? 'same name' : null, folder: 'src' }));
+  listener({data: {...snapshot.data, sessions: checkoutRows}});
+  const checkoutGroups = elements.sessions.children[0].children[2].children;
+  assert.equal(checkoutGroups.length, 4, 'four checkout containers');
+  assert.deepEqual(checkoutGroups.map(node => node.children[0].textContent), ['shared · Main checkout', 'shared · Worktree same name · b150b', 'shared · Worktree same name · 4150b', 'shared · Checkout unavailable']);
+  assert(checkoutGroups.every(node => node.children[1].children[0].children[0].textContent === 'src'));
+  assert.equal(allItems(elements.sessions)[0], originalItem);
+  assert.equal(document.activeElement, originalButton);
+  listener({data: {...snapshot.data, sessions: checkoutRows.slice().reverse()}});
+  assert.equal(allItems(elements.sessions).find(item => item.children[0] === originalButton), originalItem);
+  assert.equal(document.activeElement, originalButton);
+  assert.deepEqual(elements.sessions.children[0].children[2].children.map(node => node.children[0].textContent),
+    ['shared · Checkout unavailable', 'shared · Worktree same name · 4150b', 'shared · Worktree same name · b150b', 'shared · Main checkout'],
+    'colliding checkout headings remain distinct and stable after reorder');
+  const stableCheckout = elements.sessions.children[0].children[2].children.find(node => node.children[0].textContent.includes('Main checkout'));
+  const stableFolder = stableCheckout.children[1].children[0], stableInspect = originalItem.children[2];
+  listener({data: {...snapshot.data, sessions: checkoutRows}});
+  assert.equal(elements.sessions.children[0].children[2].children[0], stableCheckout);
+  assert.equal(stableCheckout.children[1].children[0], stableFolder);
+  assert.equal(allItems(elements.sessions)[0].children[2], stableInspect);
+  filters[2].handlers.click(); filters[0].handlers.click();
+  assert.equal(allItems(elements.sessions).find(item => item.children[0] === originalButton), originalItem, 'filter restores exact row');
+  listener({data: {...snapshot.data, sessions: checkoutRows.slice(0, 3)}});
+  assert.equal(elements.sessions.children[0].children[2].children.length, 3, 'removal prunes unavailable checkout');
+  assert.equal(elements.sessions.children[0].children[0].children[3].textContent, '3', 'project count follows rows');
+  listener({data: {...snapshot.data, sessions: []}});
+  listener(snapshot);
   // Recording mode hides every inspector entrypoint while ordinary observation remains inspectable.
-  const recordedRow = elements.sessions.children[0].children[2].children[0];
+  const recordedRow = sessionItems(elements.sessions.children[0])[0];
   listener({ ...snapshot, data: { ...snapshot.data, presentation: { company: 'Helioforge' } } });
   assert.equal(recordedRow.children[1].disabled, true); assert.equal(recordedRow.children[2].disabled, true);
   viewOptions.onTitleToggle('obs_0'); recordedRow.children[2].handlers.click();
@@ -81,13 +134,13 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   const firstRevision = scene().revision;
   listener(snapshot); assert.equal(scene().revision, firstRevision, 'a repeated snapshot keeps the geometry');
   assert.equal(options().stale(), false); assert.equal(options().inspected(), null);
-  let button = elements.sessions.children[0].children[2].children[0].children[0]; button.focus(); button.handlers.click(); assert.equal(focuses.at(-1), 'obs_0');
+  let button = sessionItems(elements.sessions.children[0])[0].children[0]; button.focus(); button.handlers.click(); assert.equal(focuses.at(-1), 'obs_0');
   listener(snapshot); assert.equal(document.activeElement.dataset.sessionId, 'obs_0'); assert.equal(document.activeElement.attributes['aria-pressed'], 'true');
   snapshot.data.sessions[0].provider = 'claude'; snapshot.data.sessions[0].sessionId = 'replacement';
   snapshot.data.sessions[0].tool = { available: true, last: { name: 'Bash', phase: 'started', at: new Date().toISOString() } }; listener(poll());
   assert(viewOptions.nameFor('obs_0').startsWith('Claude')); assert.equal(scene().workers.find(worker => worker.id === 'obs_0').row.provider, 'claude');
-  button = elements.sessions.children[0].children[2].children[0].children[0]; assert(button.children[2].textContent.includes('running a command'));
-  snapshot.data.sessions[0].tool.last.phase = 'finished'; listener(poll()); assert(elements.sessions.children[0].children[2].children[0].children[0].children[2].textContent.includes('finished'));
+  button = sessionItems(elements.sessions.children[0])[0].children[0]; assert(button.children[2].textContent.includes('running a command'));
+  snapshot.data.sessions[0].tool.last.phase = 'finished'; listener(poll()); assert(sessionItems(elements.sessions.children[0])[0].children[0].children[2].textContent.includes('finished'));
   filters[2].handlers.click(); assert.equal(elements.sessions.children.length, 0); assert.equal(scene().workers.length, 16, 'filters never remove floor workers'); assert.equal(elements.empty.hidden, false);
   filters[0].handlers.click();
   listener({ ...snapshot, error: new Error('offline') }); assert.equal(options().stale(), true, 'stale freezes the scene'); assert.equal(scene().workers.length, 16, 'and retains the last crew');
@@ -96,7 +149,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   const retained = chairOf('obs_1'); snapshot.data.sessions = sessions.slice(1); snapshot.data.observedAt = Date.now(); listener(poll()); assert.equal(scene().workers.length, 15);
   assert.deepEqual(chairOf('obs_1'), retained, 'survivors keep their desk');
   // The magnifier is a sibling of the row button: it opens the inspector without changing what a row click means.
-  let inspect = elements.sessions.children[0].children[2].children[0].children[2];
+  let inspect = sessionItems(elements.sessions.children[0])[0].children[2];
   assert.equal(inspect.className, 'row-inspect'); assert.equal(inspect.attributes['aria-haspopup'], 'dialog'); assert.equal(inspect.attributes['aria-expanded'], 'false');
   inspect.focus(); inspect.handlers.click();
   const panel = () => elements.panels.children.at(-1), part = name => panelPart(elements.panels, name);
@@ -104,7 +157,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   assert.equal(specs.get('observer.inspect.obs_1').path, '/api/observer/sessions/obs_1/inspect?identity=codex%3Asession1', 'the read names the panel\'s exact target');
   assert.equal(document.activeElement, part('inspector-title'), 'focus moves into the inspector');
   assert.equal(part('inspector-title').textContent, 'Codex · 2'); assert.equal(part('inspector-task').textContent, '<script>private</script>', 'titles stay text');
-  inspect = elements.sessions.children[0].children[2].children[0].children[2]; assert.equal(inspect.attributes['aria-expanded'], 'true');
+  inspect = sessionItems(elements.sessions.children[0])[0].children[2]; assert.equal(inspect.attributes['aria-expanded'], 'true');
   assert.equal(inspect.attributes['aria-controls'], panel().id, 'the toggle names the panel it controls');
   assert.equal(options().inspected(), 'obs_1', 'the view can tag the inspected worker');
   // Still open: the roster moves a new provider/session behind obs_1. This panel belongs to the old session: it is
@@ -117,7 +170,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   assert.equal(part('inspector-log').children.length, 0, 'no old conversation under the new header');
   assert.equal(inspections.has('observer.inspect.obs_1'), false, 'the replacement is not read by this panel');
   assert.equal(part('inspector-title').textContent, 'Claude · 2'); assert.match(part('inspector-health').textContent, /different session/);
-  inspect = elements.sessions.children[0].children[2].children[0].children[2]; assert.equal(inspect.attributes['aria-expanded'], 'false', 'the row now shows a session with no open panel');
+  inspect = sessionItems(elements.sessions.children[0])[0].children[2]; assert.equal(inspect.attributes['aria-expanded'], 'false', 'the row now shows a session with no open panel');
   // Opening it again replaces the obsolete panel for that row with one for its current session.
   inspect.handlers.click(); assert.equal(elements.panels.children.length, 1); assert(inspections.has('observer.inspect.obs_1'));
   listener({ data: { ...snapshot.data, health: 'unavailable', observedAt: Date.now() } });
@@ -126,7 +179,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   events.keydown({ key: 'Escape', preventDefault() {} });
   assert.equal(elements.panels.children.length, 0); assert.equal(inspections.size, 0, 'closing stops the inspector poll');
   assert.equal(document.activeElement.dataset.inspectId, 'obs_1', 'focus returns to the rebuilt magnifier');
-  assert.equal(elements.sessions.children[0].children[2].children[0].children[0].attributes['aria-pressed'], 'true', 'Escape closed only the inspector, the worker stays focused');
+  assert.equal(sessionItems(elements.sessions.children[0])[0].children[0].attributes['aria-pressed'], 'true', 'Escape closed only the inspector, the worker stays focused');
   // Toolbar zoom goes through the view; the view reports its clamps back to the buttons.
   elements['zoom-in'].handlers.click(); elements['zoom-out'].handlers.click(); assert.deepEqual(zooms, [1.25, 0.8]);
   viewOptions.onCamera({ canZoomIn: false, canZoomOut: true }); assert.equal(elements['zoom-in'].disabled, true); assert.equal(elements['zoom-out'].disabled, false);
@@ -146,7 +199,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   assert.equal(elements['mail-counts'].textContent, '2 pending · 1 acknowledged · in recent 100', 'counts are within the recent window');
   const ledger = elements['mail-ledger'].children.map(item => item.children[0]);
   assert.deepEqual(ledger.map(button => button.dataset.messageId), ['3', '2', '1']);
-  const rowFor = id => elements.sessions.children.flatMap(group => group.children[2].children.map(item => item.children[0])).find(button => button.dataset.sessionId === id);
+  const rowFor = id => elements.sessions.children.flatMap(group => sessionItems(group).map(item => item.children[0])).find(button => button.dataset.sessionId === id);
   assert.equal(rowFor('obs_1').children.find(child => child.className === 'row-mail').textContent, '✉ 1 unacknowledged message · recent 100');
   assert(!rowFor('obs_2').children.some(child => child.className === 'row-mail'));
   ledger[2].handlers.click();
@@ -190,7 +243,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   assert.equal(document.activeElement, elements['mail-ledger'].children[2].children[1], 'focus returns to the live magnifier');
   // Mail and agent panels stack: opening one never closes the other; closing the top reveals the lower one.
   elements['mail-ledger'].children[2].children[1].handlers.click(); await new Promise(resolve => setImmediate(resolve));
-  const sessionInspect = elements.sessions.children[0].children[2].children.map(item => item.children[2]).find(button => button.dataset.inspectId === 'obs_1');
+  const sessionInspect = sessionItems(elements.sessions.children[0]).map(item => item.children[2]).find(button => button.dataset.inspectId === 'obs_1');
   sessionInspect.handlers.click();
   assert.equal(elements.panels.children.length, 2, 'opening the agent inspector keeps the mail panel underneath');
   assert.equal(elements.panels.children[0].open, false); assert.equal(elements.panels.children[0].inert, true, 'the covered panel is hidden and inert');
@@ -232,6 +285,39 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     await new Promise(resolve => setImmediate(resolve));
   }
   console.log('observer UI: unresolved, rejected and throwing sprite init never block startup OK');
+  // The selected snapshot reaches the view, layout accents, courier colours and crew init; crew failure warns once and repaints.
+  {
+    const base = ThemePack.getDefault(), accents = Array.from({ length: 10 }, (_, index) => '#c0' + String(index).padStart(2, '0') + 'c' + index);
+    const pack = { version: 1, requestedId: 'synthetic', effectiveId: 'synthetic', warnings: [], ui: base.ui, crew: { blank: base.crew.blank },
+      scene: { ...base.scene, colors: { ...base.scene.colors, 'mail-pending': '#102030' }, projectAccents: accents, backgroundFx: 'none', ambientFx: 'none' } };
+    const own = Object.fromEntries(Object.keys(elements).map(id => [id, element()])), renders = [], inits = [], warnings = [];
+    let created = null, invalidated = 0, live = null, options = null;
+    const ownDocument = { documentElement: element(), body: element(), activeElement: null, hidden: false, getElementById: id => own[id], createElement: element, addEventListener() {} };
+    own.filters.children = ['all', 'working', 'blocked'].map(value => { const node = element(); node.dataset.filter = value; return node; });
+    vm.runInNewContext(fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8'), { ...context, document: ownDocument,
+      window: { ...context.window, __OBSERVER_THEME_PACK__: pack }, SPRITES: { init: arg => { inits.push(arg); return Promise.resolve(); } },
+      ThemePack: { ...ThemePack, reportWarning: warning => warnings.push(warning) },
+      ObserverView: { create: value => { created = value; return { update: (next, payload) => { renders.push(next); options = payload; }, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate: () => { invalidated++; } }; } },
+      QuerySpine: { define() {}, invalidate: () => Promise.resolve(), subscribe(key, fn) { if (key === 'observer.sessions') live = fn; return () => {}; } } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(created.theme, pack, 'the view receives the selected snapshot'); assert(Object.isFrozen(pack.scene.colors), 'and it is frozen');
+    assert.equal(inits.length, 1); assert.equal(inits[0].crew, pack.crew, 'sprite init receives the snapshot crew'); assert.equal(typeof inits[0].onDegraded, 'function');
+    const settled = invalidated;
+    const rows = sessions.slice(0, 2).map(row => ({ ...row, sessionId: 'mail-' + row.id }));
+    live({ data: { sessions: rows, health: 'available', observedAt: Date.now(), bus: { health: 'available', reason: null, observedAt: Date.now(), window: 100,
+      messages: [{ id: 1, from: 'obs_1', to: 'obs_0', sentAt: new Date().toISOString(), acknowledgedAt: null, wake: 'none', identity: 'mail_' + '1'.repeat(64) }] } } });
+    const accent = renders.at(-1).platforms[0].accent;
+    assert(accents.includes(accent) && !base.scene.projectAccents.includes(accent), 'platform accents come from the snapshot slots');
+    assert.deepEqual(options.mailFrame(1000).envelopes.map(envelope => envelope.color), ['#102030'], 'pending envelopes use the snapshot mail colour');
+    inits[0].onDegraded({ skin: 'blank', reason: 'image-load' });
+    assert.equal(warnings.length, 1); assert.equal(invalidated, settled + 1, 'a degraded crew group repaints the scene once');
+    assert.deepEqual({ code: warnings[0].code, pack: warnings[0].pack, group: warnings[0].group }, { code: 'crew-load', pack: 'synthetic', group: 'blank' });
+    assert.equal(warnings[0].message, 'Theme pack synthetic crew blank did not load; showing fallback crew.');
+    inits[0].onDegraded({ skin: '../assets/x.png', reason: 'image-dimensions', error: new Error('/private/path') });
+    assert.deepEqual([warnings[1].code, warnings[1].group], ['crew-dimensions', 'unknown'], 'unsafe group names never reach the warning');
+    assert(!warnings[1].message.includes('/') && !warnings[1].message.includes('Error'), 'no paths or raw errors');
+  }
+  console.log('observer UI: snapshot reaches view, layout accents, courier colours and crew init; crew degradation warns and repaints OK');
 
   // ---------- Task 2: work follows visible change ----------
   {
@@ -263,7 +349,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     const bus = { health: 'available', reason: null, observedAt: Date.now(), window: 100, messages: [{ id: 2, from: 'obs_1', to: 'obs_0', sentAt: at, acknowledgedAt: null, wake: 'none' }, { id: 1, from: 'obs_0', to: 'obs_1', sentAt: at, acknowledgedAt: null, wake: 'none' }] };
     const settled = (data, extra = {}) => ({ hasData: true, error: null, pending: false, updatedAt: Date.now(), data, ...extra });
     const fresh = (change = value => value) => change({ sessions: rows.map(row => ({ ...row, tool: { ...row.tool, last: { ...row.tool.last } } })), health: 'available', observedAt: Date.now(), bus: { ...bus, messages: bus.messages.map(message => ({ ...message })) } });
-    const rowButton = id => own.sessions.children.flatMap(section => section.children[2].children).map(item => item.children[0]).find(button => button.dataset.sessionId === id);
+    const rowButton = id => own.sessions.children.flatMap(section => sessionItems(section)).map(item => item.children[0]).find(button => button.dataset.sessionId === id);
     let first = fresh(); live(settled(first));
     assert.equal(sceneUpdates.length, 1); assert.equal(timers.size, 1, 'one stale deadline'); const [deadlineTimer] = timers.values();
     assert(deadlineTimer.ms > 5900 && deadlineTimer.ms <= 6001, 'due at observedAt + 6s');
@@ -293,7 +379,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     const button3 = rowButton('obs_3');
     live(settled(fresh(data => { data.sessions = data.sessions.filter(row => row.id !== 'obs_4'); return data; })));
     assert.equal(rowButton('obs_4'), undefined); assert.equal(rowButton('obs_3'), button3, 'survivors keep their node');
-    assert.equal(own.sessions.children[0].children[2].children[0].children[0].dataset.sessionId, 'obs_5', 'waiting first');
+    assert.equal(sessionItems(own.sessions.children[0])[0].children[0].dataset.sessionId, 'obs_5', 'waiting first');
     assert.equal(document.activeElement, button0, 'focus survives a reorder');
     // Stale deadline: a stalled request still turns the view stale on time.
     const aging = fresh(data => { data.observedAt = Date.now() - 5995; data.sessions = data.sessions.filter(row => row.id !== 'obs_4'); return data; });
@@ -343,7 +429,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
       const inventory = (title = 'Task') => ({ sessions: rows.map(row => ({ ...row, title })), health: 'available', observedAt: Date.now() });
       const sessionGets = () => gets.filter(entry => entry.path === '/api/observer/sessions'), inspectGets = () => gets.filter(entry => entry.path.includes('/inspect'));
       await flush(); assert.equal(sessionGets().length, 1, 'startup reads once'); sessionGets()[0].resolve(inventory()); await flush();
-      const magnifier = qOwn.sessions.children[0].children[2].children.map(item => item.children[2]).find(button => button.dataset.inspectId === 'obs_1');
+      const magnifier = sessionItems(qOwn.sessions.children[0]).map(item => item.children[2]).find(button => button.dataset.inspectId === 'obs_1');
       magnifier.handlers.click(); await flush(); assert.equal(inspectGets().length, 1, 'the inspector reads while visible');
       const preHide = vm.runInContext("QuerySpine.refresh('observer.sessions').catch(() => {})", sandbox); await flush();
       assert.equal(sessionGets().length, 2, 'a poll is in flight when the page hides');
@@ -354,10 +440,10 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
       const inspectBefore = inspectGets().length;
       sessionGets()[1].resolve(inventory('old')); await preHide; await flush();
       assert.equal(inspectGets().length, inspectBefore, 'the pre-hide response cannot resume the inspector');
-      assert.equal(qOwn.sessions.children[0].children[2].children[0].children[1].textContent, 'Task', 'nor replace the inventory');
+      assert.equal(sessionItems(qOwn.sessions.children[0])[0].children[1].textContent, 'Task', 'nor replace the inventory');
       sessionGets()[2].resolve(inventory('new')); await flush();
       assert.equal(inspectGets().length, inspectBefore + 1, 'the post-resume read proves the session and the inspector reads again');
-      assert.equal(qOwn.sessions.children[0].children[2].children[0].children[1].textContent, 'new');
+      assert.equal(sessionItems(qOwn.sessions.children[0])[0].children[1].textContent, 'new');
       // Hidden again; the fresh inventory now shows a different session behind obs_1: it is not read.
       qDocument.hidden = true; qDoc.visibilitychange(); await new Promise(resolve => setTimeout(resolve, 3));
       qDocument.hidden = false; qDoc.visibilitychange(); await flush();
@@ -431,22 +517,22 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     const groups = own.sessions.children, textAll = node => node.children.length ? node.children.map(textAll).join(' ') : node.textContent;
     assert(!groups.map(textAll).join(' ').includes('NaN'), 'no NaN reaches the list');
     const starnet = groups.find(section => section.children[0].children[1].textContent === 'Starnet'), desktop = groups.find(section => section.children[0].children[1].textContent === 'Desktop');
-    const listed = starnet.children[2].children.map(item => [item.children[0].dataset.sessionId, item.className, item.children[0].children[0].children[0].textContent]);
+    const listed = sessionItems(starnet).map(item => [item.children[0].dataset.sessionId, item.className, item.children[0].children[0].children[0].textContent]);
     assert.deepEqual(listed, [['obs_root', 'session-item', 'Codex · 1'], ['hlp_ada', 'session-item helper', 'Codex · helper · Ada'], ['hlp_plain', 'session-item helper', 'Helper of Codex · helper · Ada']],
       'helpers are listed under their exact parent');
-    assert.equal(starnet.children[2].children[2].children[0].children[0].children[0].title, 'Helper of Codex · helper · Ada', 'a long name cut to one line stays readable in full');
+    assert.equal(sessionItems(starnet)[2].children[0].children[0].children[0].title, 'Helper of Codex · helper · Ada', 'a long name cut to one line stays readable in full');
     assert.equal(starnet.children[0].children[3].textContent, '1 +2 helpers', 'helpers are counted apart from their parent');
-    assert.equal(desktop.children[0].children[2].textContent, 'APPS'); assert.equal(desktop.children[2].children[0].children[0].children[0].children[0].textContent, 'ChatGPT app · 1');
-    const rootRow = starnet.children[2].children[0].children[0], appRow = desktop.children[2].children[0].children[0];
+    assert.equal(desktop.children[0].children[2].textContent, 'APPS'); assert.equal(sessionItems(desktop)[0].children[0].children[0].children[0].textContent, 'ChatGPT app · 1');
+    const rootRow = sessionItems(starnet)[0].children[0], appRow = sessionItems(desktop)[0].children[0];
     assert(rootRow.children[0].children[1].textContent.startsWith('was '), 'the stale Herdr row says it was last observed');
     assert(!appRow.children[0].children[1].textContent.startsWith('was '));
     assert.equal(rootRow.children.at(-1).children[3].textContent, 'observed 20s ago', 'its age is its own observation, not the Desktop refresh');
-    assert.equal(starnet.children[2].children[1].children[1].textContent, 'Task unavailable', 'a helper with no task evidence says so');
+    assert.equal(sessionItems(starnet)[1].children[1].textContent, 'Task unavailable', 'a helper with no task evidence says so');
     // Inspection eligibility is per row: the unavailable Herdr row is withheld without a read.
-    starnet.children[2].children[0].children[1].handlers.click();
+    sessionItems(starnet)[0].children[1].handlers.click();
     assert.equal(inspectSubs.size, 0); assert.equal(P('inspector-health').textContent, ObserverInspector.REASONS['inventory-unavailable']);
     // The Desktop row reads a window snapshot: labelled loaded UI text, provenance, replace-only, no Follow/Pause.
-    const inspectApp = desktop.children[2].children[0].children[1]; inspectApp.handlers.click();
+    const inspectApp = sessionItems(desktop)[0].children[1]; inspectApp.handlers.click();
     assert.equal(inspectSubs.size, 1); const feed = inspectSubs.get('observer.inspect.dsk_1');
     P('inspector-pause').handlers.click();
     const window4 = (generation, texts, extra = {}) => ({ hasData: true, error: null, data: { id: 'dsk_1', inspectionIdentity: 'dsk_1', health: 'available', asOf: new Date().toISOString(), reason: null, stats: {},
@@ -487,7 +573,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     const mixed = appAt => ({ sessions: [liveHerdr, { ...app, observedAt: appAt }], health: 'available', observedAt: Date.now(), error: null,
       sources: { herdr: { health: 'available', observedAt: Date.now(), reason: null }, desktop: { health: 'available', observedAt: appAt, reason: null } } });
     live(settled(mixed(Date.now())));
-    own.sessions.children.find(section => section.children[0].children[1].textContent === 'Desktop').children[2].children[0].children[2].handlers.click();
+    sessionItems(own.sessions.children.find(section => section.children[0].children[1].textContent === 'Desktop'))[0].children[2].handlers.click();
     inspectSubs.get('observer.inspect.dsk_1')(window4('g5', ['visible excerpt'])); assert.equal(P('inspector-log').children.length, 1);
     live(settled(mixed(Date.now() - 7000)));
     assert.equal(P('inspector-log').children.length, 0, 'an expired Desktop row is withheld while Herdr stays live'); assert.equal(inspectSubs.size, 0, 'and its reads stop');
@@ -590,7 +676,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     const inventory = (change = data => data) => change({ sessions: rows.map(row => ({ ...row, observedAt: Date.now() })), health: 'available', observedAt: Date.now(), bus: bus() });
     const settled = (data, extra = {}) => ({ hasData: true, error: null, pending: false, updatedAt: Date.now(), data, ...extra });
     live(settled(inventory()));
-    const item = id => own.sessions.children.flatMap(section => section.children[2].children).find(node => node.children[0].dataset.sessionId === id);
+    const item = id => own.sessions.children.flatMap(section => sessionItems(section)).find(node => node.children[0].dataset.sessionId === id);
     const titleButton = id => item(id).children[1], magnifier = id => item(id).children[2];
     const roots = () => own.panels.children, top = () => roots().at(-1), partOf = (root, name) => findPart(root, name);
     const turnsOf = root => partOf(root, 'inspector-log').children.map(node => node.dataset.turnId);
@@ -822,7 +908,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
       [['repo_aaaa', 'api · aaaa', 'false'], ['repo_bbbb', 'api · bbbb', 'false']], 'two repositories named api stay two toggles');
     assert.equal(groupOf('Proj').children[1].attributes.role, 'group');
     assert.equal(groupOf('Desktop').children[1].hidden, true, 'a project without repository ids has no toggles');
-    const itemOf = id => own.sessions.children.flatMap(section => section.children[2].children).find(node => node.children[0].dataset.sessionId === id);
+    const itemOf = id => own.sessions.children.flatMap(section => sessionItems(section)).find(node => node.children[0].dataset.sessionId === id);
     const before = invalidated;
     toggles()[0].handlers.click();
     assert.equal(updateOptions.repositorySelection(), 'repo_aaaa'); assert.equal(toggles()[0].attributes['aria-pressed'], 'true'); assert.equal(toggles()[1].attributes['aria-pressed'], 'false');
