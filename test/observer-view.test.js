@@ -5,6 +5,8 @@ const Scene = require('../frontend/app/observer-scene.js');
 const View = require('../frontend/app/observer-view.js');
 
 // Pure helpers: zoom tiers, plate priority and the static-layer budget.
+assert.equal(View.idleFilter(0), 'none'); assert.equal(View.idleFilter(1), 'grayscale(0.85) brightness(0.45)', 'full age is mostly grey, 55% darker');
+assert.equal(View.idleFilter(1 / 3), 'grayscale(0.28) brightness(0.82)'); assert.equal(View.idleFilter(7), View.idleFilter(1), 'clamped');
 assert.deepEqual([View.lodFor(0.3), View.lodFor(0.8), View.lodFor(1.5)], ['overview', 'sections', 'detail']);
 const placed = View.placePlates([{ x: 0, y: 0, w: 50, h: 10, priority: 10, text: 'repo' }, { x: 20, y: 0, w: 50, h: 10, priority: 70, text: 'waiting' }, { x: 200, y: 0, w: 20, h: 10, priority: 1, text: 'far' }]);
 assert.deepEqual(placed.map(plate => plate.text), ['waiting', 'far'], 'a colliding lower-priority plate is dropped, not overlapped');
@@ -649,6 +651,46 @@ const crewChecks = readinessChecks.then(async () => {
 });
 crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers, DPR equivalence, resize refit, click vs drag, live hover, cursor and pinch zoom, keyboard, clamps, sprite poses and fallback, stale/reduced freeze, cache reuse, lifecycle and focus OK, frozen single paint, invalidation sources, sprite/font readiness, camera report dedupe and offscreen furniture culling OK')).catch(error => { console.error(error); process.exitCode = 1; });
 
+{
+  const layout = Model.createLayout();
+  layout.reconcile([{ id: 'checkout-sign', projectId: 'p', project: 'P', repoId: 'r', repo: 'api',
+    checkoutId: 'checkout_abcd', checkoutKind: 'worktree', worktree: 'review', folder: 'src', provider: 'codex', status: 'idle' }]);
+  const scene = Scene.build(layout.onPage(0), 0), node = canvas(1000, 700);
+  const labelColors = [], fillText = node.ctx.fillText;
+  node.ctx.fillText = (...args) => { labelColors.push([String(args[0]), node.ctx.fillStyle]); fillText(...args); };
+  const view = View.create({ theme: { scene: { colors: { 'repo-label': '#123456' } } }, canvas: node,
+    env: { raf: () => 1, caf() {}, now: () => 0, dpr: () => 1, createCanvas: () => canvas() } });
+  view.start(); view.update(scene, {}); view.focusPlatform(scene.platforms[0].key); view.paint(16);
+  assert(labelColors.some(([text, color]) => text === 'Worktree review · abcd' && color === '#123456'), 'checkout signs use the instance theme label color');
+  for (const text of ['api', 'Worktree review · abcd', 'src']) assert(node.ctx.calls.fillText.includes(text), 'checkout sign paints ' + text);
+  assert.equal(view.signRegions()[0].repo, 'r', 'multi-line sign retains repository target');
+  view.stop();
+}
+
+// Long equal-basename checkout labels retain their discriminator, including a real four-character hash collision.
+for (const [name, ids, suffixes] of [
+  ['a-very-long-same-checkout-name', ['checkout_aaaa', 'checkout_bbbb'], ['aaaa', 'bbbb']],
+  ['same-name', ['checkout_7785594026262a4b150b', 'checkout_95a43a6b39b11304150b'], ['b150b', '4150b']]
+]) {
+  const layout = Model.createLayout();
+  layout.reconcile(ids.map((checkoutId, index) => ({ id: 'sign-' + index, projectId: 'p', project: 'P', repoId: 'r', repo: 'api',
+    checkoutId, checkoutKind: 'worktree', worktree: name, folder: 'src', provider: 'codex', status: 'idle' })));
+  const scene = Scene.build(layout.onPage(0), 0), lines = [];
+  for (const platform of scene.platforms) {
+    const node = canvas(1600, 1000);
+    const view = View.create({ canvas: node, env: { raf: () => 1, caf() {}, now: () => 0, dpr: () => 1, createCanvas: () => canvas() } });
+    view.start(); view.update(scene, {}); view.focusPlatform(platform.key); view.paint(16);
+    lines.push(...node.ctx.calls.fillText.filter(text => text.startsWith('Worktree ')));
+    assert(node.ctx.calls.fillText.includes('api'), 'repository text remains painted');
+    assert(node.ctx.calls.fillText.includes('src'), 'folder text remains painted');
+    assert(view.signRegions().every(sign => sign.repo === 'r'), 'repository hit targets stay exact');
+    view.stop();
+  }
+  const distinct = [...new Set(lines)];
+  assert.equal(distinct.length, 2, 'same-basename checkouts paint two distinct signs');
+  for (const suffix of suffixes) assert(distinct.some(text => text.endsWith(' · ' + suffix)), 'painted sign retains ' + suffix);
+  assert(distinct.every(text => text.length * 7 <= 180), 'checkout sign text stays within existing width');
+}
 // ---------- Theme: instance palette, effect modes and replacement loading ----------
 {
   const crypto = require('node:crypto');
@@ -699,9 +741,10 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   }
   const digest = result => crypto.createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(result).map(([name, value]) => [name, value.log])))).digest('hex');
   // Characterization of the pre-theme literal painter (HEAD 196d86d), recorded with this exact scenario set.
-  const HEAD_DEFAULT = 'c79337c849ba718dca8bddcc7382f371d30a07d5cadd4950e1f9881fc9117af7';
+  // Updated for PR #8's intentional extra resting motes and crackle; theme/default equivalence remains checked.
+  const HEAD_DEFAULT = '45c7717d1ff113517da5f17a673d74f1b480b0f9eea53f4caba7e1ba66da52a2';
   const omitted = record(undefined).result;
-  assert.equal(digest(omitted), HEAD_DEFAULT, 'default paint colours, order and count equal the pre-theme painter');
+  assert.equal(digest(omitted), HEAD_DEFAULT, 'default paint colours, order and count match the idle-aging baseline');
   assert.equal(digest(record(require('../frontend/app/theme-pack.js').getDefault()).result), HEAD_DEFAULT, 'the canonical snapshot paints the same default');
   assert.equal(omitted['fx-on'].log.filter(entry => entry === 'f:' + base.colors['pixie-core']).length >= 26, true);
 
@@ -1105,4 +1148,33 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   // Procedural humans (no ready group) keep the same hit-tested bodies.
   assert.equal((await paintWith(officeTheme, { ready: false })).view.hitRegions().length, scene.workers.length);
   console.log('office art: all 34 roles at native size and whole pixels, native chairs, carriers at drone points, no station primitives or glow, two-tone outlined faces, steady statuses, depth and hits OK');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Idle tint composes with themed sprite selection and office fallback without leaking into other canvas work.
+(async () => {
+const { SCENE_ART_ROLES } = require('../frontend/app/scene-art-roles.js');
+const assets = Object.fromEntries(Object.keys(SCENE_ART_ROLES).map(role => [role, '/assets/themes/office/scene/' + role.toLowerCase() + '.png']));
+class RoleImage {
+  set src(url) { const role = Object.keys(assets).find(role => assets[role] === url); this.naturalWidth = SCENE_ART_ROLES[role].source.width; this.naturalHeight = SCENE_ART_ROLES[role].source.height; }
+  decode() { return Promise.resolve(); }
+}
+for (const office of [false, true]) {
+  const layout = Model.createLayout();
+  layout.reconcile([{ id: 'aged', projectId: 'p', project: 'P', repoId: 'r', repo: 'R', provider: 'claude', status: 'idle' }]);
+  const scene = Scene.build(layout.onPage(0), 0), node = canvas(1000, 700), stack = [], bodies = [], tintedFills = [];
+  node.ctx.filter = 'none';
+  node.ctx.save = () => stack.push(node.ctx.filter);
+  node.ctx.restore = () => { node.ctx.filter = stack.pop(); };
+  const fill = node.ctx.fill;
+  node.ctx.fill = (...args) => { if (node.ctx.filter === View.idleFilter(1)) tintedFills.push(node.ctx.fillStyle); fill(...args); };
+  const view = View.create({ canvas: node, theme: { scene: { art: { style: office ? 'home-office' : 'station', assets } } }, idleLevel: () => 1,
+    env: { raf: () => 1, caf() {}, now: () => 0, dpr: () => 1, createCanvas: () => canvas(), Image: RoleImage, themeStatus: { reportNotice() {}, reportWarning() {} },
+      sprites: { drawBody(ctx) { bodies.push(ctx.filter); return { top: 0, w: 30, h: 60 }; } } } });
+  for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve));
+  view.start(); view.update(scene, {}); view.focusPlatform(scene.platforms[0].key); view.paint(16);
+  if (office) { assert.equal(bodies.length, 0, 'unready office never substitutes station sprites'); assert(tintedFills.length > 0, 'procedural office body receives idle tint'); }
+  else assert.deepEqual(bodies, [View.idleFilter(1)], 'station sprite receives idle tint');
+  assert.equal(node.ctx.filter, 'none', 'body tint is restored after painting');
+  view.stop();
+}
 })().catch(error => { console.error(error); process.exitCode = 1; });

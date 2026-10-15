@@ -8,10 +8,25 @@ const ObserverModel = (() => {
   const palette = FLOORS.map((floor, index) => [floor, Themes.getDefault().scene.projectAccents[index]]);
   const projectKey = row => row.projectId || 'folder:' + (row.project || 'Unassigned');
   const repoKey = row => row.repoId || projectKey(row);
-  // Agents in different sub-folders of one repository sit in different sections (low walls between them).
+  // Checkout proof owns identity; labels and basenames never distinguish sections.
   const folderOf = row => typeof row.folder === 'string' ? row.folder : '';
-  const sectionKey = row => repoKey(row) + (folderOf(row) ? '#' + folderOf(row) : '');
-  const sectionLabel = row => (row.repo || row.project || 'Unassigned') + (folderOf(row) ? ' / ' + folderOf(row) : '');
+  const checkoutIdOf = row => typeof row.checkoutId === 'string' && row.checkoutId ? row.checkoutId : null;
+  const checkoutKey = row => JSON.stringify([repoKey(row), checkoutIdOf(row)]);
+  const sectionKey = row => JSON.stringify([repoKey(row), checkoutIdOf(row), folderOf(row)]);
+  const checkoutLabel = row => !checkoutIdOf(row) ? 'Checkout unavailable' : row.checkoutKind === 'main' ? 'Main checkout'
+    : row.checkoutKind === 'worktree' ? 'Worktree ' + (row.worktree || 'unnamed') : row.checkoutKind === 'folder' ? 'Local folder' : 'Checkout unavailable';
+  // Extend only colliding opaque suffixes; ordering and repeated rows do not affect the result.
+  function checkoutSuffix(id, ids) {
+    if (!id) return '';
+    const others = [...new Set(ids)].filter(other => other && other !== id);
+    let length = Math.min(4, id.length);
+    const max = Math.max(id.length, ...others.map(other => other.length));
+    while (length < max && others.some(other => other.slice(-length) === id.slice(-length))) length++;
+    return id.slice(-length);
+  }
+  const sectionLabel = row => (row.repo || row.project || 'Unassigned') + ' · ' + checkoutLabel(row) + (folderOf(row) ? ' / ' + folderOf(row) : '');
+  const sectionData = row => ({ checkoutId: checkoutIdOf(row), checkoutKind: row.checkoutKind || null, worktree: row.worktree || null,
+    repoLabel: row.repo || row.project || 'Unassigned', checkoutLabel: checkoutLabel(row), folder: folderOf(row), label: sectionLabel(row) });
   // Gaps between reserved root desks; a section shares eight safe stations.
   const helperStations = [6, 9].flatMap(y => [4.25, 8.25, 14.25, 18].map(x => ({ x, y, w: 1, h: 0.72 })));
   const isHelper = row => row.source === 'helper' || Object.hasOwn(row, 'parentId');
@@ -43,6 +58,25 @@ const ObserverModel = (() => {
     const seconds = Math.max(0, Math.floor((now - milliseconds) / 1000));
     return seconds < 60 ? seconds + 's ago' : seconds < 3600 ? Math.floor(seconds / 60) + 'm ago' : Math.floor(seconds / 3600) + 'h ago';
   }
+  /* Idle age: how long since the sidecar last saw this agent do anything (transcript write or tool event; a working
+     pane is active now). Under ten minutes it is fresh; from there the level eases in on a log scale and reaches full at
+     eight hours. Levels are quantised to IDLE_STEPS so a slowly ageing body changes look a handful of times, not every
+     frame. Rows without a timestamp (helpers, desktop, presentation without evidence) never age. */
+  const IDLE_FRESH = 10 * 60000, IDLE_FULL = 8 * 3600000, IDLE_STEPS = 6;
+  /* Sparkle runs on a longer clock than the tint so days stay distinguishable: full vigour while fresh, fading on a square-root
+     curve to none at three days, in eighths. "Lots of sparks today, fewer the older it is." */
+  const SPARK_GONE = 72 * 3600000, SPARK_STEPS = 8;
+  function idleAge(row, now = Date.now()) {
+    const at = row && row.status !== 'working' ? row.lastActivityAt : null;
+    if (typeof at !== 'number' || !Number.isFinite(at)) return { ms: null, level: 0, vigour: 1, label: '' };
+    const ms = Math.max(0, now - at);
+    const t = ms <= IDLE_FRESH ? 0 : Math.min(1, Math.log(ms / IDLE_FRESH) / Math.log(IDLE_FULL / IDLE_FRESH));
+    const minutes = Math.floor(ms / 60000), hours = Math.floor(minutes / 60), days = Math.floor(hours / 24);
+    const label = ms < IDLE_FRESH ? '' : days >= 1 ? 'idle ' + days + 'd ' + (hours % 24) + 'h'
+      : hours >= 1 ? 'idle ' + hours + 'h ' + (minutes % 60) + 'm' : 'idle ' + minutes + 'm';
+    const fade = ms <= IDLE_FRESH ? 0 : Math.min(1, Math.sqrt((ms - IDLE_FRESH) / (SPARK_GONE - IDLE_FRESH)));
+    return { ms, level: Math.ceil(t * IDLE_STEPS) / IDLE_STEPS, vigour: 1 - Math.ceil(fade * SPARK_STEPS) / SPARK_STEPS, label };
+  }
   /* Canvas hover plate: provider plus Herdr's generated tab title. Herdr publishes the title after the conversation
      starts and the sidecar falls back to the bare agent name until then, so a provider-only title is unpublished. */
   function taskTitle(row) {
@@ -53,7 +87,8 @@ const ObserverModel = (() => {
     const provider = { codex: 'Codex', claude: 'Claude', chatgpt: 'ChatGPT' }[row.provider] || row.provider || 'Agent';
     const unavailable = stale || row.inventoryHealth === 'unavailable';
     if ((!row.source || row.source === 'herdr') && !isHelper(row)) {
-      return provider + ' — ' + (taskTitle(row) || 'title not yet published by Herdr') + (unavailable ? ' · stale' : '');
+      const idle = idleAge(row, now).label;
+      return provider + ' — ' + (taskTitle(row) || 'title not yet published by Herdr') + (idle ? ' · ' + idle : '') + (unavailable ? ' · stale' : '');
     }
     const assignment = row.taskEvidence?.state !== 'unavailable' && row.taskEvidence?.summary;
     const task = isHelper(row) ? (taskTitle(row) || 'Helper') + ' · ' + (assignment || 'task unavailable')
@@ -120,9 +155,15 @@ const ObserverModel = (() => {
       for (const row of roots) {
         const project = projectKey(row), repo = repoKey(row), section = sectionKey(row), previous = panes.get(row.id);
         names.set(project, row.project || 'Unassigned');
-        if (previous && previous.project === project && previous.repo === repo && (previous.section || previous.repo) === section) continue;
+        if (previous && previous.project === project && previous.repo === repo && previous.section === section) {
+          const block = wings.get(project)[previous.block], data = sectionData(row);
+          if (JSON.stringify(block) !== JSON.stringify({ ...block, ...data })) { Object.assign(block, data); changed = true; }
+          continue;
+        }
         if (previous) { panes.delete(row.id); moved.push(row.id); }
-        panes.set(row.id, { project, repo, section, ...allocate(project, repo, sectionLabel(row), section) }); changed = true;
+        const allocation = allocate(project, repo, sectionLabel(row), section);
+        Object.assign(wings.get(project)[allocation.block], sectionData(row));
+        panes.set(row.id, { project, repo, section, ...allocation }); changed = true;
       }
       for (const [project, blocks] of wings) {
         const used = new Set(Array.from(panes.values()).filter(pane => pane.project === project).map(pane => pane.block));
@@ -194,6 +235,6 @@ const ObserverModel = (() => {
     if (!value || typeof value.roomId !== 'string' || typeof value.sectionId !== 'string') return row;
     return { ...row, projectId: value.roomId, project: value.room, projectKind: 'group', repoId: value.sectionId, repo: value.section || value.room, folder: '' };
   }
-  return { projectKey, repoKey, arranged, helperStations, hash, palette, activity, age, taskTitle, hoverLabel, createLayout };
+  return { projectKey, repoKey, arranged, checkoutKey, checkoutLabel, checkoutSuffix, sectionKey, helperStations, hash, palette, activity, age, idleAge, taskTitle, hoverLabel, createLayout };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverModel;

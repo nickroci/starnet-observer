@@ -1,7 +1,12 @@
 ---
-gsd_state_version: '1.0'
+gsd_state_version: "1.0"
+current_phase_name: 0 planned
 status: planning
-last_updated: '2026-10-15'
+stopped_at: "PR #12 conflict repair complete; publication verification"
+last_updated: "2026-10-15T17:28:32.617Z"
+last_activity: 2026-10-15
+last_activity_desc: "PR #12 main integration 60eed0b; all 27 test files passed on Bun 1.3.13; independent integration review approved."
+state_head: 60eed0b48605bfcd6ce42a86b5a56df2159b3a8a
 progress:
   total_phases: 0
   completed_phases: 0
@@ -17,15 +22,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-14)
 
 **Core value:** Show local agent activity truthfully without changing observed sessions or exposing private content beyond the local observation boundary.
-**Current focus:** Pixel interface variant implementation and reviews complete; PR #14 is ready for merge. No active milestone or phase.
+**Current focus:** PR #8 merged; PR #12 delivery verified and authorized for merge. No active milestone or phase.
 
 ## Current Position
 
 Phase: None (0 planned)
 Plan: None
-Status: Pixel interface variant verified and reviewed; PR #14 ready for merge
-Last activity: 2026-10-15 — Pixel interface passed all task, content, aggregate and PR reviews without findings. Installed/default-only tests and browser compatibility/failure checks passed; private content remains frozen and untracked.
-
+Status: PR #12 complete and verified; final user-authorized merge pending
+Last activity: 2026-10-15 — PR #8 merged; PR #12 integrated main through PR #14 and PR #8, all 27 Bun test files passed, fresh independent integration review approved.
 
 ## Quick Tasks Completed
 
@@ -37,6 +41,9 @@ Last activity: 2026-10-15 — Pixel interface passed all task, content, aggregat
 | 261015-03h | Remove avoidable stale flicker from slow refreshes | 2026-10-15 | [PR #5](https://github.com/wnz99/starnet-observer/pull/5) | Complete | [261015-03h](./quick/261015-03h-remove-avoidable-stale-flicker-from-slow/) |
 | 261015-flf | Migrate Local Observer runtime and SQLite to Bun | 2026-10-15 | [PR #6](https://github.com/wnz99/starnet-observer/pull/6) | Complete | [261015-flf](./quick/261015-flf-migrate-local-observer-runtime-and-sqlit/) |
 | 261015-hqt | Earlier rooms and bounded background detail loading | 2026-10-15 | [PR #7](https://github.com/wnz99/starnet-observer/pull/7) | Complete | [261015-hqt](./quick/261015-hqt-earlier-rooms-and-bounded-background-det/) |
+| 261015-sar | Resolve PR 12 conflicts with main | 2026-10-15 | 60eed0b | Verified; independent review approved | [261015-sar-resolve-pr-12-conflicts-with-main-preser](./quick/261015-sar-resolve-pr-12-conflicts-with-main-preser/) |
+| 261015-mjy | Overseer providers and checkout sections | 2026-10-15 | [PR #12](https://github.com/wnz99/starnet-observer/pull/12) | Complete; merge authorized | [261015-mjy](./quick/261015-mjy-overseer-providers-and-checkout-sections/) |
+| 261015-sb0 | Resolve PR 8 conflicts with main | 2026-10-15 | 27353b2 | Verified; independent review approved | [261015-sb0-resolve-pr-8-conflicts-with-main-preserv](./quick/261015-sb0-resolve-pr-8-conflicts-with-main-preserv/) |
 
 ## Accumulated Context
 
@@ -58,12 +65,10 @@ No blocking theme issue remains. Synthetic-source browser verification passed; n
 ## Session Continuity
 
 Last session: 2026-10-15
-Stopped at: PR #14 implementation and review complete; completion record prepared before merge
+Stopped at: PR #12 final delivery records before authorized merge
 Resume file: None
-Next action: Merge reviewed PR #14, then select the next work item.
+Next action: Push final PR #12 records and merge with a merge commit; verify GitHub merge proof.
 
 ### Registered Work
 
-| Work | Status | Directory |
-| --- | --- | --- |
-| None | No registered work | — |
+None.

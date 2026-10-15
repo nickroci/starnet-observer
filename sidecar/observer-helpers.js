@@ -8,7 +8,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const MAX_HELPERS = 64, MAX_DEPTH = 3, NEARBY = 8, MAX_EDGES = 4096;
 const identity = row => row.provider + ':' + row.sessionId;
 const grouping = row => ({ projectId: row.projectId, project: row.project, projectKind: row.projectKind,
-  repoId: row.repoId, repo: row.repo, worktreeId: row.worktreeId, worktree: row.worktree, ...(row.arrangement ? { arrangement: row.arrangement } : {}) });
+  repoId: row.repoId, repo: row.repo, worktreeId: row.worktreeId, checkoutId: row.checkoutId, checkoutKind: row.checkoutKind, folder: row.folder, worktree: row.worktree, ...(row.arrangement ? { arrangement: row.arrangement } : {}) });
 const helperId = binding => 'obs_' + crypto.createHash('sha256')
   .update(JSON.stringify([binding.provider, binding.parentSessionId, binding.sessionId])).digest('hex').slice(0, 24);
 

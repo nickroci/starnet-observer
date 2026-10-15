@@ -9,18 +9,23 @@ const { createServer } = require('../server.js');
   const secret = 'PRIVATE-COMPANY-CANARY';
   const parent = { id: 'obs_' + 'a'.repeat(24), provider: 'codex', source: 'herdr', status: 'working', projectId: 'prj_1', project: secret,
     repoId: 'repo_1', repo: secret, worktree: secret, paneId: 'w1:p2', role: 'overseer', title: secret, sessionId: secret, inspectionIdentity: secret,
-    inventoryHealth: 'available', observedAt: 1000, arrangement: { roomId: 'room_1', room: secret, sectionId: 'sec_1', section: secret }, presence: 'pane', tool: { available: true, observedAt: 1000, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: 1000, text: secret }, raw: secret }, unexpected: secret };
-  const helper = { ...parent, id: 'obs_' + 'b'.repeat(24), source: 'helper', parentId: parent.id, status: 'idle', lineageState: 'open',
+    inventoryHealth: 'available', observedAt: 1000, lastActivityAt: 900, arrangement: { roomId: 'room_1', room: secret, sectionId: 'sec_1', section: secret }, presence: 'pane', tool: { available: true, observedAt: 1000, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: 1000, text: secret }, raw: secret }, unexpected: secret };
+  const helper = { ...parent, id: 'obs_' + 'b'.repeat(24), source: 'helper', parentId: parent.id, status: 'idle', lineageState: 'open', lastActivityAt: secret,
     taskEvidence: { state: 'available', summary: secret, source: secret }, taskStatusEvidence: { status: 'completed', source: secret },
     lifecycleEvidence: { state: 'closed', reason: 'killed' }, tool: { available: true, last: { name: secret, phase: 'started', outcome: 'unknown', at: 1000 } } };
   let inventory = { sessions: [helper, parent], aggregate: { agents: { observed: 2 }, usage: { inputTokens: { value: 12, state: 'available' } } },
     health: 'available', observedAt: 1000, error: null, sources: { herdr: { health: 'available', observedAt: 1000, reason: secret }, desktop: { health: 'unavailable', observedAt: null, reason: secret } },
     bus: { health: 'available', reason: null, observedAt: 1000, window: 100, messages: [{ id: 1, identity: secret, from: parent.id, to: helper.id, sentAt: '2026-01-01T00:00:00.000Z', acknowledgedAt: null, wake: 'requested', body: secret }] } };
+  parent.checkoutId = 'checkout_a'; parent.checkoutKind = 'worktree'; parent.folder = secret;
+  helper.checkoutId = 'checkout_b'; helper.checkoutKind = 'worktree'; helper.folder = secret;
   const original = structuredClone(inventory);
   const presentation = makePresentationObserver({ close: async () => { closes++; await closeGate; }, get: async () => inventory, inspect: () => { inspected++; }, inspectMessage: () => { inspected++; } }, () => 1000);
   const first = await presentation.get();
   assert.equal(JSON.stringify(first).includes(secret), false, 'mask names, task text, nicknames, identities, diagnostics, bodies, and unknown fields');
   assert.deepEqual(inventory, original, 'masking never mutates live identities or source snapshots');
+  assert.notEqual(first.sessions[0].worktree, first.sessions[1].worktree, 'equal real names alias by checkout identity');
+  assert.notEqual(first.sessions[0].folder, first.sessions[1].folder, 'equal folder names alias by checkout+folder');
+  assert.equal(first.sessions[1].checkoutId, parent.checkoutId); assert.equal(first.sessions[1].checkoutKind, 'worktree');
   assert.equal(first.sessions[1].paneId, 'w1:p2'); assert.equal(first.sessions[1].role, 'overseer');
   assert.deepEqual(first.aggregate, inventory.aggregate);
   assert.deepEqual(first.sessions.map(row => [row.id, row.parentId, row.status, row.observedAt]), inventory.sessions.map(row => [row.id, row.parentId, row.status, row.observedAt]));
@@ -40,6 +45,7 @@ const { createServer } = require('../server.js');
   assert.equal(first.sessions[1].inspectionIdentity, null);
   assert.deepEqual(first.sessions.map(row => row.arrangement), [{ roomId: 'room_1', room: 'Bay 1', sectionId: 'sec_1', section: 'Section 1' }, { roomId: 'room_1', room: 'Bay 1', sectionId: 'sec_1', section: 'Section 1' }],
     'dynamic arrangement keeps opaque ids and gets fictional bay/section labels');
+  assert.deepEqual(first.sessions.map(row => row.lastActivityAt), [null, 900], 'idle age keeps a numeric last-activity time and drops anything else');
   assert.deepEqual(first.bus.messages[0], { id: 1, from: parent.id, to: helper.id, sentAt: '2026-01-01T00:00:00.000Z', acknowledgedAt: null, wake: 'requested' });
   const byId = new Map(first.sessions.map(row => [row.id, row]));
   inventory = { ...inventory, sessions: [parent, helper] };

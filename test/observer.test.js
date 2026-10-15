@@ -29,11 +29,19 @@ function makeObserver(options) {
   return { ...observer, get, inspect: async (...args) => { await get(); return observer.inspect(...args); } };
 }
 const { makeHelperObserver } = require('../sidecar/observer-helpers.js');
+const { lastActivity } = require('../sidecar/observer.js');
 const { makeDesktopObserver } = require('../sidecar/observer-desktop.js');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 assert.throws(() => makeObserver(), /requires an injected now clock/);
+// Last activity for idle age: working is now; otherwise the newer of last conversation entry and last tool event, never in the future.
+assert.equal(lastActivity('working', { lastEntryAt: 5 }, 1000), 1000);
+assert.equal(lastActivity('idle', { lastEntryAt: 700, last: { at: new Date(600).toISOString() } }, 1000), 700);
+assert.equal(lastActivity('idle', { lastEntryAt: null, last: { at: new Date(600).toISOString() } }, 1000), 600);
+assert.equal(lastActivity('idle', { modifiedAt: 900 }, 1000), null, 'file mtime is not activity');
+assert.equal(lastActivity('done', { lastEntryAt: 5000 }, 1000), 1000, 'clock skew is clamped');
+assert.equal(lastActivity('idle', { available: false }, 1000), null);
 const ID = '00000000-0000-0000-0000-000000000001';
 const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status: 'working',
   terminal_title_stripped: 'Title', cwd: '/private/project', agent_session: { agent: 'codex', kind: 'id', value: session } });
@@ -342,7 +350,7 @@ async function nestedHelperGrouping() {
       helpers: makeHelperObserver({ now: () => 1000, transcripts, readEdges: () => ({ rows: edges }) }),
       execute: async () => ({ stdout: JSON.stringify({ result: { agents: inventory } }) }),
       projects: { resolve: async cwd => ({ projectId: cwd, project: cwd, projectKind: 'repository-parent',
-        repoId: cwd + '-repo', repo: cwd + ' repo', worktreeId: cwd + '-worktree', worktree: cwd + ' worktree' }) },
+        repoId: cwd + '-repo', repo: cwd + ' repo', checkoutId: cwd + '-checkout', checkoutKind: 'worktree', folder: 'src', worktreeId: cwd + '-worktree', worktree: cwd + ' worktree' }) },
       desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) },
       bus: { read: () => ({ rows: [], health: 'available' }) } });
     const { sessions } = await observer.get();
@@ -354,7 +362,7 @@ async function nestedHelperGrouping() {
     assert.equal(descendants.length, 9); assert.equal(descendants.filter(row => row.helperSlot !== null).length, 8);
     assert.equal(descendants.filter(row => row.helperSlot === null).length, 1);
     for (const row of [child, ...descendants]) {
-      for (const field of ['projectId', 'project', 'projectKind', 'repoId', 'repo', 'worktreeId', 'worktree'])
+      for (const field of ['projectId', 'project', 'projectKind', 'repoId', 'repo', 'worktreeId', 'worktree', 'checkoutId', 'checkoutKind', 'folder'])
         assert.equal(row[field], parent[field], field + ' inherits root grouping');
     }
   }
