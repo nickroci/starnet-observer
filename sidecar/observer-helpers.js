@@ -37,7 +37,7 @@ function makeHelperObserver(options = {}) {
     file: options.file || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'state_5.sqlite'),
     loadSqlite: options.loadSqlite, tempRoot: options.tempRoot, copyFile: options.copyFile
   });
-  const readEdges = options.readEdges || (() => query(database => ({ rows: database.prepare(
+  const readEdges = options.readEdges || (() => query(database => ({ rows: database.query(
     'SELECT parent_thread_id, child_thread_id, status FROM thread_spawn_edges LIMIT ' + (MAX_EDGES + 1)).all() })));
   let bindings = new Map();
 

@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { Database } = require('bun:sqlite');
 const os = require('node:os');
 const { makeHelperObserver } = require('../sidecar/observer-helpers.js');
 const { makeTranscriptObserver } = require('../sidecar/observer-transcripts.js');
@@ -362,27 +363,22 @@ const message = text => ({ type: 'response_item', payload: { type: 'message', ro
     // Real WAL database: only the private copy is opened; metadata-only SQL cannot expose private columns.
     const dbFile = path.join(root, 'state.sqlite');
     await fs.writeFile(dbFile, '');
-    let sqlite = null;
-    try { sqlite = require('node:sqlite'); } catch (_) { console.log('observer helpers: node:sqlite unavailable; fixture database checks skipped'); }
-    if (sqlite) {
-      const { DatabaseSync } = sqlite;
-      const writer = new DatabaseSync(dbFile);
-      writer.exec('PRAGMA journal_mode=WAL; CREATE TABLE thread_spawn_edges(parent_thread_id TEXT, child_thread_id TEXT, status TEXT); CREATE TABLE threads(id TEXT, prompt TEXT)');
-      writer.prepare('INSERT INTO thread_spawn_edges VALUES (?, ?, ?)').run(ID, CHILD, 'open');
-      writer.prepare('INSERT INTO threads VALUES (?, ?)').run(CHILD, 'PRIVATE DATABASE CANARY');
-      let opened = 0;
-      const fromDb = makeHelperObserver({ now, transcripts, file: dbFile, tempRoot: root, loadSqlite: () => ({
-        DatabaseSync: class extends DatabaseSync {
-          constructor(file) { assert.notEqual(file, dbFile); super(file); opened++; }
-        }
-      }) });
-      const listing = (await fs.readdir(root)).sort();
-      result = await fromDb.children([parent]);
-      assert.equal(result.rows.length, 1); assert.equal(opened, 1);
-      assert(!JSON.stringify(result.rows).includes('PRIVATE DATABASE CANARY'));
-      assert.deepEqual((await fs.readdir(root)).sort(), listing);
-      writer.close();
-    }
+    const writer = new Database(dbFile);
+    writer.exec('PRAGMA journal_mode=WAL; CREATE TABLE thread_spawn_edges(parent_thread_id TEXT, child_thread_id TEXT, status TEXT); CREATE TABLE threads(id TEXT, prompt TEXT)');
+    writer.query('INSERT INTO thread_spawn_edges VALUES (?, ?, ?)').run(ID, CHILD, 'open');
+    writer.query('INSERT INTO threads VALUES (?, ?)').run(CHILD, 'PRIVATE DATABASE CANARY');
+    let opened = 0;
+    const fromDb = makeHelperObserver({ now, transcripts, file: dbFile, tempRoot: root, loadSqlite: () => ({
+      Database: class extends Database {
+        constructor(file) { assert.notEqual(file, dbFile); super(file); opened++; }
+      }
+    }) });
+    const listing = (await fs.readdir(root)).sort();
+    result = await fromDb.children([parent]);
+    assert.equal(result.rows.length, 1); assert.equal(opened, 1);
+    assert(!JSON.stringify(result.rows).includes('PRIVATE DATABASE CANARY'));
+    assert.deepEqual((await fs.readdir(root)).sort(), listing);
+    writer.close(true);
     const unsupported = makeHelperObserver({ now, transcripts, file: dbFile, loadSqlite: () => { throw new Error('unsupported'); } });
     result = await unsupported.children([parent]);
     assert.equal(result.health, 'unavailable'); assert.equal(result.reason, 'unsupported'); assert.equal(result.rows.length, 0);

@@ -21,8 +21,8 @@ function defaultBusPath(env = process.env, platform = process.platform, home = o
   if (platform === 'win32') return path.join(env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'llm-bus', 'bus.sqlite3');
   return path.join(home, '.local', 'share', 'llm-bus', 'bus.sqlite3');
 }
-// node:sqlite is loaded on first read, so a Node without it only loses this optional feature.
-const loadNodeSqlite = () => require('node:sqlite');
+// Load native SQLite on first read; loader failures leave this optional source unavailable.
+const loadBunSqlite = () => require('bun:sqlite');
 const instant = value => {
   const milliseconds = typeof value === 'string' ? Date.parse(value) : NaN;
   return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : null;
@@ -56,12 +56,13 @@ function stableCopy(file, copy, copyFile) {
   return fingerprint(file).join('|') === before.join('|') ? before : null;
 }
 
-function makePrivateSnapshotQuery({ file, loadSqlite = loadNodeSqlite, tempRoot = os.tmpdir(), copyFile = fs.copyFileSync }) {
+// Selectors use database.query() so Bun owns and finalizes their statements at close(true).
+function makePrivateSnapshotQuery({ file, loadSqlite = loadBunSqlite, tempRoot = os.tmpdir(), copyFile = fs.copyFileSync }) {
   return function query(select) {
     if (!fs.existsSync(file)) return { reason: 'missing' };
-    let DatabaseSync;
-    try { ({ DatabaseSync } = loadSqlite()); } catch (_) { return { reason: 'unsupported' }; }
-    if (typeof DatabaseSync !== 'function') return { reason: 'unsupported' };
+    let Database;
+    try { ({ Database } = loadSqlite()); } catch (_) { return { reason: 'unsupported' }; }
+    if (typeof Database !== 'function') return { reason: 'unsupported' };
     let folder = null, database = null;
     try {
       folder = fs.mkdtempSync(path.join(tempRoot, 'starnet-observer-bus-'));
@@ -70,9 +71,9 @@ function makePrivateSnapshotQuery({ file, loadSqlite = loadNodeSqlite, tempRoot 
       for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
         const copiedFingerprint = stableCopy(file, copy, copyFile);
         if (!copiedFingerprint) continue;
-        database = new DatabaseSync(copy);
+        database = new Database(copy);
         const result = select(database, copiedFingerprint);
-        database.close(); database = null;
+        database.close(true); database = null;
         // Bind the queried rows to the source that produced the copy, never a later fingerprint.
         if (fingerprint(file).join('|') === copiedFingerprint.join('|')) {
           return { ...result, fingerprint: copiedFingerprint };
@@ -82,7 +83,7 @@ function makePrivateSnapshotQuery({ file, loadSqlite = loadNodeSqlite, tempRoot 
     } catch (_) {
       return { reason: 'unreadable' };
     } finally {
-      if (database) try { database.close(); } catch (_) { failNote('observer.bus.close', new Error('Bus snapshot handle cleanup failed')); }
+      if (database) try { database.close(true); } catch (_) { failNote('observer.bus.close', new Error('Bus snapshot handle cleanup failed')); }
       // The private copy never outlives the read, including after a failed copy or open.
       if (folder) try { fs.rmSync(folder, { recursive: true, force: true }); } catch (_) { failNote('observer.bus.remove', new Error('Bus snapshot folder cleanup failed')); }
     }
@@ -100,13 +101,13 @@ function messageIdentity(sourceFingerprint, row) {
   ])).digest('hex');
 }
 
-function makeBusReader({ file = defaultBusPath(), loadSqlite = loadNodeSqlite, now, tempRoot = os.tmpdir(), copyFile = fs.copyFileSync } = {}) {
+function makeBusReader({ file = defaultBusPath(), loadSqlite = loadBunSqlite, now, tempRoot = os.tmpdir(), copyFile = fs.copyFileSync } = {}) {
   if (typeof now !== 'function') throw new TypeError('Bus reader requires an injected now clock');
   let rows = [], observedAt = null, health = 'unknown', reason = null, reusableFingerprint = null;
   const query = makePrivateSnapshotQuery({ file, loadSqlite, tempRoot, copyFile });
   const selectRows = (database, sourceFingerprint) => {
     const result = [];
-    for (const row of database.prepare(QUERY).all()) {
+    for (const row of database.query(QUERY).all()) {
       if (!Number.isSafeInteger(row.id) || row.id < 1 || typeof row.sender !== 'string' || typeof row.recipient !== 'string' || typeof row.sent_at !== 'string') continue;
       result.push({ id: row.id, identity: messageIdentity(sourceFingerprint, row), sender: row.sender, recipient: row.recipient, sentAt: instant(row.sent_at),
         acknowledgedAt: instant(row.acknowledged_at), wake: row.wake_status == null ? 'none' : WAKES.has(row.wake_status) ? row.wake_status : 'unknown' });
@@ -140,7 +141,7 @@ function makeBusReader({ file = defaultBusPath(), loadSqlite = loadNodeSqlite, n
     if (expectedIdentity !== undefined && (typeof expectedIdentity !== 'string' || !MESSAGE_IDENTITY.test(expectedIdentity))) return { ...base, reason: 'invalid-identity' };
     const result = query((database, sourceFingerprint) => {
       // Bound transfer into JavaScript; scrub before the smaller display cap. A cut quoted value stays redacted.
-      const row = database.prepare('SELECT id, sender, recipient, sent_at, substr(body, 1, ?) AS body FROM messages WHERE id = ?').get(MAX_RAW_CHARS + 1, id);
+      const row = database.query('SELECT id, sender, recipient, sent_at, substr(body, 1, ?) AS body FROM messages WHERE id = ?').get(MAX_RAW_CHARS + 1, id);
       if (!row) return { reason: 'missing-message' };
       if (typeof row.sender !== 'string' || typeof row.recipient !== 'string' || typeof row.sent_at !== 'string') return { reason: 'unreadable' };
       const identity = messageIdentity(sourceFingerprint, row);

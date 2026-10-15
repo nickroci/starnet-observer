@@ -135,7 +135,7 @@ async function processBirthBoundary() {
   const { spawn } = require('node:child_process');
   const { makeObserver } = require('../sidecar/observer.js');
   // Only this test owns the exited child; no Herdr pane or external process is read.
-  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  const child = spawn(process.execPath, ['--no-env-file', '-e', ''], { stdio: 'ignore' });
   await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', code => code === 0 ? resolve() : reject(Error('Owned child failed')));
