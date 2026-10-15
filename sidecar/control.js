@@ -8,8 +8,9 @@
    Every target is validated against the same pane-id shape the reader accepts, and attach/close additionally
    require Herdr to report an agent in that pane, so an arbitrary pane id cannot be closed through here. */
 const path = require('node:path');
-const os = require('node:os');
 const fsp = require('node:fs/promises');
+const { stationChildEnv } = require('./child-env.js');
+const { makeOverseerState, defaultOverseerHome, resolveEndpoint } = require('./overseer-state.js');
 const childProcess = require('./child-env.js').guardChildProcess(require('node:child_process'));
 
 const PANE = /^[A-Za-z0-9:_-]{1,100}$/;
@@ -39,7 +40,7 @@ is to watch, summarise and coordinate the other Claude Code and Codex sessions r
 
 function makeControl(options = {}) {
   const execute = options.execute || ((command, args, settings = {}) => new Promise((resolve, reject) => {
-    childProcess.execFile(command, args, { timeout: settings.timeout || 20000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+    childProcess.execFile(command, args, { timeout: settings.timeout || 20000, maxBuffer: 2 * 1024 * 1024, env: settings.env }, (error, stdout, stderr) => {
       if (error) return reject(Object.assign(error, { stdout, stderr }));
       resolve({ stdout, stderr });
     });
@@ -49,13 +50,19 @@ function makeControl(options = {}) {
   const now = options.now || Date.now;
   const wait = options.sleep || sleep;
   const fs = options.fs || fsp;
-  const overseerHome = options.overseerHome || path.join(os.homedir(), '.local', 'share', 'starnet-observer', 'overseer');
+  const overseerHome = options.overseerHome || defaultOverseerHome();
+  const endpoint = resolveEndpoint(options);
+  const overseerState = options.overseerState || makeOverseerState({ file: path.join(overseerHome, 'identity.json'), endpoint });
+  if (overseerState.endpoint !== undefined && overseerState.endpoint !== endpoint) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+  const run = (command, args, settings = {}) => execute(command, args, { ...settings, env: stationChildEnv(process.env, { HERDR_SOCKET_PATH: endpoint }) });
 
   async function herdr(args, timeout) {
-    const { stdout } = await execute('herdr', args, { timeout });
+    let stdout;
+    try { ({ stdout } = await run('herdr', args, { timeout })); }
+    catch (error) { if (typeof error.stdout !== 'string' || !error.stdout) throw error; stdout = error.stdout; }
     let parsed;
     try { parsed = JSON.parse(stdout); } catch (_) { throw new Error('herdr ' + args.slice(0, 2).join(' ') + ' returned no JSON'); }
-    if (parsed.error) throw new Error(parsed.error.message || ('herdr ' + args.slice(0, 2).join(' ') + ' failed'));
+    if (parsed.error) throw Object.assign(new Error(parsed.error.message || ('herdr ' + args.slice(0, 2).join(' ') + ' failed')), { code: parsed.error.code });
     return parsed.result;
   }
   const validPane = id => typeof id === 'string' && PANE.test(id);
@@ -63,6 +70,8 @@ function makeControl(options = {}) {
     if (!validPane(paneId)) throw badRequest('invalid-pane');
     const result = await herdr(['agent', 'get', paneId], 5000);
     if (!result || !result.agent) throw badRequest('no-agent-in-pane');
+    const loaded = await overseerState.read();
+    if (loaded.record?.paneId === paneId && !await overseerState.match(result.agent, loaded)) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
     return result.agent;
   }
   async function openTerminal(paneId) {
@@ -71,8 +80,10 @@ function makeControl(options = {}) {
     // `launch` starts Terminal without its default window if it was not running; `do script` then makes exactly one
     // window. `--takeover` replaces whatever client currently owns input (for example the wrapper's VS Code attach),
     // because the point of the button is to put this agent in front of the user now.
-    const script = 'tell application "Terminal"\nlaunch\ndo script "herdr agent attach ' + paneId + ' --takeover"\nactivate\nend tell';
-    await execute('osascript', ['-e', script], { timeout: 10000 });
+    const shellQuote = value => "'" + value.replace(/'/g, "'\\''") + "'";
+    const attachCommand = 'env HERDR_SOCKET_PATH=' + shellQuote(endpoint) + ' herdr agent attach ' + paneId + ' --takeover';
+    const script = 'tell application \"Terminal\"\nlaunch\ndo script ' + JSON.stringify(attachCommand) + '\nactivate\nend tell';
+    await run('osascript', ['-e', script], { timeout: 10000 });
   }
 
   async function attach(paneId) {
@@ -89,49 +100,61 @@ function makeControl(options = {}) {
     const created = await herdr(['tab', 'create', '--workspace', pane.workspace_id, '--cwd', pane.cwd, '--label', name, '--no-focus'], 10000);
     const target = created && created.root_pane && created.root_pane.pane_id;
     if (!validPane(target)) throw new Error('tab create returned no pane');
-    // The new tab's shell may still be loading its rc files; wait for a prompt (best effort), then start with retries.
-    try { await execute('herdr', ['pane', 'wait-output', '--regex', PROMPT, target, '--timeout', '15000'], { timeout: 20000 }); } catch (_) { /* start anyway */ }
-    const startArgs = ['agent', 'start', name, '--kind', 'claude', '--pane', target, '--timeout', '60000'];
-    if (claudeArgs.length) startArgs.push('--', ...claudeArgs);
-    let started = false, lastError = null;
-    for (let attempt = 0; attempt < 3 && !started; attempt++) {
-      try { await herdr(startArgs, 70000); started = true; }
-      catch (error) {
-        lastError = error;
-        // A startup dialog (trust folder, resume picker) makes start report an error while the agent exists.
-        try { await herdr(['agent', 'get', target], 5000); started = true; } catch (_) { await wait(1000); }
-      }
-    }
-    if (!started) throw new Error('Claude did not start in ' + target + (lastError ? ': ' + lastError.message : ''));
+    await startIn(target, name);
     await openTerminal(target);
     return { ok: true, action: 'spawn', paneId: target, name, project: path.basename(pane.cwd) };
   }
-  // Start Claude in that pane and open a terminal on it, tolerating a startup dialog the same way spawn does.
+  // Start Claude in that pane, tolerating a startup dialog the same way spawn does.
   async function startIn(target, name) {
-    try { await execute('herdr', ['pane', 'wait-output', '--regex', PROMPT, target, '--timeout', '15000'], { timeout: 20000 }); } catch (_) { /* start anyway */ }
+    try { await run('herdr', ['pane', 'wait-output', '--regex', PROMPT, target, '--timeout', '15000'], { timeout: 20000 }); } catch (_) { /* start anyway */ }
     const startArgs = ['agent', 'start', name, '--kind', 'claude', '--pane', target, '--timeout', '60000'];
     if (claudeArgs.length) startArgs.push('--', ...claudeArgs);
     let started = false, lastError = null;
     for (let attempt = 0; attempt < 3 && !started; attempt++) {
       try { await herdr(startArgs, 70000); started = true; }
-      catch (error) { lastError = error; try { await herdr(['agent', 'get', target], 5000); started = true; } catch (_) { await wait(1000); } }
+      catch (error) { lastError = error; try { const found = await herdr(['agent', 'get', target], 5000); if (!found?.agent) throw new Error('no-agent-in-pane'); started = true; } catch (_) { await wait(1000); } }
     }
     if (!started) throw new Error('Claude did not start in ' + target + (lastError ? ': ' + lastError.message : ''));
   }
-  // The overseer: one Herdr agent named "overseer", in its own folder with a brief, seated in the observatory.
+  // Only our persisted launch proof identifies the singleton; labels are display text.
   async function overseer() {
-    let existing = null;
-    try { existing = (await herdr(['agent', 'get', 'overseer'], 5000)).agent; } catch (_) { existing = null; }
-    if (existing) throw Object.assign(new Error('overseer-exists'), { status: 409, paneId: existing.pane_id });
-    await fs.mkdir(overseerHome, { recursive: true });
-    const brief = path.join(overseerHome, 'CLAUDE.md');
-    try { await fs.access(brief); } catch (_) { await fs.writeFile(brief, OVERSEER_BRIEF); }
-    const created = await herdr(['workspace', 'create', '--cwd', overseerHome, '--label', 'overseer', '--no-focus'], 10000);
-    const target = created && created.root_pane && created.root_pane.pane_id;
-    if (!validPane(target)) throw new Error('workspace create returned no pane');
-    await startIn(target, 'overseer');
-    await openTerminal(target);
-    return { ok: true, action: 'overseer', paneId: target, name: 'overseer', home: overseerHome };
+    const loaded = await overseerState.read();
+    if (['committed', 'reserved'].includes(loaded.state) && loaded.record.paneId) {
+      const inventory = await herdr(['agent', 'list'], 5000);
+      if (!Array.isArray(inventory?.agents)) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+      const live = inventory.agents.find(pane => pane.pane_id === loaded.record.paneId);
+      if (live && await overseerState.match(live, loaded)) throw Object.assign(new Error('overseer-exists'), { status: 409, paneId: live.pane_id });
+      if (live) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+      // Agent inventory alone cannot prove the pane is gone (startup dialogs may hide agents).
+      let missing = false;
+      try { await herdr(['pane', 'get', loaded.record.paneId], 5000); }
+      catch (error) { if (error.code === 'pane_not_found') missing = true; }
+      if (!missing || !await overseerState.releaseMissing([], loaded)) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+    }
+    const owner = await overseerState.reserve();
+    let committed = false;
+    try {
+      await fs.mkdir(overseerHome, { recursive: true, mode: 0o700 });
+      const brief = path.join(overseerHome, 'CLAUDE.md');
+      try { await fs.access(brief); } catch (_) { await fs.writeFile(brief, OVERSEER_BRIEF); }
+      const created = await herdr(['workspace', 'create', '--cwd', overseerHome, '--label', 'overseer', '--no-focus'], 10000);
+      const target = created && created.root_pane && created.root_pane.pane_id;
+      if (!validPane(target)) throw new Error('workspace create returned no pane');
+      await overseerState.notePane(owner, target);
+      await startIn(target, 'overseer');
+      const result = await herdr(['agent', 'get', target], 5000);
+      const got = await herdr(['pane', 'get', target], 5000);
+      const agent = result?.agent, pane = got?.pane;
+      if (!agent || !pane || agent.pane_id !== target || pane.pane_id !== target || agent.agent !== 'claude' ||
+          agent.workspace_id !== pane.workspace_id || agent.terminal_id !== pane.terminal_id) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+      await overseerState.commit(owner, agent);
+      committed = true;
+      await openTerminal(target);
+      return { ok: true, action: 'overseer', paneId: target, name: 'overseer', home: overseerHome };
+    } catch (error) {
+      if (!committed) { try { await overseerState.abandon(owner); } catch (_) { /* uncertain ownership stays blocked */ } }
+      throw error;
+    }
   }
   async function close(paneId) {
     const agent = await agentIn(paneId);

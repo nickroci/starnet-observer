@@ -1,7 +1,5 @@
 'use strict';
 const crypto = require('node:crypto');
-const path = require('node:path');
-const os = require('node:os');
 const childProcess = require('./child-env.js').guardChildProcess(require('node:child_process'));
 const { makeDesktopObserver } = require('./observer-desktop.js');
 const { makeProjectResolver } = require('./observer-projects.js');
@@ -10,6 +8,8 @@ const { makeHelperObserver, grouping } = require('./observer-helpers.js');
 const { publicBus } = require('./observer-bus.js');
 const { makeSqliteClient } = require('./observer-sqlite-client.js');
 const { unavailable, redactText } = require('./observer-inspector.js');
+const { stationChildEnv } = require('./child-env.js');
+const { makeOverseerState, resolveEndpoint } = require('./overseer-state.js');
 const { makeIdentityResolver } = require('./observer-identity.js');
 
 const STATUSES = new Set(['working', 'blocked', 'idle', 'done', 'unknown']);
@@ -103,7 +103,9 @@ function makeObserver(options = {}) {
   const helpers = options.helpers || makeHelperObserver({ transcripts, now, readEdges: sqlite.readHelperEdges });
   const bus = options.bus || { read: sqlite.readBus, inspect: sqlite.inspectMessage };
   const desktop = options.desktop || makeDesktopObserver({ execute, now });
-  const endpoint = options.endpoint || process.env.HERDR_SOCKET_PATH || path.join(os.homedir(), '.config/herdr/herdr.sock');
+  const endpoint = resolveEndpoint(options);
+  const overseerState = options.overseerState || makeOverseerState({ endpoint });
+  if (overseerState.endpoint !== undefined && overseerState.endpoint !== endpoint) throw new Error('overseer-unavailable');
   const identities = options.identities || makeIdentityResolver({ execute, now, endpoint, readConfiguration: options.readIdentityConfiguration, readProcessBirth: options.readProcessBirth });
   let identityProofs = new Map();
   let lastGood = [], coreRows = [], refreshStartedAt = null, pending = null, mail = null;
@@ -120,10 +122,11 @@ function makeObserver(options = {}) {
 
   async function refreshHerdr() {
     try {
-      const result = await execute('herdr', ['agent', 'list'], { timeout: 3000, maxBuffer: 2 * 1024 * 1024 });
+      const result = await execute('herdr', ['agent', 'list'], { timeout: 3000, maxBuffer: 2 * 1024 * 1024, env: stationChildEnv(process.env, { HERDR_SOCKET_PATH: endpoint }) });
       const inventory = JSON.parse(result.stdout);
       if (!inventory || !inventory.result || !Array.isArray(inventory.result.agents)) throw new Error('Invalid inventory');
       const inventoryAt = now();
+      const overseerProof = await overseerState.read();
       const rows = [], seen = new Set(), proofs = new Map();
       const identityRefresh = { endpointTimedOut: false };
       const panes = [];
@@ -145,7 +148,7 @@ function makeObserver(options = {}) {
         const id = 'obs_' + crypto.createHash('sha256').update(endpoint + '\0' + pane.pane_id).digest('hex').slice(0, 24);
         const identity = resolved[index], sessionId = identity.sessionId;
         if (identity.proof) proofs.set(id, identity.proof);
-        rows.push({ id, paneId: pane.pane_id, provider: pane.agent, role: /^overseer(?:$|[-_:])/i.test(String(pane.name || '')) ? 'overseer' : null,
+        rows.push({ id, paneId: pane.pane_id, provider: pane.agent, role: await overseerState.match(pane, overseerProof) ? 'overseer' : null,
           title: text(redactText(String(pane.terminal_title_stripped || pane.agent)), 160),
           ...(projects.resolveMany ? projectRows[index] : await projects.resolve(cwds[index])),
           status: STATUSES.has(pane.agent_status) ? pane.agent_status : 'unknown', sessionId,

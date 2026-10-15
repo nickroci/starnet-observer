@@ -1,5 +1,9 @@
 'use strict';
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { makeOverseerState } = require('../sidecar/overseer-state.js');
 const { makeControl } = require('../sidecar/control.js');
 const { createServer } = require('../server.js');
 (async () => {
@@ -9,7 +13,9 @@ const { createServer } = require('../server.js');
     'pane get w1:p2': { result: { pane: { cwd: '/Users/x/dev/proj', workspace_id: 'w1' } } },
     'tab create': { result: { root_pane: { pane_id: 'w1:p3' } } }, 'agent start': { error: { message: 'blocked during startup' } }, 'agent get w1:p3': { result: { agent: { name: 'proj-120000' } } },
     'pane close w1:p2': { result: { type: 'ok' } } };
-  const execute = async (command, args) => {
+  const execute = async (command, args, settings) => {
+    assert.equal(typeof settings.env.HERDR_SOCKET_PATH, 'string');
+    assert.equal(settings.env.STARNET_TEST_TOKEN, undefined);
     calls.push([command, ...args]);
     if (command === 'osascript') return { stdout: '' };
     if (args[0] === 'pane' && args[1] === 'wait-output') return { stdout: '{}' };
@@ -22,14 +28,14 @@ const { createServer } = require('../server.js');
   assert.equal(calls.length, 0, 'invalid pane ids never execute anything');
   assert.deepEqual(await control.attach('w1:p2'), { ok: true, action: 'attach', paneId: 'w1:p2', name: 'alpha' });
   assert.deepEqual(calls[0], ['herdr', 'agent', 'get', 'w1:p2']);
-  assert.equal(calls[1][0], 'osascript'); assert.match(calls[1][2], /^tell application "Terminal"\nlaunch\ndo script "herdr agent attach w1:p2 --takeover"\nactivate\nend tell$/);
+  assert.equal(calls[1][0], 'osascript'); assert.match(calls[1][2], /HERDR_SOCKET_PATH=.*herdr agent attach w1:p2 --takeover/);
   await assert.rejects(control.close('w1:p9'), /agent not found/);
   assert.ok(!calls.some(call => call[1] === 'pane' && call[2] === 'close'), 'a pane without an agent is never closed');
   calls.length = 0;
   const spawned = await control.spawn('w1:p2');
   assert.deepEqual(spawned, { ok: true, action: 'spawn', paneId: 'w1:p3', name: 'proj-120000', project: 'proj' });
   const order = calls.map(call => call.slice(0, 3).join(' '));
-  assert.deepEqual(order, ['herdr pane get', 'herdr tab create', 'herdr pane wait-output', 'herdr agent start', 'herdr agent get', 'osascript -e tell application "Terminal"\nlaunch\ndo script "herdr agent attach w1:p3 --takeover"\nactivate\nend tell']);
+  assert.deepEqual(order, ['herdr pane get', 'herdr tab create', 'herdr pane wait-output', 'herdr agent start', 'herdr agent get', 'osascript -e ' + calls.at(-1)[2]]);
   const start = calls.find(call => call[1] === 'agent' && call[2] === 'start');
   assert.deepEqual(start.slice(3), ['proj-120000', '--kind', 'claude', '--pane', 'w1:p3', '--timeout', '60000', '--', '--dangerously-skip-permissions']);
   assert.deepEqual(calls[1].slice(3), ['--workspace', 'w1', '--cwd', '/Users/x/dev/proj', '--label', 'proj-120000', '--no-focus']);
@@ -37,21 +43,47 @@ const { createServer } = require('../server.js');
   assert.deepEqual(await control.close('w1:p2'), { ok: true, action: 'close', paneId: 'w1:p2', name: 'alpha' });
   assert.deepEqual(calls.map(call => call.slice(1, 3).join(' ')), ['agent get', 'pane close']);
   await assert.rejects(makeControl({ execute, platform: 'linux' }).attach('w1:p2'), /only implemented on macOS/);
-  // Overseer: refuses a second one, writes the brief once, starts in its own workspace, attaches.
-  const files = new Map(), fsFake = { async mkdir(dir) { files.set(dir, 'dir'); }, async access(file) { if (!files.has(file)) throw new Error('ENOENT'); }, async writeFile(file, body) { files.set(file, body); } };
-  replies['agent get overseer'] = { error: { message: 'agent not found' } }; replies['workspace create'] = { result: { root_pane: { pane_id: 'w9:p1' } } }; replies['agent get w9:p1'] = { result: { agent: { name: 'overseer' } } };
-  const home = '/tmp/obs-test/overseer', boss = makeControl({ execute, platform: 'darwin', overseerHome: home, fs: fsFake, sleep: async () => {} });
-  calls.length = 0;
-  const seated = await boss.overseer();
-  assert.deepEqual(seated, { ok: true, action: 'overseer', paneId: 'w9:p1', name: 'overseer', home });
-  assert.match(files.get(home + '/CLAUDE.md'), /^# Overseer/); assert.match(files.get(home + '/CLAUDE.md'), /herdr --skill/);
-  assert.deepEqual(calls.map(call => call.slice(0, 3).join(' ')).slice(0, 5), ['herdr agent get', 'herdr workspace create', 'herdr pane wait-output', 'herdr agent start', 'herdr agent get']);
-  assert.deepEqual(calls[1].slice(3), ['--workspace'].slice(0, 0).concat(['--cwd', home, '--label', 'overseer', '--no-focus']));
-  assert.deepEqual(calls[3].slice(3, 5), ['overseer', '--kind']);
-  assert.match(calls.at(-1)[2], /herdr agent attach w9:p1 --takeover/);
-  files.set(home + '/CLAUDE.md', 'edited by user'); replies['agent get overseer'] = { result: { agent: { name: 'overseer', pane_id: 'w9:p1' } } };
-  await assert.rejects(boss.overseer(), error => error.status === 409 && error.paneId === 'w9:p1');
-  assert.equal(files.get(home + '/CLAUDE.md'), 'edited by user', 'an existing brief is never overwritten');
+  // Real private persistence, fake Herdr boundary: no desktop mutation runs.
+  const previousSecret = process.env.STARNET_TEST_TOKEN; process.env.STARNET_TEST_TOKEN = 'private-canary';
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'observer-control-'));
+  const endpoint = '/fixture/overseer.sock';
+  const identity = { pane_id: 'w9:p1', workspace_id: 'w9', terminal_id: 't9', agent: 'claude', name: 'renamed' };
+  replies['workspace create'] = { result: { root_pane: { pane_id: 'w9:p1' } } };
+  replies['agent get w9:p1'] = { result: { agent: identity } };
+  replies['pane get w9:p1'] = { result: { pane: identity } };
+  replies['agent list'] = { result: { agents: [identity] } };
+  const settings = { execute, platform: 'darwin', overseerHome: home, endpoint, sleep: async () => {} };
+  try {
+    assert.throws(() => makeControl({ ...settings, overseerState: makeOverseerState({ file: path.join(home, 'identity.json'), endpoint: '/foreign.sock' }) }), /overseer-unavailable/);
+    calls.length = 0;
+    let announceWorkspace, releaseWorkspace;
+    const workspaceStarted = new Promise(resolve => { announceWorkspace = resolve; });
+    const workspaceGate = new Promise(resolve => { releaseWorkspace = resolve; });
+    const boss = makeControl({ ...settings, execute: async (command, args, options) => {
+      if (args[0] === 'workspace' && args[1] === 'create') { announceWorkspace(); await workspaceGate; }
+      return execute(command, args, options);
+    } });
+    const concurrent = boss.overseer();
+    await workspaceStarted;
+    try { await assert.rejects(makeControl(settings).overseer(), /overseer-unavailable/); }
+    finally { releaseWorkspace(); }
+    assert.deepEqual(await concurrent, { ok: true, action: 'overseer', paneId: 'w9:p1', name: 'overseer', home });
+    assert.match(await fs.readFile(path.join(home, 'CLAUDE.md'), 'utf8'), /^# Overseer/);
+    assert.equal(calls.filter(call => call[1] === 'workspace' && call[2] === 'create').length, 1);
+    await fs.writeFile(path.join(home, 'CLAUDE.md'), 'edited by user');
+    await assert.rejects(makeControl(settings).overseer(), error => error.status === 409 && error.paneId === 'w9:p1');
+    assert.equal(await fs.readFile(path.join(home, 'CLAUDE.md'), 'utf8'), 'edited by user');
+    const before = calls.length;
+    replies['agent list'] = { result: { agents: [{ ...identity, terminal_id: 'reused' }] } };
+    await assert.rejects(makeControl(settings).overseer(), /overseer-unavailable/);
+    assert.equal(calls.slice(before).some(call => call[1] === 'workspace'), false);
+    replies['agent get w9:p1'] = { result: { agent: { ...identity, workspace_id: 'foreign' } } };
+    await assert.rejects(boss.attach('w9:p1'), /overseer-unavailable/);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+    if (previousSecret === undefined) delete process.env.STARNET_TEST_TOKEN; else process.env.STARNET_TEST_TOKEN = previousSecret;
+  }
+  await uncertainOverseer();
 
   // ---- server: control routes exist only with a control object, need the token, validate the body ----
   const observer = { async get() { return { health: 'available', sessions: [] }; }, async inspect() { return {}; }, inspectMessage() { return {}; } };
@@ -84,3 +116,37 @@ const { createServer } = require('../server.js');
   } finally { on.server.close(); on.server.closeAllConnections(); }
   console.log('control: overseer brief/409, pane validation, Herdr-gated close, spawn command order, terminal launch, opt-in routes, token/origin/body guards OK');
 })().catch(error => { console.error(error); process.exit(1); });
+
+async function uncertainOverseer() {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'observer-uncertain-'));
+  const endpoint = '/fixture/pinned.sock', calls = [];
+  let missing = false, valid = false;
+  const identity = { pane_id: 'target', workspace_id: 'work', terminal_id: 'term', agent: 'claude' };
+  const execute = async (command, args, settings) => {
+    calls.push([command, ...args]);
+    assert.equal(settings.env.HERDR_SOCKET_PATH, endpoint);
+    const key = args.slice(0, 2).join(' ');
+    const reply = result => ({ stdout: JSON.stringify({ result }) });
+    if (command === 'osascript') return { stdout: '' };
+    if (key === 'workspace create') return reply({ root_pane: { pane_id: 'target' } });
+    if (key === 'pane wait-output' || key === 'agent start') return reply({});
+    if (key === 'agent get') return reply({ agent: valid ? identity : { ...identity, terminal_id: null } });
+    if (key === 'pane get') {
+      if (missing) { missing = false; throw Object.assign(new Error('CLI exit 1'), { stdout: JSON.stringify({ error: { code: 'pane_not_found', message: 'pane target not found' } }) }); }
+      return reply({ pane: identity });
+    }
+    if (key === 'agent list') return reply({ agents: [] });
+    throw Error('unexpected call');
+  };
+  const options = { execute, endpoint, platform: 'darwin', overseerHome: home, sleep: async () => {} };
+  try {
+    await assert.rejects(makeControl(options).overseer(), /overseer-unavailable/);
+    assert.equal(calls.some(call => call[0] === 'osascript'), false, 'unverified launch is never attached');
+    const created = () => calls.filter(call => call[1] === 'workspace' && call[2] === 'create').length;
+    await assert.rejects(makeControl(options).overseer(), /overseer-unavailable/);
+    assert.equal(created(), 1, 'uncertain launch survives observer/control restart');
+    missing = true; valid = true;
+    await makeControl(options).overseer();
+    assert.equal(created(), 2, 'only confirmed missing pane permits replacement');
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
+}
