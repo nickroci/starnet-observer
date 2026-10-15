@@ -7,6 +7,11 @@ const inspector = require('./observer-inspector.js');
 const { note: failNote } = require('./failopen.js');
 
 const READ_BYTES = 256 * 1024;
+// Claude spawn index: the bounded tail window loses the Agent spawn records of long-running parents, so their
+// helpers vanish while still running. The index streams the whole parent transcript once, keeps only the records
+// consumeHelperMetadata reads (same rules, same bounded maps), then follows appends by offset.
+const SPAWN_INDEX_BYTES = 128 * 1024 * 1024, SPAWN_CHUNK = 1024 * 1024, SPAWN_ANCHOR = 4096;
+const SPAWN_MARKERS = ['"Agent"', '"Task"', 'async_launched', 'task-notification', 'task_status'];
 const cleanName = value => typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 120) : '';
 
 // Only tool identity/outcome and numeric usage cross this boundary. Conversation bodies stay on disk.
@@ -234,6 +239,87 @@ function makeTranscriptObserver(options = {}) {
     } catch (_) { return false; }
     finally { if (handle) await handle.close().catch(() => failNote('observer.transcripts.close', new Error('Transcript handle cleanup failed'))); }
   }
+  const spawnIndices = new Map();
+  const spawnIndexKey = (file, sessionId, binding) => JSON.stringify([file, sessionId, binding?.parentSessionId || null]);
+  async function scanSpawnIndex(state, file, sessionId, binding) {
+    let handle;
+    try {
+      const resource = await capturePath('claude', file, !!binding);
+      handle = await io.open(resource.full, require('node:fs').constants.O_RDONLY | require('node:fs').constants.O_NOFOLLOW);
+      const stat = await handle.stat();
+      await verifyPath(resource, stat);
+      if (stat.size > SPAWN_INDEX_BYTES) { state.projection = null; state.ready = true; return; }
+      const prefix = Buffer.alloc(Math.min(stat.size, SPAWN_ANCHOR));
+      await handle.read(prefix, 0, prefix.length, 0);
+      let anchorMatches = !!state.anchor;
+      if (state.anchor && state.offset >= state.anchor.length && stat.size >= state.offset) {
+        const previous = Buffer.alloc(state.anchor.length);
+        const read = await handle.read(previous, 0, previous.length, state.offset - previous.length);
+        anchorMatches = read.bytesRead === previous.length && previous.equals(state.anchor);
+      }
+      // Any rewrite, replacement, truncation or changed prefix restarts from the first byte.
+      if (!state.projection || state.device !== stat.dev || state.inode !== stat.ino || stat.size < state.offset ||
+        !state.prefix || !prefix.subarray(0, state.prefix.length).equals(state.prefix) || state.offset && !anchorMatches) {
+        Object.assign(state, { projection: inspector.createProjection(), offset: 0, carry: null, skipping: false, anchor: null });
+      }
+      let offset = state.offset, carry = state.carry, skipping = state.skipping;
+      const consumeLine = bytes => {
+        if (bytes.length > READ_BYTES || !SPAWN_MARKERS.some(marker => bytes.includes(marker))) return;
+        try { inspector.consumeHelperMetadata(state.projection, JSON.parse(bytes.toString('utf8')), 'claude', sessionId, binding); }
+        catch (_) { /* Invalid rows carry no spawn evidence. */ }
+      };
+      while (offset < stat.size) {
+        const chunk = Buffer.alloc(Math.min(SPAWN_CHUNK, stat.size - offset));
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset);
+        if (!bytesRead) break;
+        offset += bytesRead;
+        let data = chunk.subarray(0, bytesRead), start = 0, end;
+        if (carry) { data = Buffer.concat([carry, data]); carry = null; }
+        while ((end = data.indexOf(10, start)) !== -1) {
+          if (skipping) skipping = false; else consumeLine(data.subarray(start, end));
+          start = end + 1;
+        }
+        const rest = data.subarray(start);
+        // An oversized unfinished row is skipped through its newline, like the bounded readers.
+        if (rest.length > READ_BYTES) skipping = true; else if (rest.length && !skipping) carry = Buffer.from(rest);
+      }
+      await verifyPath(resource, await handle.stat());
+      const anchor = Buffer.alloc(Math.min(offset, SPAWN_ANCHOR));
+      await handle.read(anchor, 0, anchor.length, offset - anchor.length);
+      Object.assign(state, { offset, carry, skipping, anchor, prefix: Buffer.from(prefix), device: stat.dev, inode: stat.ino, ready: true });
+    } catch (_) {
+      Object.assign(state, { projection: null, offset: 0, carry: null, skipping: false, anchor: null, prefix: null, ready: true });
+    } finally { if (handle) await handle.close().catch(() => failNote('observer.transcripts.close', new Error('Transcript handle cleanup failed'))); }
+  }
+  // The first full scan runs off the discovery path, so helpers outside the tail appear on a later poll; once an
+  // index exists, following appends is bounded by what was appended and is awaited for a consistent view.
+  async function spawnIndex(file, sessionId, binding) {
+    const key = spawnIndexKey(file, sessionId, binding);
+    let state = spawnIndices.get(key);
+    if (!state) {
+      if (spawnIndices.size >= 64) spawnIndices.delete(spawnIndices.keys().next().value);
+      state = { projection: null, offset: 0, ready: false, promise: null };
+      spawnIndices.set(key, state);
+    }
+    state.usedAt = now();
+    const wasReady = state.ready;
+    if (!state.promise) state.promise = scanSpawnIndex(state, file, sessionId, binding).finally(() => { state.promise = null; });
+    if (wasReady) await state.promise;
+    return state.ready ? state.projection : null;
+  }
+  // Tail projection and index agree or the claim is ambiguous (null), exactly like a repeated spawn in one file.
+  function mergedSpawn(projection, index, child) {
+    const hasTail = !!projection?.helperSpawns.has(child), hasIndex = !!index?.helperSpawns.has(child);
+    if (!hasTail && !hasIndex) return undefined;
+    const tail = hasTail ? projection.helperSpawns.get(child) : undefined, indexed = hasIndex ? index.helperSpawns.get(child) : undefined;
+    if (tail === null || indexed === null || tail && indexed && tail.toolUseId !== indexed.toolUseId) return null;
+    return tail || indexed;
+  }
+  function mergedEvent(projection, index, child) {
+    const tail = projection?.helperEvents.get(child), indexed = index?.helperEvents.get(child);
+    if (!tail || !indexed) return tail || indexed;
+    return indexed.observedAt != null && (tail.observedAt == null || indexed.observedAt > tail.observedAt) ? indexed : tail;
+  }
   async function claudeCandidates(parentSessionId, parentBinding, parentId) {
     try {
       const canonical = parentBinding?.parentSessionId || parentSessionId;
@@ -241,19 +327,20 @@ function makeTranscriptObserver(options = {}) {
       if (!parentFile) return [];
       const projection = parentBinding?.projection || states.get(parentId)?.projection;
       if (!projection) return [];
+      const index = await spawnIndex(parentFile, parentSessionId, parentBinding);
       const directory = path.join(path.dirname(parentBinding ? path.dirname(path.dirname(parentFile)) : parentFile), canonical, 'subagents');
       await containedChild('claude', directory);
       const entries = await io.readdir(directory, { withFileTypes: true });
       if (entries.length > 256) return [];
       const result = [];
       for (const entry of entries.filter(entry => entry.isFile() && /^agent-[A-Za-z0-9_-]{1,100}\.jsonl$/.test(entry.name)).sort((a, b) => a.name.localeCompare(b.name))) {
-        const sessionId = entry.name.slice(6, -6), spawn = projection.helperSpawns.get(sessionId);
+        const sessionId = entry.name.slice(6, -6), spawn = mergedSpawn(projection, index, sessionId);
         if (!spawn) continue;
         const file = path.join(directory, entry.name);
         if (!await corroborateClaudeSpawn(file, spawn, parentBinding)) continue;
-        const event = projection.helperEvents.get(sessionId);
+        const event = mergedEvent(projection, index, sessionId);
         result.push({ sessionId, file, canonical, spawn: { ...spawn, parentId, parentBinding: parentBinding || null,
-          parentSessionId: parentSessionId }, event: event && (!event.toolUseId || event.toolUseId === spawn.toolUseId) ? event : null });
+          parentSessionId: parentSessionId, parentFile }, event: event && (!event.toolUseId || event.toolUseId === spawn.toolUseId) ? event : null });
       }
       return result;
     } catch (_) { return []; }
@@ -406,11 +493,12 @@ function makeTranscriptObserver(options = {}) {
       if (!spawn || spawn.parentBinding && !await verifySpawn(spawn.parentBinding, seen)) return false;
       const parent = await read(spawn.parentId, 'claude', spawn.parentSessionId, false, spawn.parentBinding);
       const projection = states.get(spawn.parentId)?.projection;
-      const proof = projection?.helperSpawns.get(current.sessionId);
+      const index = spawn.parentFile ? await spawnIndex(spawn.parentFile, spawn.parentSessionId, spawn.parentBinding || undefined) : null;
+      const proof = mergedSpawn(projection, index, current.sessionId);
       // The selected chain is already in seen before its ancestors are reread.
       // Even a null (ambiguous) claim contradicts another immediate parent.
       const conflictingParent = [...seen].some(child => child.parentSessionId === current.parentSessionId &&
-        child.spawn?.parentId !== spawn.parentId && projection?.helperSpawns.has(child.sessionId));
+        child.spawn?.parentId !== spawn.parentId && mergedSpawn(projection, index, child.sessionId) !== undefined);
       return parent.available && !conflictingParent && proof?.toolUseId === spawn.toolUseId &&
         await corroborateClaudeSpawn(current.file, spawn, spawn.parentBinding);
     }
@@ -420,8 +508,11 @@ function makeTranscriptObserver(options = {}) {
   }
   function retain(ids) {
     for (const selected of [states, detailStates]) for (const id of selected.keys()) if (!ids.has(id)) selected.delete(id);
+    for (const [key, state] of spawnIndices) if (!state.promise && now() - state.usedAt > 10 * 60000) spawnIndices.delete(key);
   }
+  // Test and shutdown hook: settles any spawn index scan still running in the background.
+  const spawnIndexIdle = () => Promise.all([...spawnIndices.values()].map(state => state.promise).filter(Boolean));
   return { beginDiscovery, helperMetadata: id => states.get(id)?.projection, read, inspect: (id, provider, sessionId) => read(id, provider, sessionId, true), retain,
-    bindChild, claudeCandidates, inspectChild };
+    bindChild, claudeCandidates, inspectChild, spawnIndexIdle };
 }
 module.exports = { makeTranscriptObserver };
