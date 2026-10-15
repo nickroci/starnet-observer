@@ -162,11 +162,14 @@ function fakeTimers() {
     { id: 8, from: 'external', to: row().id, relay: { direction: 'in', machine: 'bad machine', repo: 'llm-bus', state: 'acknowledged' } },
     { id: 9, from: 'external', to: row().id, relay: { direction: 'in', machine: 'whitenoise', repo: 'llm-bus', provider: 'gemini', state: 'teleported' } }],
     remote: { relay: 'llm-bus-relay.example.dev', machine: 'friend-1', lastActivityAt: 5, token: 'PRIVATE', peers: [
-      { machine: 'whitenoise', repos: ['llm-bus', '../etc'], agents: 5, lastSeen: 4, native_address: 'codex:PRIVATE' }, { machine: 'friend-1', agents: 1 }, { machine: 'no spaces' }] } } }, 1);
+      { machine: 'whitenoise', repos: ['llm-bus', '../etc'], agents: 5, lastSeen: 4, native_address: 'codex:PRIVATE',
+        list: [{ id: 'peer_' + 'a'.repeat(24), provider: 'codex', repo: 'llm-bus', lastSeen: 4, address: 'PRIVATE' }, { id: 'codex:PRIVATE', provider: 'codex', repo: 'llm-bus' }, { id: 'peer_' + 'b'.repeat(24), provider: 'gemini', repo: 'llm-bus' }] },
+      { machine: 'friend-1', agents: 1 }, { machine: 'no spaces' }] } } }, 1);
   assert.deepEqual(relayed.bus.messages[0].relay, { direction: 'out', machine: 'whitenoise', repo: 'llm-bus', provider: 'codex', state: 'accepted_remote' });
   assert.equal(relayed.bus.messages[1].relay, undefined, 'an invalid machine id drops the relay field');
   assert.deepEqual(relayed.bus.messages[2].relay, { direction: 'in', machine: 'whitenoise', repo: 'llm-bus', provider: null, state: 'unknown' });
-  assert.deepEqual(relayed.bus.remote, { relay: 'llm-bus-relay.example.dev', machine: 'friend-1', lastActivityAt: 5, peers: [{ machine: 'whitenoise', repos: ['llm-bus'], agents: 5, lastSeen: 4 }] },
+  assert.deepEqual(relayed.bus.remote, { relay: 'llm-bus-relay.example.dev', machine: 'friend-1', lastActivityAt: 5, peers: [{ machine: 'whitenoise', repos: ['llm-bus'], agents: 5, lastSeen: 4,
+    list: [{ id: 'peer_' + 'a'.repeat(24), provider: 'codex', repo: 'llm-bus', lastSeen: 4 }] }] },
     'own machine and malformed peers dropped; no unknown fields cross');
   assert.equal(JSON.stringify(relayed).includes('PRIVATE'), false);
   assert.equal(sanitizeSnapshot('vm', { sessions: [], bus: { health: 'available', messages: [], remote: { relay: 'https://x/y', machine: 'm' } } }, 1).bus.remote, undefined, 'a relay must be a bare host name');

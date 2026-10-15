@@ -146,17 +146,19 @@ function sanitizeBus(host, bus, rowIds, receivedAt) {
    the remote machine's own clock, as for every other remote timestamp. */
 const RELAY_ID = /^[A-Za-z0-9_-]{1,128}$/, RELAY_HOST = /^[A-Za-z0-9.-]{1,253}$/;
 const RELAY_STATES = new Set(['queued_local', 'accepted_remote', 'delivered_local', 'acknowledged', 'expired', 'unknown']);
-const epoch = value => Number.isFinite(value) && value > 0 ? value : null;
+const epoch = value => Number.isFinite(value) && value > 0 ? value : null, PEER = /^peer_[a-f0-9]{24}$/;
 function sanitizeRelay(relay) {
   if (!relay || typeof relay !== 'object' || !['out', 'in'].includes(relay.direction) || !RELAY_ID.test(relay.machine) || !RELAY_ID.test(relay.repo)) return null;
   return { direction: relay.direction, machine: relay.machine, repo: relay.repo, provider: PROVIDERS.has(relay.provider) ? relay.provider : null,
-    state: RELAY_STATES.has(relay.state) ? relay.state : 'unknown' };
+    ...(PEER.test(relay.peer) ? { peer: relay.peer } : {}), state: RELAY_STATES.has(relay.state) ? relay.state : 'unknown' };
 }
 function sanitizeRemote(remote) {
   if (!remote || typeof remote !== 'object' || !RELAY_HOST.test(remote.relay) || !RELAY_ID.test(remote.machine)) return null;
   const peers = (Array.isArray(remote.peers) ? remote.peers : []).slice(0, 32).filter(peer => peer && RELAY_ID.test(peer.machine) && peer.machine !== remote.machine)
     .map(peer => ({ machine: peer.machine, repos: (Array.isArray(peer.repos) ? peer.repos : []).filter(repo => RELAY_ID.test(repo)).slice(0, 16),
-      agents: Number.isSafeInteger(peer.agents) && peer.agents >= 0 ? Math.min(peer.agents, 2000) : 0, lastSeen: epoch(peer.lastSeen) }));
+      agents: Number.isSafeInteger(peer.agents) && peer.agents >= 0 ? Math.min(peer.agents, 2000) : 0, lastSeen: epoch(peer.lastSeen),
+      list: (Array.isArray(peer.list) ? peer.list : []).slice(0, 48).filter(agent => agent && PEER.test(agent.id) && PROVIDERS.has(agent.provider) && RELAY_ID.test(agent.repo))
+        .map(agent => ({ id: agent.id, provider: agent.provider, repo: agent.repo, lastSeen: epoch(agent.lastSeen) })) }));
   return { relay: remote.relay, machine: remote.machine, lastActivityAt: epoch(remote.lastActivityAt), peers };
 }
 // The remote command is fixed; only `dir` varies, and it is validated by config and single-quoted for the remote shell.

@@ -288,19 +288,22 @@ llm-bus can relay mail between machines through a relay it is bound to ([remote 
 Nothing about this is configured in the observer: every observed bus, local or remote, reports its own binding, and the
 station draws exactly that. The observer reads only routing metadata from the bus's `remote_*` tables: the relay's
 host name and this machine's id, each relayed message's direction, peer machine, shared repo and delivery state, and
-the relay's cached roster counted per machine. It never reads tokens, URL paths, native session ids or message bodies
-for this.
+the relay's cached roster per machine (agent provider, shared repo and last activity). It never reads tokens, URL paths,
+native session ids or message bodies for this.
 
-- A relay is a satellite in open space beside the mailrooms it serves, labelled with its host name.
-- Each bound mailroom's tower beams up to its relay. The beam marches while that bus saw relay activity in the last
-  15 minutes, is still and dashed while quiet, and is grey while that bus is unreadable. The roster cache alone is not
-  proof that a bridge is running.
-- Machines the relay's roster names that this observer does not watch appear as dashed outposts beyond the relay,
-  with one pip per listed agent and the label "not observed". Their rooms are never drawn. An observed machine (this
-  one, or a configured remote bound to the same relay) is never an outpost.
-- Couriers for relayed mail fly between the mailroom and the relay. Unacknowledged outgoing mail waits where llm-bus
-  last proved it is: in the mailroom while `queued_local`, at the relay once `accepted_remote`, and at the far
-  machine's outpost once `delivered_local`. Each machine observes only its own half of a crossing.
+- Every machine the relay's roster names that this observer does not watch becomes a **shadow ship**, docked beside
+  the observed ship it links to. It has its own mailroom (that machine's own llm-bus), a room per shared repo, and a
+  ghosted desk for each agent the roster lists as active in the last day. The ship is labelled "via relay · not
+  observed". Ghost crew are hover-only: never selected, inspected or controlled, and their status is unknown. An
+  observed machine (this one, or a configured remote bound to the same relay) is never a shadow.
+- Relay links join mailrooms: each observed member's mailroom to the other members' and to each shadow mailroom. A link
+  marches while that bus saw relay activity in the last 15 minutes, is still and dashed while quiet, and is grey while
+  that bus is unreadable. The roster cache alone is not proof that a bridge is running.
+- Relayed mail uses the normal courier paths: the sender's desk, its mailroom, across the relay link, the far mailroom,
+  then the far agent's desk. The far agent is matched by an opaque hash of its relay address, never its session id.
+  Unacknowledged outgoing mail waits where llm-bus last proved it is: in the mailroom while `queued_local`, halfway along
+  the relay link once `accepted_remote`, and at the far agent's desk once `delivered_local`. When both ends are
+  observed, each ship shows only its own half of the crossing.
 - Ledger rows name the far side, for example "Codex on whitenoise · llm-bus (via relay)", with the synchronised relay
   state ("held at the relay", "delivered to the far machine, not acknowledged"). The bus status names the binding.
 - Presentation mode replaces relay hosts, machine ids and shared repo ids with fictional names.

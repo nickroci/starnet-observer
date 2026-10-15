@@ -47,6 +47,7 @@ try {
   db.query("INSERT INTO remote_imports(id, local_id, envelope) VALUES ('u3', ?, ?)").run(inbound, JSON.stringify({ body: SECRET_BODY }));
   const peer = (machine, id, lastSeen, ended = 0, repo = 'llm-bus') => db.query('INSERT INTO remote_peers VALUES (?, ?, ?)').run(machine + '/' + repo + '/codex:' + id, repo,
     JSON.stringify({ address: machine + '/' + repo + '/codex:' + id, machine_id: machine, repo_id: repo, native_address: 'codex:' + id, last_seen: iso(lastSeen), ended }));
+  peer('whitenoise', R1, NOW - 30000);   // the far agent the messages name
   peer('whitenoise', 'a', NOW - 5 * 60000); peer('whitenoise', 'b', NOW - 3600000); peer('whitenoise', 'c', NOW - 60000, 1);
   peer('whitenoise', 'd', NOW - 25 * 3600000); peer('whitenoise', 'e', NOW - 7200000, 0, 'docs');
   peer('friend-1', 'self', NOW - 1000);   // this machine's own sessions are never a peer
@@ -57,19 +58,24 @@ try {
   assert.equal(state.health, 'available');
   const byId = new Map(state.rows.map(row => [row.id, row]));
   assert.equal(byId.get(Number(plain)).relay, undefined, 'a local message has no relay');
-  assert.deepEqual(byId.get(Number(out)).relay, { direction: 'out', machine: 'whitenoise', repo: 'llm-bus', provider: 'codex', state: 'accepted_remote' });
-  assert.deepEqual(byId.get(Number(queued)).relay, { direction: 'out', machine: 'whitenoise', repo: 'llm-bus', provider: 'codex', state: 'queued_local' });
-  assert.deepEqual(byId.get(Number(inbound)).relay, { direction: 'in', machine: 'whitenoise', repo: 'llm-bus', provider: 'codex', state: 'acknowledged' });
+  const farPeer = byId.get(Number(out)).relay.peer;
+  assert.match(farPeer, /^peer_[a-f0-9]{24}$/, 'the far agent is an opaque id');
+  assert.deepEqual(byId.get(Number(out)).relay, { direction: 'out', machine: 'whitenoise', repo: 'llm-bus', provider: 'codex', peer: farPeer, state: 'accepted_remote' });
+  assert.deepEqual(byId.get(Number(queued)).relay, { direction: 'out', machine: 'whitenoise', repo: 'llm-bus', provider: 'codex', peer: farPeer, state: 'queued_local' });
+  assert.deepEqual(byId.get(Number(inbound)).relay, { direction: 'in', machine: 'whitenoise', repo: 'llm-bus', provider: 'codex', peer: farPeer, state: 'acknowledged' }, 'both directions name the same far agent');
   assert.equal(state.remote.relay, 'llm-bus-relay.example.dev'); assert.equal(state.remote.machine, 'friend-1');
-  assert.deepEqual(state.remote.peers, [
-    { machine: 'quiet-box', repos: ['llm-bus'], agents: 0, lastSeen: NOW - 48 * 3600000 },
-    { machine: 'whitenoise', repos: ['docs', 'llm-bus'], agents: 3, lastSeen: NOW - 60000 }
-  ], 'per machine: ended and 24h-idle sessions are not counted; this machine is excluded');
+  const [quiet, white] = state.remote.peers;
+  assert.deepEqual(quiet, { machine: 'quiet-box', repos: ['llm-bus'], agents: 0, lastSeen: NOW - 48 * 3600000, list: [] }, 'a 24h-idle machine is listed with no agents');
+  assert.deepEqual({ ...white, list: undefined }, { machine: 'whitenoise', repos: ['docs', 'llm-bus'], agents: 4, lastSeen: NOW - 30000, list: undefined }, 'ended and 24h-idle sessions are not counted; this machine is excluded');
+  assert.equal(white.list.length, 4, 'one roster entry per counted agent');
+  assert.ok(white.list.every(agent => /^peer_[a-f0-9]{24}$/.test(agent.id) && agent.provider === 'codex'), 'opaque ids and providers only');
+  assert.deepEqual(white.list.find(agent => agent.id === farPeer), { id: farPeer, provider: 'codex', repo: 'llm-bus', lastSeen: NOW - 30000 }, 'a message and its roster entry join exactly');
+  assert.deepEqual(white.list.filter(agent => agent.repo === 'docs').length, 1, 'each agent keeps its shared repo');
   assert.equal(state.remote.lastActivityAt, NOW - 10000, 'newest relayed message or peer activity; this machine\'s own sessions do not count');
 
   const view = publicBus(state, [{ id: 'obs_local', provider: 'claude', sessionId: S1 }]);
   const text = JSON.stringify(view);
-  for (const secret of [SECRET_BODY, R1, S2, 'codex:' + R1]) assert.equal(text.includes(secret), false, 'no body or native session id reaches the page: ' + secret);
+  for (const secret of [SECRET_BODY, R1, S2, 'codex:' + R1, 'codex:a', '/codex:']) assert.equal(text.includes(secret), false, 'no body or native session id reaches the page: ' + secret);
   const outView = view.messages.find(message => message.id === Number(out));
   assert.equal(outView.from, 'obs_local'); assert.equal(outView.to, 'external', 'the far side is never an observed pane');
   assert.equal(outView.relay.state, 'accepted_remote');
