@@ -650,3 +650,491 @@ const crewChecks = readinessChecks.then(async () => {
   assert.equal(culled.view.hitRegions().length, 192, 'and every body is hit-testable again');
 });
 crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers, DPR equivalence, resize refit, click vs drag, live hover, cursor and pinch zoom, keyboard, clamps, sprite poses and fallback, stale/reduced freeze, cache reuse, lifecycle and focus OK, frozen single paint, invalidation sources, sprite/font readiness, camera report dedupe and offscreen furniture culling OK')).catch(error => { console.error(error); process.exitCode = 1; });
+
+// ---------- Theme: instance palette, effect modes and replacement loading ----------
+{
+  const crypto = require('node:crypto');
+  const Mail = require('../frontend/app/observer-mail.js');
+  const base = require('../frontend/assets/themes/starnet/theme.json').scene;
+  const keys = Object.keys(base.colors);
+  /* Recording context: every colour reaching fillStyle/strokeStyle or a gradient stop, plus each stroke's style and dash,
+     in paint order. Canvas normalizes '#000' and case, so the record does too; dynamic alphas are rounded because engines
+     format the last float digits differently. */
+  const norm = value => { const text = String(value).toLowerCase().replace(/-?\d+\.\d+(?:e[-+]?\d+)?/g, number => Number(number).toFixed(6)); return text === '#000' ? '#000000' : text; };
+  function recorder(log, strokes, firstStops) {
+    let dash = [];
+    const target = { measureText: text => ({ width: String(text).length * 7 }), setLineDash: value => { dash = value; },
+      stroke: () => strokes.push(norm(target.strokeStyle) + '|' + dash.join(',')), strokeRect: () => strokes.push(norm(target.strokeStyle) + '|' + dash.join(',')),
+      createRadialGradient: () => { const stops = []; firstStops.push(stops); return { addColorStop: (offset, color) => { stops.push(norm(color)); log.push('stop:' + norm(color)); } }; } };
+    return new Proxy(target, { get: (t, key) => key in t ? t[key] : () => {}, set: (t, key, value) => {
+      if ((key === 'fillStyle' || key === 'strokeStyle') && typeof value === 'string') log.push(key[0] + ':' + norm(value));
+      t[key] = value; return true; } });
+  }
+  const statuses = ['working', 'blocked', 'idle', 'done', 'unknown', 'working'];
+  const rows = statuses.map((status, i) => ({ id: 'r' + i, project: i < 3 ? 'Alpha' : 'Beta', projectId: i < 3 ? 'alpha' : 'beta', projectKind: 'group',
+    repo: i % 2 ? 'web' : 'api', repoId: i % 2 ? 'web' : 'api', provider: i % 2 ? 'codex' : 'claude', status, worktree: 'wt' + i }));
+  rows.push({ id: 'h0', parentId: 'r0', source: 'helper', project: 'Alpha', projectId: 'alpha', projectKind: 'group', repo: 'api', repoId: 'api', provider: 'claude', status: 'working' },
+    { id: 'h1', parentId: 'r1', source: 'helper', project: 'Alpha', projectId: 'alpha', projectKind: 'group', repo: 'web', repoId: 'web', provider: 'codex', status: 'blocked' });
+  const SCENARIOS = [['fx-off', false, false, false, true, 1], ['fx-on', true, false, false, true, 1], ['fx-on-detail', true, false, false, false, 3], ['stale', true, true, false, true, 1], ['reduced', true, false, true, true, 2.2]];
+  // One deterministic paint per scenario: every status, helpers and tethers, mail, selection, focus, stale and fallback bodies.
+  function record(theme, { only = null, focus = 'r2', list = rows, at = 4321 } = {}) {
+    const layout = Model.createLayout(); layout.reconcile(list);
+    const scene = Scene.build(layout.onPage(0), 0), courier = Mail.createCourier(theme ? { colors: theme.scene.colors } : undefined), result = {};
+    for (const [name, fx, stale, reduced, sprite, zoom] of SCENARIOS) {
+      if (only && !only.includes(name)) continue;
+      const log = [], strokes = [], firstStops = [], ctx = recorder(log, strokes, firstStops);
+      const node = { clientWidth: 1200, clientHeight: 800, width: 0, height: 0, style: {}, getContext: () => ctx, addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({ left: 0, top: 0 }) };
+      const options = { canvas: node, nameFor: id => 'W ' + id, hoverLabel: () => 'hover', reducedMotion: () => reduced,
+        env: { raf: () => 1, caf() {}, dpr: () => 1, now: () => 0, createCanvas: () => node, sprites: { drawBody: sprite ? (c, body) => ({ top: body.py - 60, w: 30, h: 60 }) : () => null } } };
+      if (theme !== undefined) options.theme = theme;
+      const view = View.create(options);
+      view.setFx(fx);
+      const frame = courier.frame(1000, { pending: [{ point: { x: 11, y: 9 }, count: 2, mark: true, label: 'D1' }, { point: { x: 12, y: 9 }, count: 1, mark: false, label: '' }], pads: scene.mail.pads });
+      frame.drones.push({ point: { x: 6, y: 6, z: 2.2 }, parked: false, phase: 'pickup', parcels: [scene.platforms[0].accent, scene.platforms[0].accent] });
+      view.update(scene, { stale: () => stale, mailFrame: () => frame, inspected: () => 'r1', repositorySelection: () => 'web' });
+      if (zoom !== 1) view.zoomBy(zoom);
+      if (focus) view.focus(focus);
+      view.paint(at);
+      result[name] = { log, strokes, firstStops };
+    }
+    return { result, scene };
+  }
+  const digest = result => crypto.createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(result).map(([name, value]) => [name, value.log])))).digest('hex');
+  // Characterization of the pre-theme literal painter (HEAD 196d86d), recorded with this exact scenario set.
+  // Updated for PR #8's intentional extra resting motes and crackle; theme/default equivalence remains checked.
+  const HEAD_DEFAULT = '45c7717d1ff113517da5f17a673d74f1b480b0f9eea53f4caba7e1ba66da52a2';
+  const omitted = record(undefined).result;
+  assert.equal(digest(omitted), HEAD_DEFAULT, 'default paint colours, order and count match the idle-aging baseline');
+  assert.equal(digest(record(require('../frontend/app/theme-pack.js').getDefault()).result), HEAD_DEFAULT, 'the canonical snapshot paints the same default');
+  assert.equal(omitted['fx-on'].log.filter(entry => entry === 'f:' + base.colors['pixie-core']).length >= 26, true);
+
+  // A synthetic palette with a distinct colour per key: every recorded colour is attributable to exactly one key.
+  const custom = Object.fromEntries(keys.map((key, index) => [key, key.endsWith('transparent') ? 'rgba(1,2,' + (index % 250) + ',0)' : '#' + (0x100000 + index * 0x10101).toString(16).slice(-6)]));
+  const values = Object.values(custom); assert.equal(new Set(values).size, values.length, 'synthetic colours are distinct');
+  const keyOf = new Map(keys.map(key => [norm(custom[key]), key]));
+  const prefix = keys.map(key => { const hex = /^#(..)(..)(..)$/.exec(custom[key]); return hex ? [key, hex.slice(1).map(h => parseInt(h, 16)).join(',')] : null; }).filter(Boolean);
+  const attribute = color => keyOf.get(color) || prefix.find(([, rgb]) => color.startsWith('rgba(' + rgb + ',') || color === 'rgb(' + rgb + ')')?.[0] || null;
+  const used = run => new Set(Object.values(run).flatMap(value => value.log.map(entry => attribute(entry.slice(entry.indexOf(':') + 1)))).filter(Boolean));
+  const snapshot = (extra = {}) => ({ version: 1, requestedId: 'synthetic', effectiveId: 'synthetic', scene: { ...base, colors: custom, ...extra } });
+  // Unfocused, so the whole station (observatory, corner props, every status) is on stage.
+  const wide = Array.from({ length: 24 }, (_, i) => ({ id: 'w' + i, project: 'P' + (i % 8), projectId: 'p' + (i % 8), projectKind: 'group', repo: 'r', repoId: 'r',
+    provider: i % 2 ? 'codex' : 'claude', status: statuses[i % statuses.length] }));
+  const themed = record(snapshot()).result, themedKeys = new Set([...used(themed), ...used(record(snapshot(), { focus: null }).result),
+    ...[7400, 14400, 21400, 28400].flatMap(at => [...used(record(snapshot(), { focus: null, list: wide, at, only: ['fx-on'] }).result)])]);
+  const layoutAccents = new Set(record(undefined).scene.platforms.map(platform => platform.accent));
+  const defaultLeft = Object.values(themed).flatMap(value => value.log).map(entry => entry.slice(entry.indexOf(':') + 1))
+    .filter(color => Object.values(base.colors).map(norm).includes(color) && !attribute(color) && !layoutAccents.has(color));
+  assert.deepEqual([...new Set(defaultLeft)], [], 'no canonical scene colour survives a complete custom palette');
+  /* Every scene key reaches the canvas in its custom colour (furnishings, crew, mail, plates, sky and effects), except:
+     console/chair (station palette keys with no painter consumer), spark (the sparks() default every call overrides),
+     office-backdrop (home-office art) and the courier-owned mail keys, which observer-mail tests cover. */
+  assert.deepEqual(keys.filter(key => !themedKeys.has(key)), ['console', 'chair', 'spark', 'office-backdrop', 'mail-acknowledged', 'mail-unassigned']);
+
+  // Two views on one page: a custom view never changes a default view painted before or after it.
+  const before = record(undefined, { only: ['fx-on'] }).result, other = record(snapshot(), { only: ['fx-on'] }).result, after = record(undefined, { only: ['fx-on'] }).result;
+  assert.deepEqual(after['fx-on'].log, before['fx-on'].log, 'default view unchanged by a simultaneous custom view');
+  assert.notDeepEqual(other['fx-on'].log, before['fx-on'].log);
+  assert(Object.isFrozen(View.PALETTE) && View.PALETTE.cyan === base.colors.cyan && View.STATUS.blocked === base.colors.blocked, 'exported defaults stay canonical');
+
+  // backgroundFx none drops only the rain; everything else in the station sky stays.
+  const dry = used(record(snapshot({ backgroundFx: 'none' }), { only: ['fx-on'] }).result);
+  for (const key of ['rain-head', 'rain-bright', 'rain-dim']) assert(!dry.has(key), key + ' is not painted without rain');
+  for (const key of ['star-cool', 'nebula-violet', 'pixie-core', 'planet-core', 'furniture-spark']) assert(dry.has(key), key + ' stays with rain off');
+  assert.equal(record(snapshot({ backgroundFx: 'none' }), { only: ['fx-on'] }).result['fx-on'].log.filter(entry => attribute(entry.slice(2)) === 'pixie-core').length,
+    themed['fx-on'].log.filter(entry => attribute(entry.slice(2)) === 'pixie-core').length, 'the same 26 pixies');
+
+  // ambientFx none: no sky or decorative halos/sparks; shadows, markers, status, plates and tethers remain.
+  const calm = record(snapshot({ ambientFx: 'none' }), { focus: null }), calmKeys = used(calm.result);
+  for (const key of ['star-cool', 'star-white', 'plain-star', 'nebula-cyan', 'nebula-violet', 'planet-core', 'planet-rim', 'shuttle-body', 'pixie-core', 'pixie-cyan', 'pixie-green', 'shooting-star-head',
+    'spark', 'rim-spark', 'platform-spark', 'screen-spark', 'furniture-spark', 'vent-spark', 'tank-spark', 'mast-glow', 'mast-core', 'mast-spark', 'apron-spark', 'walkway-light-head', 'tower-spark',
+    'pod-spark', 'observatory-spark', 'telescope-spark', 'desk-spark', 'desk-spark-alt', 'aura-spark', 'aura-transparent'])
+    assert(!calmKeys.has(key), key + ' is decorative and stays off with ambientFx none');
+  for (const key of ['space', 'rain-head', 'contact-shadow', 'body-outline', 'focus', 'repo', 'working', 'blocked', 'unknown', 'stale', 'stale-overlay', 'glass', 'envelope-outline', 'drone-body'])
+    assert(calmKeys.has(key), key + ' remains with ambientFx none');
+  const halos = Object.values(calm.result).flatMap(value => value.firstStops).map(stops => attribute(stops[0]));
+  assert.deepEqual([...new Set(halos)].sort(), ['blocked', 'repo', 'working'], 'only status-lamp and selection glows remain');
+  const tethers = scene => scene.workers.filter(worker => worker.connector).map(worker => norm(worker.accent) + '|4,4');
+  assert(tethers(calm.scene).length > 0 && tethers(calm.scene).every(tether => calm.result['fx-off'].strokes.includes(tether)), 'helper tethers remain');
+  assert(calm.result.stale.strokes.some(stroke => stroke === norm(custom.stale) + '|3,3'), 'the dashed STALE plate keeps the stale colour');
+  const calmOff = used(record(snapshot({ ambientFx: 'none', backgroundFx: 'none' }), { only: ['fx-on'] }).result);
+  for (const key of ['rain-head', 'star-cool', 'planet-core']) assert(!calmOff.has(key), key + ' off with both effect modes none');
+  console.log('theme view: HEAD-equal default paint, complete custom palette, isolated simultaneous views, backgroundFx/ambientFx layers OK');
+}
+
+// A replacement crew group still loading draws canonical frames; a frozen scene repaints once it settles, ready or failed.
+(async () => {
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  for (const outcome of ['ready', 'failed', 'rejected']) {
+    let settle, state = 'loading', ensured = 0;
+    const job = new Promise((resolve, reject) => { settle = () => outcome === 'rejected' ? reject(new Error('x')) : resolve(outcome === 'ready'); });
+    job.catch(() => {});
+    const sprite = { ...sprites(), replacementState: () => state, ensureSkin: () => { ensured++; return job; } };
+    const run = scheduled({ statuses: ['idle'], sprite, reduced: () => true });
+    run.run();
+    assert.equal(run.frames.length, 0, outcome + ': a reduced scene is frozen after its paint');
+    assert(ensured > 0, outcome + ': a loading replacement is watched even though canonical frames painted');
+    state = outcome === 'ready' ? 'ready' : 'failed'; settle(); await flush();
+    assert.equal(run.frames.length, 1, outcome + ': settlement schedules one repaint');
+    run.run();
+    assert.equal(run.frames.length, 0, outcome + ': the settled group never re-arms a loop');
+  }
+  // Ready or inherited groups and older sprite engines without replacementState are not watched while frames paint.
+  for (const sprite of [{ ...sprites(), replacementState: () => 'ready', ensureSkin: () => { throw new Error('unexpected'); } }, { ...sprites(), ensureSkin: () => { throw new Error('unexpected'); } }]) {
+    const run = scheduled({ statuses: ['idle'], sprite, reduced: () => true });
+    assert.doesNotThrow(() => run.run());
+  }
+  console.log('theme view: loading replacement crew watch and settled repaint OK');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+// ---------- Home-office art: atomic activation, canonical station crew while pending/failed, resumable load ----------
+(async () => {
+  const { SCENE_ART_ROLES } = require('../frontend/app/scene-art-roles.js');
+  const ThemePack = require('../frontend/app/theme-pack.js');
+  const flush = async () => { for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve)); };
+  const base = ThemePack.getDefault();
+  const assets = Object.fromEntries(Object.keys(SCENE_ART_ROLES).map(role => [role, '/assets/themes/office/scene/' + role.toLowerCase() + '.png']));
+  const theme = ThemePack.freezeSnapshot({ version: 1, requestedId: 'office', effectiveId: 'office', warnings: [],
+    scene: { ...base.scene, art: { style: 'home-office', assets }, backgroundFx: 'none', ambientFx: 'none' } });
+  // Synthetic decode gate: every image waits for release(); `outcome` decides load failure or a wrong-size role.
+  /* `hold` keeps one role's decode on its own gate (releaseHeld; `heldFails` rejects it then); `providers` and
+     `statuses` shape the root rows. */
+  function harness({ outcome = 'ready', replacement = 'inherited', withTheme = theme, hold = null, heldFails = false,
+    providers = ['claude', 'codex', 'claude'], statuses = ['working', 'idle', 'blocked'] } = {}) {
+    let release, releaseHeld; const gate = new Promise(resolve => { release = resolve; }), heldGate = new Promise(resolve => { releaseHeld = resolve; });
+    const counts = { constructed: 0 };
+    class FakeImage {
+      constructor() { counts.constructed++; }
+      set src(url) { this._src = url; const role = Object.keys(assets).find(key => assets[key] === url), size = SCENE_ART_ROLES[role].source;
+        this.naturalWidth = outcome === 'wrong-size' && role === 'chair' ? size.width + 1 : size.width; this.naturalHeight = size.height; }
+      get src() { return this._src; }
+      decode() {
+        if (hold && this._src === assets[hold]) return heldGate.then(() => { if (heldFails) throw new Error('/private/scene/held.png'); });
+        return gate.then(() => { if (outcome === 'fail' && this._src === assets.desk) throw new Error('/private/scene/desk.png'); });
+      }
+    }
+    const status = ThemePack.createStatus(withTheme, {}), warnings = [];
+    const sprite = { ...sprites(), replacementState: () => replacement, ensureSkin: () => new Promise(() => {}) };
+    const layout = Model.createLayout(), rows = statuses.map((value, index) => ({ id: 'o' + index, project: 'P', projectId: 'p', projectKind: 'group', repo: 'r', repoId: 'r',
+      provider: providers[index], status: value, worktree: 'wt' }));
+    rows.push({ id: 'oh', parentId: 'o0', source: 'helper', project: 'P', projectId: 'p', projectKind: 'group', repo: 'r', repoId: 'r', provider: 'claude', status: 'working' });
+    layout.reconcile(rows);
+    const scene = Scene.build(layout.onPage(0), 0), node = canvas(), frames = [];
+    const view = View.create({ theme: withTheme, canvas: node, nameFor: id => id, reducedMotion: () => true,
+      env: { raf: fn => { frames.push(fn); return frames.length; }, caf() {}, dpr: () => 1, createCanvas: () => canvas(), sprites: sprite, now: () => 0, Image: FakeImage,
+        themeStatus: { reportWarning: warning => { warnings.push(warning); status.report(warning); }, reportNotice: status.notice } } });
+    view.start();
+    view.update(scene, { stale: () => false, mailFrame: () => ({ drones: [], envelopes: [] }), inspected: () => null });
+    const run = () => { let t = 0; for (let i = 0; i < 50 && frames.length; i++) frames.shift()(t += 16); };
+    return { view, scene, frames, run, sprite, counts, status, warnings, node, release, releaseHeld };
+  }
+  const groups = h => h.sprite.appearances.map(appearance => appearance.group);
+  const workers = h => h.scene.workers.length;
+
+  {
+    // Pending: complete station art, every body drawn by the sprite engine in its canonical default group, status truthful.
+    const h = harness({ replacement: 'ready' });
+    h.run();
+    assert.equal(h.counts.constructed, 34, 'one load of the 34 roles starts at create');
+    assert.deepEqual(groups(h), Array(workers(h)).fill('default'), 'pending office art forces canonical station crew even with ready humans');
+    assert.deepEqual(h.status.lines(), ['Theme pack office office art loading; showing station art.']);
+    assert.equal(h.view.cacheBuilds(), 1);
+    // Ready: one activation, one static rebuild through the existing scheduler; ready humans draw without the default group.
+    h.release(); await flush();
+    assert.equal(h.frames.length, 1, 'readiness schedules one paint');
+    h.sprite.appearances.length = 0; h.run();
+    assert.equal(h.view.cacheBuilds(), 2, 'activation invalidates the static cache once');
+    assert.deepEqual(groups(h), Array(workers(h)).fill(undefined), 'active office crew with a ready group uses its human sprites');
+    h.view.invalidate(); h.run(); h.view.invalidate(); h.run();
+    assert.equal(h.view.cacheBuilds(), 2, 'the rebuilt layer is reused');
+    assert.deepEqual(h.status.lines(), [], 'the pending notice clears on activation');
+    assert.equal(h.warnings.length, 0);
+    // Hiding and resuming ready art keeps the same images: nothing reloads, the office stays active.
+    h.view.stop(); h.view.start(); h.sprite.appearances.length = 0; h.run();
+    assert.equal(h.counts.constructed, 34, 'no reload across stop/start');
+    assert.deepEqual(groups(h), Array(workers(h)).fill(undefined)); assert.equal(h.view.cacheBuilds(), 2);
+  }
+  {
+    // Active office without a ready human group: original procedural human at the fallback bounds, never the android sprite.
+    for (const replacement of ['inherited', 'loading', 'failed']) {
+      const h = harness({ replacement });
+      h.release(); await flush(); h.sprite.appearances.length = 0; h.run();
+      assert.equal(h.sprite.appearances.length, 0, replacement + ': no sprite body is drawn in the office');
+      const regions = h.view.hitRegions(), zoom = h.view.camera().zoom;
+      assert.equal(regions.length, workers(h), replacement + ': every human is hit-testable');
+      const root = regions.find(region => region.id === 'o1');
+      assert(Math.abs(root.width - Math.max(20, 16 * zoom)) < 1e-6 && Math.abs(root.height - Math.max(20, 40 * zoom)) < 1e-6, replacement + ': fallback hit bounds');
+    }
+  }
+  {
+    // Settlement while stopped records readiness without painting; start() activates through the scheduler.
+    const h = harness();
+    h.run(); h.view.stop();
+    h.release(); await flush();
+    assert.equal(h.frames.length, 0, 'no paint is scheduled while stopped');
+    assert.equal(h.view.cacheBuilds(), 1);
+    h.view.start(); assert.equal(h.frames.length, 1);
+    h.sprite.appearances.length = 0; h.run();
+    assert.equal(h.view.cacheBuilds(), 2, 'start rebuilds the static layer once for the office');
+    assert.equal(h.sprite.appearances.length, 0, 'office humans after start');
+    assert.equal(h.counts.constructed, 34);
+  }
+  {
+    // Hide/resume while pending keeps the same load; it still activates afterwards.
+    const h = harness();
+    h.run(); h.view.stop(); h.view.start(); h.view.stop(); h.view.start(); h.run();
+    assert.equal(h.counts.constructed, 34, 'pending load survives suspension');
+    h.release(); await flush(); h.sprite.appearances.length = 0; h.run();
+    assert.equal(h.view.cacheBuilds(), 2); assert.equal(h.sprite.appearances.length, 0);
+  }
+  for (const [outcome, code, text] of [['fail', 'scene-art-load', 'did not load'], ['wrong-size', 'scene-art-dimensions', 'has the wrong image sizes']]) {
+    // Failure: one bounded warning, permanent station art with canonical crew, no extra rebuild.
+    const h = harness({ outcome, replacement: 'ready' });
+    h.run(); h.release(); await flush();
+    assert.equal(h.frames.length, 0, outcome + ': station art is unchanged, so nothing repaints');
+    h.view.stop(); h.view.start(); h.sprite.appearances.length = 0; h.run();
+    assert.deepEqual(groups(h), Array(workers(h)).fill('default'), outcome + ': failed office art keeps canonical station crew');
+    assert.equal(h.view.cacheBuilds(), 1);
+    assert.equal(h.warnings.length, 1); assert.deepEqual([h.warnings[0].code, h.warnings[0].pack], [code, 'office']);
+    assert.deepEqual(h.status.lines(), ['Theme pack office office art ' + text + '; showing station art.']);
+    assert(!/[\\/]|Error/.test(h.warnings[0].message), outcome + ': no path or raw error');
+  }
+  for (const [outcome, code, text, heldFails] of [['fail', 'scene-art-load', 'did not load', true], ['wrong-size', 'scene-art-dimensions', 'has the wrong image sizes', false]]) {
+    // A known failure leaves pending at once while an unrelated role is still decoding; the held role settling later
+    // (rejecting or resolving) neither reactivates, repaints nor warns again.
+    const h = harness({ outcome, replacement: 'ready', hold: 'floor', heldFails });
+    h.run(); h.release(); await flush();
+    assert.equal(h.warnings.length, 1, outcome + ': failed before the held role decodes');
+    assert.equal(h.warnings[0].code, code);
+    assert.deepEqual(h.status.lines(), ['Theme pack office office art ' + text + '; showing station art.'], outcome + ': the loading notice is replaced once');
+    h.releaseHeld(); await flush();
+    assert.equal(h.warnings.length, 1, outcome + ': no extra warning after the late settlement');
+    assert.equal(h.frames.length, 0, outcome + ': no repaint or activation');
+    h.view.invalidate(); h.sprite.appearances.length = 0; h.run();
+    assert.deepEqual(groups(h), Array(workers(h)).fill('default'), outcome + ': canonical station crew stays');
+    assert.equal(h.view.cacheBuilds(), 1);
+    assert.deepEqual(h.status.lines(), ['Theme pack office office art ' + text + '; showing station art.']);
+  }
+  {
+    // Procedural humans keep the provider visible: in one project with one status, swapping a Claude worker for a
+    // Codex one changes its hair tone (amber to cyan) while hits, heights and foot anchors stay identical.
+    const amber = base.scene.colors.amber, cyan = base.scene.colors.cyan;
+    for (const replacement of ['inherited', 'loading', 'failed']) {
+      const paint = providers => {
+        const h = harness({ replacement, providers, statuses: ['working', 'working'] });
+        return h;
+      };
+      const same = paint(['claude', 'claude']), mixed = paint(['claude', 'codex']);
+      for (const h of [same, mixed]) { h.release(); }
+      await flush();
+      for (const h of [same, mixed]) { h.sprite.appearances.length = 0; h.node.ctx.calls.fills = {}; h.run(); }
+      assert.equal(mixed.sprite.appearances.length, 0, replacement + ': procedural humans');
+      const tones = h => [h.node.ctx.calls.fills[amber] || 0, h.node.ctx.calls.fills[cyan] || 0];
+      const [sameAmber, sameCyan] = tones(same), [mixedAmber, mixedCyan] = tones(mixed);
+      assert(mixedCyan > sameCyan && mixedAmber < sameAmber, replacement + ': Claude and Codex humans draw differently');
+      assert.deepEqual(mixed.view.hitRegions(), same.view.hitRegions(), replacement + ': hits, heights and foot anchors unchanged');
+    }
+  }
+  {
+    // A station theme never loads office art or changes its crew appearance.
+    const h = harness({ withTheme: null });
+    h.run();
+    assert.equal(h.counts.constructed, 0);
+    assert.deepEqual(groups(h), Array(workers(h)).fill(undefined), 'station crew appearance is unchanged');
+  }
+  console.log('office view: pending/failed station crew, single activation and cache rebuild, ready humans or procedural fallback, stopped settlement, pending/ready resume, bounded failure warnings OK');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+// ---------- Home-office art: every station role translated to its fixed PNG role, same passes, depth and hits ----------
+(async () => {
+  const { SCENE_ART_ROLES } = require('../frontend/app/scene-art-roles.js');
+  const ThemePack = require('../frontend/app/theme-pack.js');
+  const Mail = require('../frontend/app/observer-mail.js');
+  const flush = async () => { for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve)); };
+  const ROLE_NAMES = Object.keys(SCENE_ART_ROLES), base = ThemePack.getDefault().scene, keys = Object.keys(base.colors);
+  // One distinct colour per scene key, so every recorded colour names exactly one key.
+  const custom = Object.fromEntries(keys.map((key, index) => [key, key.endsWith('transparent') ? 'rgba(1,2,' + (index % 250) + ',0)' : '#' + (0x200000 + index * 0x10101).toString(16).slice(-6)]));
+  const norm = value => String(value).toLowerCase();
+  const keyOf = new Map(keys.map(key => [norm(custom[key]), key]));
+  const rgbKey = keys.map(key => { const hex = /^#(..)(..)(..)$/.exec(custom[key]); return hex ? [key, hex.slice(1).map(h => parseInt(h, 16)).join(',')] : null; }).filter(Boolean);
+  const attribute = color => keyOf.get(norm(color)) || rgbKey.find(([, rgb]) => norm(color).startsWith('rgba(' + rgb + ',') || norm(color) === 'rgb(' + rgb + ')')?.[0] || null;
+  const assets = Object.fromEntries(ROLE_NAMES.map(role => [role, '/assets/themes/office/scene/' + role.toLowerCase() + '.png']));
+  const officeTheme = ThemePack.freezeSnapshot({ version: 1, requestedId: 'office', effectiveId: 'office', warnings: [],
+    scene: { ...base, colors: custom, art: { style: 'home-office', assets }, backgroundFx: 'none', ambientFx: 'none' } });
+  const stationTheme = ThemePack.freezeSnapshot({ version: 1, requestedId: 'station', effectiveId: 'station', warnings: [], scene: { ...base, colors: custom } });
+  class RoleImage {
+    set src(url) { this._src = url; this.role = ROLE_NAMES.find(role => assets[role] === url); ({ width: this.naturalWidth, height: this.naturalHeight } = SCENE_ART_ROLES[this.role].source); }
+    get src() { return this._src; }
+    decode() { return Promise.resolve(); }
+  }
+  // Recording context: colours, composite modes, role images (with their exact draw rectangles) and crew bodies, in order.
+  function recorder() {
+    const log = [], images = [], events = [], composites = [];
+    let dash = [];
+    const target = { measureText: text => ({ width: String(text).length * 7 }), setLineDash: value => { dash = value; },
+      createRadialGradient: () => ({ addColorStop: (offset, color) => log.push('stop:' + norm(color)) }),
+      stroke: () => log.push('stroke:' + norm(target.strokeStyle) + '|' + dash.join(',')), strokeRect: () => log.push('stroke:' + norm(target.strokeStyle) + '|' + dash.join(',')),
+      drawImage: (image, x, y, w, h) => { if (image && image.role) { images.push({ role: image.role, x, y, w, h }); events.push('role:' + image.role); } } };
+    const ctx = new Proxy(target, { get: (t, key) => key in t ? t[key] : () => {}, set: (t, key, value) => {
+      if ((key === 'fillStyle' || key === 'strokeStyle') && typeof value === 'string') log.push(key[0] + ':' + norm(value));
+      if (key === 'globalCompositeOperation') composites.push(value);
+      if (key === 'imageSmoothingEnabled') composites.push('smoothing:' + value);
+      t[key] = value; return true; } });
+    return { ctx, log, images, events, composites };
+  }
+  const statuses = ['working', 'blocked', 'idle', 'done', 'unknown', 'working'];
+  const rows = Array.from({ length: 24 }, (_, i) => ({ id: 'w' + i, project: 'P' + (i % 8), projectId: 'p' + (i % 8), projectKind: 'group', repo: i % 16 < 8 ? 'api' : 'web',
+    repoId: i % 16 < 8 ? 'api' : 'web', provider: i % 2 ? 'codex' : 'claude', status: statuses[i % statuses.length], worktree: 'wt' + i }));
+  rows.push({ id: 'h0', parentId: 'w0', source: 'helper', project: 'P0', projectId: 'p0', projectKind: 'group', repo: 'api', repoId: 'api', provider: 'claude', status: 'working' },
+    { id: 'h1', parentId: 'w9', source: 'helper', project: 'P1', projectId: 'p1', projectKind: 'group', repo: 'web', repoId: 'web', provider: 'codex', status: 'blocked' });
+  const layout = Model.createLayout(); layout.reconcile(rows);
+  const scene = Scene.build(layout.onPage(0), 0);
+  const courier = Mail.createCourier({ colors: custom });
+  const mailFrame = () => {
+    const frame = courier.frame(1000, { pending: [{ point: { x: 11, y: 9 }, count: 2, mark: true, label: 'D1' }], pads: scene.mail.pads });
+    frame.drones.push({ point: { x: 6, y: 6, z: 2.2 }, parked: false, phase: 'pickup', parcels: [scene.platforms[0].accent, scene.platforms[1].accent] },
+      { point: { x: 4, y: 9, z: 0.4 }, parked: true, phase: 'parked', parcels: [] });
+    return frame;
+  };
+  // ready: whether the human crew group is ready (office draws sprite bodies only then).
+  // sprites: a real sprite runtime in place of the constant-returning stub.
+  async function paintWith(theme, { fx = true, ready = true, focus = null, zoom = 1, stale = false, at = 4321, reduced = true, sprites = null } = {}) {
+    const rec = recorder();
+    const node = { clientWidth: 1600, clientHeight: 1000, width: 0, height: 0, style: {}, getContext: () => rec.ctx, addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({ left: 0, top: 0 }) };
+    const sprite = sprites || { drawBody: (c, body) => { rec.events.push('body:' + body.id); return { top: body.py - 60, w: 30, h: 60 }; }, replacementState: () => (ready ? 'ready' : 'inherited'), ensureSkin: () => null };
+    const view = View.create({ theme, canvas: node, nameFor: id => 'W ' + id, hoverLabel: () => 'hover', reducedMotion: () => reduced,
+      env: { raf: () => 1, caf() {}, dpr: () => 1, now: () => 0, createCanvas: () => node, sprites: sprite, Image: RoleImage, themeStatus: { reportWarning() {}, reportNotice() {} } } });
+    await flush();
+    view.setFx(fx);
+    view.update(scene, { stale: () => stale, mailFrame, inspected: () => 'w1', repositorySelection: () => 'web' });
+    if (zoom !== 1) view.zoomBy(zoom);
+    if (focus) view.focus(focus);
+    rec.log.length = 0; rec.images.length = 0; rec.events.length = 0; rec.composites.length = 0;
+    view.paint(at);
+    return { ...rec, view, used: new Set(rec.log.map(entry => attribute(entry.slice(entry.indexOf(':') + 1))).filter(Boolean)) };
+  }
+
+  const office = await paintWith(officeTheme), station = await paintWith(stationTheme);
+  // Every one of the 34 fixed roles reaches the canvas in one active office paint; the station draws none.
+  assert.deepEqual([...new Set(office.images.map(image => image.role))].sort(), ROLE_NAMES.slice().sort(), 'all 34 roles are drawn in the office');
+  assert.equal(station.images.length, 0, 'station art never draws a role image');
+  // Native size, whole-pixel placement for every role draw, including the root and helper chairs.
+  for (const image of office.images) {
+    const { width, height } = SCENE_ART_ROLES[image.role].source;
+    assert.deepEqual([image.w, image.h], [width, height], image.role + ' draws at its native size');
+    assert(Number.isInteger(image.x) && Number.isInteger(image.y), image.role + ' draws on whole pixels');
+  }
+  const helpers = scene.workers.filter(worker => worker.kind === 'helper');
+  assert(helpers.length >= 2, 'helper stations are exercised');
+  assert.equal(office.images.filter(image => image.role === 'helperChair').length, helpers.length, 'one native helper chair per helper');
+  assert.equal(office.images.filter(image => image.role === 'chair').length, scene.workers.length - helpers.length + 1, 'root chairs and the observatory chair');
+  for (const worker of scene.workers) {
+    const role = worker.kind === 'helper' ? 'helperChair' : 'chair', at = Scene.project(worker.chair), foot = SCENE_ART_ROLES[role].foot;
+    assert(office.images.some(image => image.role === role && image.x === Math.round(at.x - foot.x) && image.y === Math.round(at.y - foot.y)), worker.id + ' chair at its seat anchor');
+  }
+  // Paper carriers at the exact airborne points; parcel colours and counts are preserved.
+  const drones = mailFrame().drones, carriers = office.images.filter(image => image.role === 'carrier');
+  assert.equal(carriers.length, drones.length, 'one carrier per drone');
+  for (const drone of drones) { const at = Scene.project(drone.point); assert(carriers.some(image => image.x === Math.round(at.x - 12) && image.y === Math.round(at.y - 16)), 'carrier at its drone point'); }
+  const parcels = log => log.filter(entry => entry === 'f:' + norm(scene.platforms[0].accent) || entry === 'f:' + norm(scene.platforms[1].accent)).length;
+  assert(parcels(office.log) >= 2, 'parcel colours reach the canvas');
+  // No station-only primitives or decorative effects in the office.
+  const STATION_ONLY = ['space', 'hullTop', 'hullSeam', 'wall', 'wallCap', 'grate', 'grateDark', 'rail', 'consoleTop', 'deck-section-overlay', 'deck-window-front', 'deck-window-side',
+    'furnishing-top', 'furnishing-left', 'furnishing-right', 'rack-shelf', 'wall-screen-face', 'vent-top', 'board-top', 'tank-top', 'planter-top', 'plant-leaf', 'crate-top', 'crate-stack-top',
+    'mast-beacon', 'walkway-support', 'hub-top', 'hub-mid', 'hub-stripe-underlay', 'hub-pad', 'hub-pad-ring', 'pod-top', 'chute-top', 'tower-top', 'tower-window', 'observatory-top', 'observatory-grid',
+    'observatory-screen-face', 'telescope-shell', 'telescope-core', 'desk-left', 'desk-right', 'monitor-top', 'chair-seat-top', 'chair-back-top', 'partition-top', 'planning-desk-top',
+    'radar-sweep', 'drone-body', 'drone-wing', 'star-cool', 'star-white', 'plain-star', 'rain-head', 'rain-bright', 'pixie-core', 'nebula-cyan', 'planet-core', 'shuttle-body', 'spark', 'rim-spark',
+    'platform-spark', 'furniture-spark', 'desk-spark', 'aura-spark', 'aura-transparent', 'mast-glow', 'walkway-light-head', 'tower-spark', 'glow-transparent'];
+  const zoomed = await paintWith(officeTheme, { zoom: 3, focus: 'w0' });
+  for (const run of [office, await paintWith(officeTheme, { fx: false }), zoomed])
+    for (const key of STATION_ONLY) assert(!run.used.has(key), key + ' never paints in the office');
+  assert(zoomed.composites.includes('smoothing:false') && zoomed.composites.at(-1) === 'smoothing:true', 'magnified office pixel art is nearest-neighbour, then smoothing is restored');
+  assert(!station.composites.some(value => String(value).startsWith('smoothing')), 'station paint never changes image smoothing');
+  assert(!office.composites.includes('lighter'), 'no additive glow in the office');
+  // Flat warm backdrop and two-tone outlined side faces from semantic colours; functional cues remain.
+  for (const key of ['office-backdrop', 'hullLeft', 'hullRight', 'body-outline', 'contact-shadow', 'drone-shadow', 'envelope-outline', 'focus', 'repo', 'working', 'blocked', 'idle', 'unknown', 'amber', 'cyan'])
+    assert(office.used.has(key), key + ' paints in the office');
+  assert(office.log.includes('f:' + norm(custom.hullLeft)) && office.log.includes('f:' + norm(custom.hullRight)) && office.log.includes('s:' + norm(custom['body-outline'])), 'two-tone faces with outlines');
+  assert(scene.workers.filter(worker => worker.connector).every(worker => office.log.includes('stroke:' + norm(worker.accent) + '|4,4')), 'helper tethers remain');
+  assert((await paintWith(officeTheme, { stale: true })).log.some(entry => entry === 'stroke:' + norm(custom.stale) + '|3,3'), 'the dashed STALE plate remains');
+  // Steady status lamps: each observed status keeps its own colour, identical across animation times.
+  const lamps = run => run.log.filter(entry => ['working', 'blocked', 'idle', 'unknown'].includes(attribute(entry.slice(2)))).sort();
+  const live = [1000, 2600, 7300].map(at => paintWith(officeTheme, { at, reduced: false }));
+  const [first, ...later] = await Promise.all(live);
+  for (const run of later) assert.deepEqual(lamps(run), lamps(first), 'status lamps never blink or fade over time');
+  assert(!first.composites.includes('lighter'), 'no additive glow in a live office');
+  // Wall and corner props keep the hashed station slot and stay inside the reserved wall/corner regions.
+  for (const platform of scene.platforms) platform.decorationRegions.forEach(region => {
+    if (region.kind !== 'wall' && region.kind !== 'corner') return;
+    for (const unit of View.wallUnits(region)) for (const kind of region.kind === 'corner' ? View.CORNER_KINDS : View.WALL_KINDS) {
+      const { role, rect } = View.officeFurnishing(kind, unit, region.edge), r = region.rect;
+      assert(rect.x >= r.x - 1e-9 && rect.y >= r.y - 1e-9 && rect.x + rect.w <= r.x + r.w + 1e-9 && rect.y + rect.h <= r.y + r.h + 1e-9, role + ' fits its reserved region');
+      if (region.kind === 'wall') assert.equal(SCENE_ART_ROLES[role].orientation, region.edge === 'rear-x' ? 'x' : 'y', role + ' matches the wall orientation');
+    }
+  });
+  // Same depth occlusion: each seated worker paints after its chair and before its desk; hits match the station.
+  for (const worker of scene.workers) {
+    const chair = office.events.findIndex((event, index) => event === 'role:' + (worker.kind === 'helper' ? 'helperChair' : 'chair') && office.events.slice(index + 1).includes('body:' + worker.id));
+    const body = office.events.indexOf('body:' + worker.id), desk = office.events.indexOf('role:' + (worker.kind === 'helper' ? 'helperDesk' : 'desk'), body);
+    assert(chair >= 0 && chair < body && body < desk, worker.id + ': chair, body, desk');
+  }
+  assert.deepEqual(office.view.hitRegions(), station.view.hitRegions(), 'hit regions are identical');
+  assert.deepEqual(office.view.camera(), station.view.camera());
+  /* The real sprite engine, with ready review-metadata replacement groups: seated main and helper crew keep the
+     station's seat placement in the office, so their returned extents and every hit region stay identical. */
+  {
+    const { load } = require('./_sprite-runtime');
+    const canonicalCrew = require('../frontend/assets/themes/starnet/theme.json').crew;
+    const runtime = async () => {
+      const sprites = { sprites: {} }, crew = {};
+      for (const [skin, group] of Object.entries(canonicalCrew)) {
+        for (const [track, paths] of Object.entries(group.tracks)) sprites.sprites[group.set + '.' + track] = paths.map(p => p.slice('assets/sprites/'.length));
+        crew[skin] = { ...group, set: 'office_' + skin, tracks: Object.fromEntries(Object.entries(group.tracks).map(([track, paths]) => [track, paths.map(p => p.replace('assets/sprites/', 'assets/themes/office/crew/'))])) };
+      }
+      const rt = await load({ data: { DEFAULT_SKIN: 'blank', SKINS: canonicalCrew }, sprites, initOptions: { crew }, image(img) { img.width = img.height = 144; img.onload(); } });
+      for (const skin of Object.keys(canonicalCrew)) { await rt.SPRITES.ensureSkin(skin); assert.equal(rt.SPRITES.replacementState(skin), 'ready'); }
+      return rt.SPRITES;
+    };
+    const realOffice = await paintWith(officeTheme, { sprites: await runtime() }), realStation = await paintWith(stationTheme, { sprites: await runtime() });
+    const seated = scene.workers.filter(worker => worker.row.status === 'working');
+    assert(seated.some(worker => worker.kind === 'helper') && seated.some(worker => worker.kind !== 'helper'), 'seated main and helper crew are exercised');
+    for (const worker of seated) {
+      const [inOffice, inStation] = [realOffice, realStation].map(run => run.view.hitRegions().find(region => region.id === worker.id));
+      assert(inOffice && inStation, worker.id + ': painted in both arts');
+      assert.equal(inOffice.top, inStation.top, worker.id + ': seated hit top is unchanged in the office');
+      assert.deepEqual(inOffice.head, inStation.head, worker.id + ': seated head anchor is unchanged in the office');
+    }
+    assert.deepEqual(realOffice.view.hitRegions(), realStation.view.hitRegions(), 'real-runtime hit regions are identical');
+  }
+  // Procedural humans (no ready group) keep the same hit-tested bodies.
+  assert.equal((await paintWith(officeTheme, { ready: false })).view.hitRegions().length, scene.workers.length);
+  console.log('office art: all 34 roles at native size and whole pixels, native chairs, carriers at drone points, no station primitives or glow, two-tone outlined faces, steady statuses, depth and hits OK');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Idle tint composes with themed sprite selection and office fallback without leaking into other canvas work.
+(async () => {
+const { SCENE_ART_ROLES } = require('../frontend/app/scene-art-roles.js');
+const assets = Object.fromEntries(Object.keys(SCENE_ART_ROLES).map(role => [role, '/assets/themes/office/scene/' + role.toLowerCase() + '.png']));
+class RoleImage {
+  set src(url) { const role = Object.keys(assets).find(role => assets[role] === url); this.naturalWidth = SCENE_ART_ROLES[role].source.width; this.naturalHeight = SCENE_ART_ROLES[role].source.height; }
+  decode() { return Promise.resolve(); }
+}
+for (const office of [false, true]) {
+  const layout = Model.createLayout();
+  layout.reconcile([{ id: 'aged', projectId: 'p', project: 'P', repoId: 'r', repo: 'R', provider: 'claude', status: 'idle' }]);
+  const scene = Scene.build(layout.onPage(0), 0), node = canvas(1000, 700), stack = [], bodies = [], tintedFills = [];
+  node.ctx.filter = 'none';
+  node.ctx.save = () => stack.push(node.ctx.filter);
+  node.ctx.restore = () => { node.ctx.filter = stack.pop(); };
+  const fill = node.ctx.fill;
+  node.ctx.fill = (...args) => { if (node.ctx.filter === View.idleFilter(1)) tintedFills.push(node.ctx.fillStyle); fill(...args); };
+  const view = View.create({ canvas: node, theme: { scene: { art: { style: office ? 'home-office' : 'station', assets } } }, idleLevel: () => 1,
+    env: { raf: () => 1, caf() {}, now: () => 0, dpr: () => 1, createCanvas: () => canvas(), Image: RoleImage, themeStatus: { reportNotice() {}, reportWarning() {} },
+      sprites: { drawBody(ctx) { bodies.push(ctx.filter); return { top: 0, w: 30, h: 60 }; } } } });
+  for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve));
+  view.start(); view.update(scene, {}); view.focusPlatform(scene.platforms[0].key); view.paint(16);
+  if (office) { assert.equal(bodies.length, 0, 'unready office never substitutes station sprites'); assert(tintedFills.length > 0, 'procedural office body receives idle tint'); }
+  else assert.deepEqual(bodies, [View.idleFilter(1)], 'station sprite receives idle tint');
+  assert.equal(node.ctx.filter, 'none', 'body tint is restored after painting');
+  view.stop();
+}
+})().catch(error => { console.error(error); process.exitCode = 1; });
