@@ -137,7 +137,7 @@ const ObserverScene = (() => {
     // A lead agent with helpers in tow tours the whole deck so its formation can be seen moving.
     const leaders = new Set(workers.filter(worker => worker.kind === 'helper').map(worker => worker.parentId));
     for (const worker of workers) if (worker.home && ((company.get(worker.platformKey + '|' + worker.section) || 0) < 2 || leaders.has(worker.id))) worker.home = null;
-    // The overseer (a Herdr agent named "overseer") takes the observatory chair; the ambient viewer stands down.
+    // The designated overseer takes the observatory chair; the ambient viewer stands down.
     const overseerRow = extras.overseer || null;
     if (overseerRow) {
       observatory.viewer = null; observatory.overseer = overseerRow.id;
@@ -169,7 +169,7 @@ const ObserverScene = (() => {
     const extents = [mail.rect, ...platforms.map(p => p.rect), ...walkways.map(w => w.rect), ...ships.map(ship => ship.rect)].map(rect => ({ rect }))
       .concat(observatory.extents);
     const bounds = projectedBounds(extents);
-    const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.repo)]).sort(),
+    const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.section || b.repo)]).sort(),
       ...(ships.length ? [ships.map(ship => [ship.id, ship.health, ship.rect]), relays.map(relay => [relay.host, relay.state])] : []),
       workers.map(w => [w.id, w.kind, w.parentId, w.chair.x, w.chair.y]).sort()]);
     return { page, revision, platforms, walkways, workers, helperOverflow, observatory, mail, bounds, ...(ships.length ? { ships, links, relays } : {}) };

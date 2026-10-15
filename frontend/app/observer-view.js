@@ -1362,10 +1362,10 @@ const ObserverView = (() => {
       if (key && focusPlatform(key)) onPlatform(key);
     }
     function wheel(event) { event.preventDefault(); zoomBy(Math.exp(-event.deltaY * 0.0015), local(event)); }
-    // Keyboard camera controls only while the canvas itself has focus; text inputs are never intercepted.
+    // Keyboard station controls only while the canvas itself has focus; text inputs are never intercepted.
     function keyDown(event) {
       const step = 48, keys = { ArrowLeft: () => panBy({ x: step, y: 0 }), ArrowRight: () => panBy({ x: -step, y: 0 }), ArrowUp: () => panBy({ x: 0, y: step }),
-        ArrowDown: () => panBy({ x: 0, y: -step }), '+': () => zoomBy(ZOOM_STEP), '=': () => zoomBy(ZOOM_STEP), '-': () => zoomBy(1 / ZOOM_STEP), '0': overview };
+        ArrowDown: () => panBy({ x: 0, y: -step }), '+': () => zoomBy(ZOOM_STEP), '=': () => zoomBy(ZOOM_STEP), '-': () => zoomBy(1 / ZOOM_STEP), '0': overview, o: onObservatory, O: onObservatory };
       if (!keys[event.key] || event.altKey || event.ctrlKey || event.metaKey) return;
       event.preventDefault(); keys[event.key]();
     }

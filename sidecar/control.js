@@ -1,22 +1,24 @@
 'use strict';
 /* sidecar/control.js — the only place the observer mutates anything, and only when OBSERVER_CONTROL=1.
 
-   Three actions, each targeting a Herdr pane id the page already shows:
+   Actions, each targeting a Herdr pane id the page already shows:
      attach(paneId)  open a macOS Terminal window running `herdr agent attach <pane>` (the only action that opens one)
      spawn(paneId)   new tab in that pane's workspace and cwd, start Claude there; no Terminal (the page selects it)
      close(paneId)   close the pane (ends the agent); the page asks the user to confirm first
-     spawnHost(host, cwd) start Claude in a folder on a host (local or remote) even if it has no agents yet
-   Spawned agents run unattended; one stopped at a startup dialog shows as blocked until someone attaches.
-   Every target is validated against the same pane-id shape the reader accepts, and attach/close additionally
-   require Herdr to report an agent in that pane, so an arbitrary pane id cannot be closed through here.
+     spawnHost(host, folder) start Claude in a folder on a configured host even if it has no agents yet
+   Spawned agents run unattended; one stopped at a startup dialog shows as waiting until someone attaches.
+   Every target is validated against the same pane-id shape the reader accepts. Ordinary actions require a fresh
+   private observer proof matched against current Herdr inventory and native agent/pane identities before mutation.
 
    Multi-host: a pane id may be namespaced `host/w1:p1` for a host listed in the config's `remotes`. Herdr then runs
-   on that host over `ssh -o BatchMode=yes <ssh> '<quoted command>'`, and attach opens a Terminal running
-   `ssh -t <ssh> 'herdr agent attach <pane> --takeover'`. Unlisted hosts are refused; every argument that reaches the
-   remote shell is a validated pane id, a validated folder, or a fixed word, and is single-quoted. */
+   on that host over `ssh -o BatchMode=yes <ssh> '<quoted command>'`. The proof for a remote pane is the native pane
+   identity that host's stream last reported (hub receipt time, same 6 s freshness), re-checked against that host's
+   own `agent list` / `agent get` / `pane get` immediately before acting. Unlisted hosts are refused; every argument
+   that reaches a remote shell is a validated pane id, a validated folder, or a fixed word, and is single-quoted. */
 const path = require('node:path');
-const os = require('node:os');
 const fsp = require('node:fs/promises');
+const { stationChildEnv } = require('./child-env.js');
+const { makeOverseerState, defaultOverseerHome, resolveEndpoint } = require('./overseer-state.js');
 const childProcess = require('./child-env.js').guardChildProcess(require('node:child_process'));
 
 const PANE = /^[A-Za-z0-9:_-]{1,100}$/;
@@ -26,6 +28,7 @@ const FOLDER = /^~?[A-Za-z0-9._\/-]{1,200}$/;
 const quote = value => "'" + String(value).replace(/'/g, "'\\''") + "'";
 const SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2'];
 const REMOTE_PATH = 'PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"';
+const remoteEndpoint = host => 'remote:' + host;
 const PROMPT = '➜|\\$ $|% $|> $';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const badRequest = reason => Object.assign(new Error(reason), { status: 400 });
@@ -52,7 +55,7 @@ is to watch, summarise and coordinate the other Claude Code and Codex sessions r
 
 function makeControl(options = {}) {
   const execute = options.execute || ((command, args, settings = {}) => new Promise((resolve, reject) => {
-    childProcess.execFile(command, args, { timeout: settings.timeout || 20000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+    childProcess.execFile(command, args, { timeout: settings.timeout || 20000, maxBuffer: 2 * 1024 * 1024, env: settings.env }, (error, stdout, stderr) => {
       if (error) return reject(Object.assign(error, { stdout, stderr }));
       resolve({ stdout, stderr });
     });
@@ -62,17 +65,21 @@ function makeControl(options = {}) {
   const now = options.now || Date.now;
   const wait = options.sleep || sleep;
   const fs = options.fs || fsp;
-  const overseerHome = options.overseerHome || path.join(os.homedir(), '.local', 'share', 'starnet-observer', 'overseer');
+  const overseerHome = options.overseerHome || defaultOverseerHome();
+  const endpoint = resolveEndpoint(options);
+  const overseerState = options.overseerState || makeOverseerState({ file: path.join(overseerHome, 'identity.json'), endpoint });
+  if (overseerState.endpoint !== undefined && overseerState.endpoint !== endpoint) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+  const run = (command, args, settings = {}) => execute(command, args, { ...settings, env: stationChildEnv(process.env, { HERDR_SOCKET_PATH: endpoint }) });
   // Remote hosts the operator configured. Only these ids are ever reachable; ssh targets were validated by config.
   const remotes = new Map((Array.isArray(options.remotes) ? options.remotes : []).map(remote => [remote.id, remote]));
   const remoteHomes = new Map();
   const remoteOf = host => {
     if (host == null) return null;
     const remote = remotes.get(host);
-    if (!remote || typeof remote.ssh !== 'string' || remote.ssh.startsWith('-')) throw badRequest('unknown-host');
+    if (!remote || typeof remote.ssh !== 'string' || remote.ssh.startsWith('-') || !/^[A-Za-z0-9._@-]+$/.test(remote.ssh)) throw badRequest('unknown-host');
     return remote;
   };
-  // Split a page pane id into its host (null = this machine) and the host's own Herdr pane id.
+  // Split a page pane id into its host (null = this machine) and that host's own Herdr pane id.
   function parseTarget(id) {
     const match = typeof id === 'string' ? TARGET.exec(id) : null;
     if (!match) throw badRequest('invalid-pane');
@@ -80,34 +87,54 @@ function makeControl(options = {}) {
     return { host: match[1] ?? null, paneId: match[2] };
   }
   const shown = (host, paneId) => host ? host + '/' + paneId : paneId;
-  // Run `herdr <args>` locally or, for a remote host, over ssh with every argument single-quoted.
+  // `herdr <args>` locally (pinned to this observer's endpoint) or, for a remote host, over ssh with every argument quoted.
   function runHerdr(host, args, settings) {
     const remote = remoteOf(host);
-    if (!remote) return execute('herdr', args, settings);
-    return execute('ssh', [...SSH_OPTIONS, remote.ssh, REMOTE_PATH + ' herdr ' + args.map(quote).join(' ')], settings);
+    if (!remote) return run('herdr', args, settings);
+    return execute('ssh', [...SSH_OPTIONS, remote.ssh, REMOTE_PATH + ' herdr ' + args.map(quote).join(' ')], { ...settings, env: stationChildEnv(process.env) });
   }
   async function homeOf(host) {
-    if (!host) return os.homedir();
     if (remoteHomes.has(host)) return remoteHomes.get(host);
-    const { stdout } = await execute('ssh', [...SSH_OPTIONS, remoteOf(host).ssh, 'printf %s "$HOME"'], { timeout: 15000 });
+    const { stdout } = await execute('ssh', [...SSH_OPTIONS, remoteOf(host).ssh, 'printf %s "$HOME"'], { timeout: 15000, env: stationChildEnv(process.env) });
     const home = String(stdout).trim();
     if (!/^\/[A-Za-z0-9._\/-]{1,200}$/.test(home)) throw new Error('remote home directory unavailable');
     remoteHomes.set(host, home); return home;
   }
 
   async function herdr(args, timeout, host = null) {
-    const { stdout } = await runHerdr(host, args, { timeout });
+    let stdout;
+    try { ({ stdout } = await runHerdr(host, args, { timeout })); }
+    catch (error) { if (typeof error.stdout !== 'string' || !error.stdout) throw error; stdout = error.stdout; }
     let parsed;
     try { parsed = JSON.parse(stdout); } catch (_) { throw new Error('herdr ' + args.slice(0, 2).join(' ') + ' returned no JSON'); }
-    if (parsed.error) throw new Error(parsed.error.message || ('herdr ' + args.slice(0, 2).join(' ') + ' failed'));
+    if (parsed.error) throw Object.assign(new Error(parsed.error.message || ('herdr ' + args.slice(0, 2).join(' ') + ' failed')), { code: parsed.error.code });
     return parsed.result;
   }
   const validPane = id => typeof id === 'string' && PANE.test(id);
+  const targetUnavailable = () => Object.assign(new Error('target-unavailable'), { status: 409 });
   async function agentIn(paneId, host = null) {
     if (!validPane(paneId)) throw badRequest('invalid-pane');
+    const proof = await options.target?.(shown(host, paneId));
+    if (!proof || proof.endpoint !== (host ? remoteEndpoint(host) : endpoint) || !Number.isFinite(proof.observedAt) || now() - proof.observedAt > 6000 || now() < proof.observedAt) throw targetUnavailable();
+    const matches = native => {
+      if (!native || !['codex', 'claude'].includes(proof.agent) ||
+          ![proof.pane_id, proof.workspace_id, proof.terminal_id].every(value => typeof value === 'string' && PANE.test(value))) return false;
+      return proof.pane_id === paneId && ['pane_id', 'workspace_id', 'terminal_id', 'agent'].every(key => native[key] === proof[key]) &&
+        ['agent', 'kind', 'value'].every(key => (native.agent_session?.[key] ?? null) === (proof.agent_session?.[key] ?? null)) &&
+        (native.foreground_cwd || native.cwd) === (proof.foreground_cwd || proof.cwd);
+    };
+    const inventory = await herdr(['agent', 'list'], 5000, host);
+    const candidates = inventory?.agents?.filter?.(pane => pane?.pane_id === paneId);
+    if (!Array.isArray(candidates) || candidates.length !== 1 || !matches(candidates[0])) throw targetUnavailable();
     const result = await herdr(['agent', 'get', paneId], 5000, host);
-    if (!result || !result.agent) throw badRequest('no-agent-in-pane');
-    return result.agent;
+    if (!matches(result?.agent)) throw targetUnavailable();
+    const got = await herdr(['pane', 'get', paneId], 5000, host);
+    if (!matches(got?.pane) || now() - proof.observedAt > 6000) throw targetUnavailable();
+    // The overseer singleton is this machine's; a remote pane can never be it.
+    if (host) return { agent: result.agent, pane: got.pane };
+    const loaded = await overseerState.read();
+    if (loaded.record?.paneId === paneId && !await overseerState.match(result.agent, loaded)) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+    return { agent: result.agent, pane: got.pane };
   }
   async function openTerminal(paneId, host = null) {
     if (platform !== 'darwin') throw new Error('Opening a terminal is only implemented on macOS');
@@ -115,42 +142,46 @@ function makeControl(options = {}) {
     if (remote) {
       // ssh target and pane id are validated ([A-Za-z0-9._@-] and [A-Za-z0-9:_-]): no quote or backslash can reach
       // the AppleScript literal or either shell. The single quotes keep $HOME/$PATH for the remote shell.
-      if (!validPane(paneId) || !/^[A-Za-z0-9._@-]+$/.test(remote.ssh)) throw badRequest('invalid-pane');
+      if (!validPane(paneId)) throw badRequest('invalid-pane');
       const script = 'tell application "Terminal"\nlaunch\ndo script "ssh -t ' + remote.ssh + " 'PATH=$HOME/.local/bin:$PATH herdr agent attach " + paneId + " --takeover'\"\nactivate\nend tell";
-      await execute('osascript', ['-e', script], { timeout: 10000 });
+      await execute('osascript', ['-e', script], { timeout: 10000, env: stationChildEnv(process.env) });
       return;
     }
     // paneId is validated to [A-Za-z0-9:_-], so it is safe inside the AppleScript string literal.
     // `launch` starts Terminal without its default window if it was not running; `do script` then makes exactly one
     // window. `--takeover` replaces whatever client currently owns input (for example the wrapper's VS Code attach),
     // because the point of the button is to put this agent in front of the user now.
-    const script = 'tell application "Terminal"\nlaunch\ndo script "herdr agent attach ' + paneId + ' --takeover"\nactivate\nend tell';
-    await execute('osascript', ['-e', script], { timeout: 10000 });
+    const shellQuote = value => "'" + value.replace(/'/g, "'\\''") + "'";
+    const attachCommand = 'env HERDR_SOCKET_PATH=' + shellQuote(endpoint) + ' herdr agent attach ' + paneId + ' --takeover';
+    const script = 'tell application \"Terminal\"\nlaunch\ndo script ' + JSON.stringify(attachCommand) + '\nactivate\nend tell';
+    await run('osascript', ['-e', script], { timeout: 10000 });
   }
 
   async function attach(id) {
     const { host, paneId } = parseTarget(id);
-    const agent = await agentIn(paneId, host);
+    const { agent } = await agentIn(paneId, host);
     await openTerminal(paneId, host);
     return { ok: true, action: 'attach', paneId: shown(host, paneId), name: agent.name || null };
   }
   const agentName = cwd => ((path.posix.basename(cwd) || 'agent').replace(/[^A-Za-z0-9_-]/g, '-')) + '-' + new Date(now()).toTimeString().slice(0, 8).replace(/:/g, '');
   async function spawn(id) {
     const { host, paneId } = parseTarget(id);
-    const got = await herdr(['pane', 'get', paneId], 5000, host), pane = got && got.pane;
-    if (!pane || typeof pane.cwd !== 'string' || !pane.cwd || typeof pane.workspace_id !== 'string') throw new Error('pane has no cwd or workspace');
-    const name = agentName(pane.cwd);
-    const created = await herdr(['tab', 'create', '--workspace', pane.workspace_id, '--cwd', pane.cwd, '--label', name, '--no-focus'], 10000, host);
+    const { pane } = await agentIn(paneId, host);
+    const cwd = pane.foreground_cwd || pane.cwd;
+    if (typeof cwd !== 'string' || !path.posix.isAbsolute(cwd) || cwd.length > 4096) throw targetUnavailable();
+    const name = agentName(cwd);
+    const created = await herdr(['tab', 'create', '--workspace', pane.workspace_id, '--cwd', cwd, '--label', name, '--no-focus'], 10000, host);
     const target = created && created.root_pane && created.root_pane.pane_id;
     if (!validPane(target)) throw new Error('tab create returned no pane');
     await startIn(target, name, host);
-    return { ok: true, action: 'spawn', paneId: shown(host, target), name, project: path.posix.basename(pane.cwd) };
+    return { ok: true, action: 'spawn', paneId: shown(host, target), name, project: path.posix.basename(cwd) };
   }
-  /* Start Claude in a folder on any configured host, even one with no agents yet. The folder is home unless the page
-     names one (validated; `~` means that host's home). Reuses the Herdr workspace labelled after the folder, as the
-     claude wrapper does, else creates it. */
+  /* Start Claude in a folder on a configured remote host, even one with no agents yet. The folder is that host's home
+     unless the page names one (validated; `~` means that host's home). Reuses the Herdr workspace labelled after the
+     folder, as the claude wrapper does, else creates it. There is no target pane, so there is no pane proof to check:
+     the host must be configured and every argument is validated and quoted. */
   async function spawnHost(host, folder) {
-    if (host !== null && (typeof host !== 'string' || !host)) throw badRequest('unknown-host');
+    if (typeof host !== 'string' || !host) throw badRequest('unknown-host');
     remoteOf(host);
     if (folder != null && (typeof folder !== 'string' || !FOLDER.test(folder) || folder.split('/').includes('..') || (!folder.startsWith('/') && !folder.startsWith('~')))) throw badRequest('invalid-folder');
     const home = await homeOf(host);
@@ -160,7 +191,7 @@ function makeControl(options = {}) {
     const name = agentName(cwd);
     let workspaces = [];
     try { workspaces = (await herdr(['workspace', 'list'], 5000, host))?.workspaces || []; } catch (_) { workspaces = []; }
-    const existing = workspaces.find(workspace => workspace && workspace.label === label && typeof workspace.workspace_id === 'string');
+    const existing = workspaces.find(workspace => workspace && workspace.label === label && typeof workspace.workspace_id === 'string' && PANE.test(workspace.workspace_id));
     const created = existing ? await herdr(['tab', 'create', '--workspace', existing.workspace_id, '--cwd', cwd, '--label', name, '--no-focus'], 10000, host)
       : await herdr(['workspace', 'create', '--cwd', cwd, '--label', label, '--no-focus'], 10000, host);
     const target = created && created.root_pane && created.root_pane.pane_id;
@@ -168,8 +199,7 @@ function makeControl(options = {}) {
     await startIn(target, name, host);
     return { ok: true, action: 'spawn-host', host, paneId: shown(host, target), name, folder: cwd };
   }
-  // Start Claude in that pane, tolerating a startup dialog (trust folder, resume picker), which makes `agent start`
-  // report an error while the agent exists. The new shell may still be loading rc files: wait for a prompt first.
+  // Start Claude in that pane, tolerating a startup dialog the same way spawn does.
   async function startIn(target, name, host = null) {
     try { await runHerdr(host, ['pane', 'wait-output', '--regex', PROMPT, target, '--timeout', '15000'], { timeout: 20000 }); } catch (_) { /* start anyway */ }
     const startArgs = ['agent', 'start', name, '--kind', 'claude', '--pane', target, '--timeout', '60000'];
@@ -177,30 +207,55 @@ function makeControl(options = {}) {
     let started = false, lastError = null;
     for (let attempt = 0; attempt < 3 && !started; attempt++) {
       try { await herdr(startArgs, 70000, host); started = true; }
-      catch (error) { lastError = error; try { await herdr(['agent', 'get', target], 5000, host); started = true; } catch (_) { await wait(1000); } }
+      catch (error) { lastError = error; try { const found = await herdr(['agent', 'get', target], 5000, host); if (!found?.agent) throw new Error('no-agent-in-pane'); started = true; } catch (_) { await wait(1000); } }
     }
     if (!started) throw new Error('Claude did not start in ' + shown(host, target) + (lastError ? ': ' + lastError.message : ''));
   }
-  // The overseer: one Herdr agent named "overseer", in its own folder with a brief, seated in the observatory.
+  // Only our persisted launch proof identifies the singleton; labels are display text.
   async function overseer() {
-    let existing = null;
-    try { existing = (await herdr(['agent', 'get', 'overseer'], 5000)).agent; } catch (_) { existing = null; }
-    if (existing) throw Object.assign(new Error('overseer-exists'), { status: 409, paneId: existing.pane_id });
-    await fs.mkdir(overseerHome, { recursive: true });
-    const brief = path.join(overseerHome, 'CLAUDE.md');
-    try { await fs.access(brief); } catch (_) { await fs.writeFile(brief, OVERSEER_BRIEF); }
-    const created = await herdr(['workspace', 'create', '--cwd', overseerHome, '--label', 'overseer', '--no-focus'], 10000);
-    const target = created && created.root_pane && created.root_pane.pane_id;
-    if (!validPane(target)) throw new Error('workspace create returned no pane');
-    await startIn(target, 'overseer');
-    return { ok: true, action: 'overseer', paneId: target, name: 'overseer', home: overseerHome };
+    const loaded = await overseerState.read();
+    if (['committed', 'reserved'].includes(loaded.state) && loaded.record.paneId) {
+      const inventory = await herdr(['agent', 'list'], 5000);
+      if (!Array.isArray(inventory?.agents)) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+      const live = inventory.agents.find(pane => pane.pane_id === loaded.record.paneId);
+      if (live && await overseerState.match(live, loaded)) throw Object.assign(new Error('overseer-exists'), { status: 409, paneId: live.pane_id });
+      if (live) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+      // Agent inventory alone cannot prove the pane is gone (startup dialogs may hide agents).
+      let missing = false;
+      try { await herdr(['pane', 'get', loaded.record.paneId], 5000); }
+      catch (error) { if (error.code === 'pane_not_found') missing = true; }
+      if (!missing || !await overseerState.releaseMissing([], loaded)) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+    }
+    const owner = await overseerState.reserve();
+    let committed = false;
+    try {
+      await fs.mkdir(overseerHome, { recursive: true, mode: 0o700 });
+      const brief = path.join(overseerHome, 'CLAUDE.md');
+      try { await fs.access(brief); } catch (_) { await fs.writeFile(brief, OVERSEER_BRIEF); }
+      const created = await herdr(['workspace', 'create', '--cwd', overseerHome, '--label', 'overseer', '--no-focus'], 10000);
+      const target = created && created.root_pane && created.root_pane.pane_id;
+      if (!validPane(target)) throw new Error('workspace create returned no pane');
+      await overseerState.notePane(owner, target);
+      await startIn(target, 'overseer');
+      const result = await herdr(['agent', 'get', target], 5000);
+      const got = await herdr(['pane', 'get', target], 5000);
+      const agent = result?.agent, pane = got?.pane;
+      if (!agent || !pane || agent.pane_id !== target || pane.pane_id !== target || agent.agent !== 'claude' ||
+          agent.workspace_id !== pane.workspace_id || agent.terminal_id !== pane.terminal_id) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
+      await overseerState.commit(owner, agent);
+      committed = true;
+      return { ok: true, action: 'overseer', paneId: target, name: 'overseer', home: overseerHome };
+    } catch (error) {
+      if (!committed) { try { await overseerState.abandon(owner); } catch (_) { /* uncertain ownership stays blocked */ } }
+      throw error;
+    }
   }
   async function close(id) {
     const { host, paneId } = parseTarget(id);
-    const agent = await agentIn(paneId, host);
+    const { agent } = await agentIn(paneId, host);
     await herdr(['pane', 'close', paneId], 10000, host);
     return { ok: true, action: 'close', paneId: shown(host, paneId), name: agent.name || null };
   }
   return { attach, spawn, spawnHost, close, overseer, hosts: () => [...remotes.keys()] };
 }
-module.exports = { makeControl, PANE, TARGET, FOLDER, quote };
+module.exports = { makeControl, PANE, TARGET, FOLDER, quote, remoteEndpoint };

@@ -11,7 +11,7 @@ const childProcess = require('./child-env.js').guardChildProcess(require('node:c
 const { aggregateRows } = require('./observer.js');
 const { unavailable } = require('./observer-inspector.js');
 
-const MAX_LINE = 4 * 1024 * 1024, MAX_ROWS = 512, FRESH_MS = 10000, BACKOFF = [2000, 5000, 10000, 30000, 60000];
+const MAX_LINE = 4 * 1024 * 1024, MAX_ROWS = 512, FRESH_MS = 10000, CONTROL_FRESH_MS = 6000, BACKOFF = [2000, 5000, 10000, 30000, 60000];
 const ID = /^obs_[a-f0-9]{24}$/, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const STATUSES = new Set(['working', 'blocked', 'idle', 'done', 'unknown']), PROVIDERS = new Set(['claude', 'codex']);
 const SOURCES = new Set(['herdr', 'helper']), HEALTH = new Set(['available', 'unavailable']);
@@ -92,7 +92,27 @@ function sanitizeSnapshot(host, value, receivedAt) {
   // A helper whose parent did not survive sanitising would be an orphan: drop it rather than guess a parent.
   const ids = new Set(rows.map(row => row.id));
   const kept = rows.filter(row => !Object.hasOwn(row, 'parentId') || row.parentId && ids.has(row.parentId));
-  return { rows: kept, bus: sanitizeBus(host, value.bus, new Set(kept.map(row => row.id)), receivedAt) };
+  return { rows: kept, bus: sanitizeBus(host, value.bus, new Set(kept.map(row => row.id)), receivedAt), targets: sanitizeTargets(value.targets, kept) };
+}
+
+/* Native pane proofs a remote published for control: only the identity fields the local control matches, each
+   shape-checked, and only for panes that also survived as rows of that host. Never shown to the browser. */
+const PANE = /^[A-Za-z0-9:_-]{1,100}$/;
+const pathText = value => typeof value === 'string' && value.startsWith('/') && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value) ? value : null;
+function sanitizeTargets(targets, rows) {
+  const panes = new Set(rows.filter(row => row.source === 'herdr' && row.paneId).map(row => row.paneId.slice(row.paneId.indexOf('/') + 1)));
+  const result = new Map();
+  if (!Array.isArray(targets)) return result;
+  for (const pane of targets.slice(0, MAX_ROWS)) {
+    if (!pane || typeof pane !== 'object' || !PROVIDERS.has(pane.agent) || ![pane.pane_id, pane.workspace_id, pane.terminal_id].every(value => typeof value === 'string' && PANE.test(value))) continue;
+    if (!panes.has(pane.pane_id) || result.has(pane.pane_id)) continue;
+    const session = pane.agent_session && typeof pane.agent_session === 'object' ? { agent: oneOf(pane.agent_session.agent, PROVIDERS),
+      kind: word(pane.agent_session.kind, 20), value: typeof pane.agent_session.value === 'string' && UUID.test(pane.agent_session.value) ? pane.agent_session.value : null } : null;
+    if (pane.agent_session && (!session.agent || !session.kind || !session.value)) continue;   // unproven native session: no proof
+    result.set(pane.pane_id, { pane_id: pane.pane_id, workspace_id: pane.workspace_id, terminal_id: pane.terminal_id, agent: pane.agent,
+      agent_session: session, cwd: pathText(pane.cwd), foreground_cwd: pathText(pane.foreground_cwd) });
+  }
+  return result;
 }
 
 /* A remote host's own llm-bus, as its observer published it (publicBus shape). Each host's bus stands alone: message
@@ -149,7 +169,7 @@ function reasonFrom(stderr, code) {
 }
 
 function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
-  const hosts = remotes.map(remote => ({ remote, child: null, rows: [], bus: null, receivedAt: null, reason: 'Connecting', failures: 0, timer: null, connected: false }));
+  const hosts = remotes.map(remote => ({ remote, child: null, rows: [], bus: null, targets: new Map(), receivedAt: null, reason: 'Connecting', failures: 0, timer: null, connected: false }));
   let closed = false;
   function connect(host) {
     if (closed) return;
@@ -170,7 +190,7 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
         try {
           const receivedAt = now();
           const snap = sanitizeSnapshot(host.remote.id, JSON.parse(line), receivedAt);
-          host.rows = snap.rows; host.bus = snap.bus;
+          host.rows = snap.rows; host.bus = snap.bus; host.targets = snap.targets;
           host.receivedAt = receivedAt; host.reason = null; host.failures = 0; host.connected = true;
         } catch (_) { host.reason = 'Remote sent an unreadable snapshot'; }
       }
@@ -218,7 +238,14 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
       if (host.child) { const child = host.child; host.child = null; try { child.stdin?.end(); child.kill('SIGTERM'); } catch (_) {} }
     }
   }
-  return { snapshot, close, ids: () => hosts.map(host => host.remote.id) };
+  // Control proof for `host`'s pane, stamped with the hub's receipt time; control re-checks it on that host over ssh.
+  function controlTarget(hostId, paneId) {
+    const host = hosts.find(value => value.remote.id === hostId);
+    if (closed || !host || host.receivedAt === null || now() - host.receivedAt > CONTROL_FRESH_MS || now() < host.receivedAt) return null;
+    const proof = host.targets.get(paneId);
+    return proof ? { ...structuredClone(proof), endpoint: 'remote:' + hostId, observedAt: host.receivedAt } : null;
+  }
+  return { snapshot, close, controlTarget, ids: () => hosts.map(host => host.remote.id) };
 }
 
 /* The hub's observer: the local snapshot plus every remote's rows. Local rows carry host: null. Aggregates are
@@ -238,7 +265,13 @@ function makeFederatedObserver(local, remoteHosts, now = Date.now) {
     if (remoteHosts.snapshot().rows.some(row => row.id === id)) return unavailable(id, 'remote-inspect', now());
     return local.inspect(id, expectedIdentity);
   }
-  return { get, inspect, inspectMessage: (id, expectedIdentity) => local.inspectMessage(id, expectedIdentity), close: async () => { remoteHosts.close(); await local.close?.(); } };
+  // `host/pane` ids resolve to that remote's streamed proof; plain ids are this machine's, as before.
+  function controlTarget(id) {
+    const slash = typeof id === 'string' ? id.indexOf('/') : -1;
+    if (slash < 0) return local.controlTarget?.(id) ?? null;
+    return remoteHosts.controlTarget?.(id.slice(0, slash), id.slice(slash + 1)) ?? null;
+  }
+  return { get, inspect, controlTarget, inspectMessage: (id, expectedIdentity) => local.inspectMessage(id, expectedIdentity), close: async () => { remoteHosts.close(); await local.close?.(); } };
 }
 
-module.exports = { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sanitizeBus, relayObserved, sshArgs, remoteCommand, reasonFrom, MAX_LINE, FRESH_MS, BACKOFF };
+module.exports = { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sanitizeBus, sanitizeTargets, CONTROL_FRESH_MS, relayObserved, sshArgs, remoteCommand, reasonFrom, MAX_LINE, FRESH_MS, BACKOFF };

@@ -9,13 +9,22 @@ const { makePresentationObserver } = require('./sidecar/presentation.js');
 const { redact, setKnownSecretSource } = require('./sidecar/redaction.js');
 const { setClock } = require('./sidecar/failopen.js');
 const { loadConfig, HELP } = require('./sidecar/config.js');
-const { makeControl, TARGET } = require('./sidecar/control.js');
+const { makeOverseerState, resolveEndpoint } = require('./sidecar/overseer-state.js');
+const { makeControl, PANE, TARGET } = require('./sidecar/control.js');
 const { makeRemoteHosts, makeFederatedObserver } = require('./sidecar/observer-remotes.js');
 const ROOT = path.join(__dirname, 'frontend');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.woff2': 'font/woff2' };
 const SESSION_IDENTITY = /^(?:(?:codex|claude):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|(?:helper:)?obs_[a-f0-9]{24})(?:\|obs_[a-f0-9]{24})?$/i;
 
 function createServer({ observer = makeObserver({ now: Date.now }), token = crypto.randomBytes(32).toString('hex'), theme = {}, control = null } = {}) {
+  const presentation = observer.presentation === true;
+  const safePane = value => typeof value === 'string' && PANE.test(value) ? value : undefined;
+  const publicErrors = new Set(['invalid-pane', 'target-unavailable', 'overseer-unavailable', 'overseer-exists']);
+  function controlResult(action, result, error) {
+    if (!presentation) return redact(error ? { error: String(error.message), paneId: safePane(error.paneId) } : result);
+    if (error) return { error: publicErrors.has(error.message) ? error.message : 'control-unavailable', paneId: error.message === 'overseer-exists' ? safePane(error.paneId) : undefined };
+    return { ok: result?.ok === true, action, paneId: safePane(result?.paneId) };
+  }
   const server = http.createServer(async (req, res) => {
     const port = server.address()?.port;
     const hosts = new Set(['127.0.0.1:' + port, 'localhost:' + port]);
@@ -34,15 +43,20 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
     if (action) {
       if (!authorized()) return json(403, { error: 'Observer token required; reload the page' });
       if (!/^application\/json\b/.test(String(req.headers['content-type'] || ''))) return json(400, { error: 'JSON body required' });
-      let raw = '';
-      try { for await (const chunk of req) { raw += chunk; if (raw.length > 4096) return json(413, { error: 'Body too large' }); } } catch (_) { return json(400, { error: 'Body unreadable' }); }
-      let body; try { body = JSON.parse(raw || '{}'); } catch (_) { return json(400, { error: 'Invalid JSON' }); }
+      let chunks = [], bytes = 0;
+      try { for await (const chunk of req) { bytes += chunk.length; if (bytes > 4096) return json(413, { error: 'Body too large' }); chunks.push(chunk); } } catch (_) { return json(400, { error: 'Body unreadable' }); }
+      let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch (_) { return json(400, { error: 'Invalid JSON' }); }
       if (!body || typeof body !== 'object' || Array.isArray(body)) return json(400, { error: 'JSON object required' });
       // Pane ids may be host-namespaced (`herdr-dev-2/w1:p1`); control refuses hosts that are not configured remotes.
       if (!['overseer', 'spawn-host'].includes(action[1]) && (typeof body.paneId !== 'string' || !TARGET.test(body.paneId))) return json(400, { error: 'paneId required' });
-      if (action[1] === 'spawn-host' && (body.host !== null && typeof body.host !== 'string' || body.folder !== undefined && body.folder !== null && typeof body.folder !== 'string')) return json(400, { error: 'host and folder must be strings' });
-      try { return json(200, action[1] === 'overseer' ? await control.overseer() : action[1] === 'spawn-host' ? await control.spawnHost(body.host ?? null, body.folder ?? null) : await control[action[1]](body.paneId)); }
-      catch (error) { const status = Number.isInteger(error.status) ? error.status : 500; if (status >= 500) console.warn('[observer control]', redact(String(error.message))); return json(status, { error: redact(String(error.message)), paneId: typeof error.paneId === 'string' ? error.paneId : undefined }); }
+      if (action[1] === 'spawn-host' && (typeof body.host !== 'string' || body.folder !== undefined && body.folder !== null && typeof body.folder !== 'string')) return json(400, { error: 'host and folder must be strings' });
+      // Presentation masks host identities, so remote control (which would echo them) is unavailable there.
+      if (presentation && (action[1] === 'spawn-host' || typeof body.paneId === 'string' && !PANE.test(body.paneId))) return json(403, controlResult(action[1], null, new Error('control-unavailable')));
+      try {
+        const result = action[1] === 'overseer' ? await control.overseer() : action[1] === 'spawn-host' ? await control.spawnHost(body.host, body.folder ?? null) : await control[action[1]](body.paneId);
+        return json(200, controlResult(action[1], result));
+      }
+      catch (thrown) { const error = thrown instanceof Error ? thrown : new Error(String(thrown)); const status = Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 500; if (status >= 500) console.warn('[observer control]', presentation ? controlResult(action[1], null, error).error : redact(String(error.message))); return json(status, controlResult(action[1], null, error)); }
     }
     try {
       const url = new URL(req.url, 'http://' + req.headers.host);
@@ -131,10 +145,12 @@ if (require.main === module) {
   const heldSecrets = () => Object.entries(process.env).filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY/i.test(name)).map(([, value]) => value);
   setKnownSecretSource(heldSecrets);
   setClock(Date.now);
-  const local = makeObserver({ now: Date.now, warmDetails: !config.presentation });
+  const endpoint = resolveEndpoint({});
+  const overseerState = makeOverseerState({ endpoint });
+  const local = makeObserver({ now: Date.now, warmDetails: !config.presentation, endpoint, overseerState });
   const remoteHosts = config.remotes.length ? makeRemoteHosts({ remotes: config.remotes, now: Date.now }) : null;
   const observer = remoteHosts ? makeFederatedObserver(local, remoteHosts, Date.now) : local;
-  const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean), remotes: config.remotes }) : null;
+  const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ endpoint, overseerState, target: paneId => observer.controlTarget(paneId), remotes: config.remotes, claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean) }) : null;
   const server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme, control });
   server.on('error', error => { console.error('[observer]', redact(String(error.message))); process.exitCode = 1; });
   server.listen(port, '127.0.0.1', () => console.log('Local Observer: http://127.0.0.1:' + port + '\nPrivate labels: ' + (config.presentation ? 'on (' + config.labels.company + ')' : 'off') + (control ? '\nControl actions: on (OBSERVER_CONTROL=1): attach, spawn and close Herdr agents from the page.' : '\nRead only.') +

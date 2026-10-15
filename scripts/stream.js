@@ -8,6 +8,9 @@ const { setKnownSecretSource } = require('../sidecar/redaction.js');
 const { setClock } = require('../sidecar/failopen.js');
 
 const INTERVAL = 2000, MAX_LINE = 4 * 1024 * 1024;
+const nativeProof = pane => ({ pane_id: pane.pane_id, workspace_id: pane.workspace_id, terminal_id: pane.terminal_id, agent: pane.agent,
+  agent_session: pane.agent_session ? { agent: pane.agent_session.agent ?? null, kind: pane.agent_session.kind ?? null, value: pane.agent_session.value ?? null } : null,
+  cwd: pane.cwd ?? null, foreground_cwd: pane.foreground_cwd ?? null });
 
 function startStream({ observer, write, interval = INTERVAL, setTimer = setTimeout, clearTimer = clearTimeout, onError = () => {} }) {
   let timer = null, stopped = false;
@@ -15,7 +18,16 @@ function startStream({ observer, write, interval = INTERVAL, setTimer = setTimeo
     timer = null;
     if (stopped) return;
     try {
-      const line = JSON.stringify(await observer.get());
+      const snapshot = await observer.get();
+      // Control proof for the hub: each live pane's native Herdr identity, the same fields the local control checks
+      // (no titles or other display text). The hub re-verifies them over ssh before any action.
+      const targets = [];
+      for (const row of snapshot.sessions || []) {
+        if (row.source !== 'herdr' || typeof row.paneId !== 'string') continue;
+        const proof = observer.controlTarget?.(row.paneId);
+        if (proof) targets.push(nativeProof(proof));
+      }
+      const line = JSON.stringify(targets.length ? { ...snapshot, targets } : snapshot);
       // An oversized line would be dropped by the hub anyway; send a bounded, truthful unavailable snapshot instead.
       if (stopped) return;
       // write() resolves once the line has been handed to the pipe, so a line is never held back behind the next one.
@@ -44,4 +56,4 @@ if (require.main === module) {
   process.stdin.on('end', exit); process.stdin.on('close', exit); process.stdin.resume();
   for (const signal of ['SIGTERM', 'SIGHUP', 'SIGPIPE', 'SIGINT']) process.once(signal, exit);
 }
-module.exports = { startStream, INTERVAL, MAX_LINE };
+module.exports = { startStream, nativeProof, INTERVAL, MAX_LINE };
