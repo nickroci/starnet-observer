@@ -2,16 +2,17 @@
 const assert = require('node:assert/strict');
 const { load } = require('./_sprite-runtime');
 const canonical = require('../frontend/assets/themes/starnet/theme.json').crew.blank;
-function setup({ fail, delay, set = 'people', decode = false } = {}) {
+function setup({ fail, delay, delayCanonical, set = 'people', decode = false } = {}) {
   const group = { ...canonical, set, tracks: Object.fromEntries(Object.entries(canonical.tracks).map(([key, paths]) => [key, paths.map(p => p.replace('assets/sprites/approved_android/', 'assets/themes/synthetic/people/'))])) };
   const sprites = { sprites: Object.fromEntries(Object.entries(canonical.tracks).map(([key, paths]) => [canonical.set + '.' + key, paths.map(p => p.slice('assets/sprites/'.length))])) };
-  const warnings = [], requested = [], pending = [];
+  const warnings = [], requested = [], pending = [], canonicalPending = [];
   const data = { DEFAULT_SKIN: 'blank', SKINS: { blank: canonical } };
-  return { warnings, requested, pending, group, runtime: load({ data, sprites, waitForSkin: false, initOptions: { crew: { blank: group }, onDegraded: warning => warnings.push(warning) }, image(img, value) {
+  return { warnings, requested, pending, canonicalPending, group, runtime: load({ data, sprites, waitForSkin: false, initOptions: { crew: { blank: group }, onDegraded: warning => warnings.push(warning) }, image(img, value) {
     requested.push(value); img.width = img.height = 144;
     if (decode && value.includes('synthetic') && value.endsWith('type_north_4.png')) img.decode = () => new Promise(resolve => pending.push(resolve));
     const finish = () => { if (value.includes('synthetic') && value.endsWith(fail?.path || '\0')) { if (fail.reason === 'image-load') return img.onerror(); img.width = 143; } img.onload(); };
-    if (value.includes('synthetic') && value.endsWith(delay || '\0')) pending.push(finish); else finish();
+    if (!value.includes('synthetic') && value.endsWith(delayCanonical || '\0')) canonicalPending.push(finish);
+    else if (value.includes('synthetic') && value.endsWith(delay || '\0')) pending.push(finish); else finish();
   } }) };
 }
 function draw(rt, group, overrides) {
@@ -62,6 +63,41 @@ function draw(rt, group, overrides) {
     await fallback.SPRITES.ensureSkin('blank');
     assert.equal(failed.requested.length, count);
   }
+  const heldFallback = setup({ delayCanonical: 'walk_east_3.png', delay: 'type_north_4.png' });
+  const replacementReady = await heldFallback.runtime;
+  const replacementJob = replacementReady.SPRITES.ensureSkin('blank');
+  let replacementSettled = false;
+  replacementJob.then(() => { replacementSettled = true; });
+  assert.equal(replacementReady.SPRITES.ready, true);
+  assert.equal(replacementReady.SPRITES.replacementState('blank'), 'loading');
+  assert.equal(heldFallback.canonicalPending.length, 1);
+  assert.equal(heldFallback.pending.length, 1);
+  assert.strictEqual(replacementReady.SPRITES.ensureSkin('blank'), replacementJob);
+  assert.match(draw(replacementReady).source, /assets\/sprites\/approved_android/);
+  heldFallback.pending[0]();
+  await new Promise(setImmediate);
+  assert.equal(replacementReady.SPRITES.replacementState('blank'), 'ready');
+  assert.equal(replacementSettled, true, 'ready replacement must settle without the pending canonical walk frame');
+  assert.equal(await replacementJob, true);
+  assert.strictEqual(replacementReady.SPRITES.ensureSkin('blank'), replacementJob);
+  assert.match(draw(replacementReady).source, /synthetic\/people/);
+  heldFallback.canonicalPending[0]();
+  await new Promise(setImmediate);
+
+  const failedWithHeldFallback = setup({ delayCanonical: 'walk_east_3.png', fail: { reason: 'image-load', path: 'type_north_4.png' } });
+  const fallbackPending = await failedWithHeldFallback.runtime;
+  const fallbackJob = fallbackPending.SPRITES.ensureSkin('blank');
+  let fallbackSettled = false;
+  fallbackJob.then(() => { fallbackSettled = true; });
+  await new Promise(setImmediate);
+  assert.equal(fallbackPending.SPRITES.replacementState('blank'), 'failed');
+  assert.equal(failedWithHeldFallback.canonicalPending.length, 1);
+  assert.equal(fallbackSettled, false, 'failed replacement must still wait for canonical fallback completion');
+  assert.strictEqual(fallbackPending.SPRITES.ensureSkin('blank'), fallbackJob);
+  failedWithHeldFallback.canonicalPending[0]();
+  assert.equal(await fallbackJob, true);
+  assert.match(draw(fallbackPending, undefined, { state: 'walk', dir: 'east', odo: 4 }).source, /assets\/sprites\/approved_android/);
+
   const decoded = setup({ decode: true, set: canonical.set }), decoding = await decoded.runtime;
   assert.equal(decoding.SPRITES.replacementState('blank'), 'loading');
   decoded.pending[0]();

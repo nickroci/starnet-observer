@@ -903,7 +903,8 @@ const SPRITES = (() => {
     const replacement = replacements[skin];
     if (!replacement) return fallback;
     if (!replacement.ensureJob) {
-      replacement.ensureJob = Promise.all([fallback, replacement.job]).then(([ok]) => ok || replacement.state === 'ready');
+      // A complete replacement can paint even while unrelated canonical frames are still loading.
+      replacement.ensureJob = replacement.job.then(ok => ok || fallback);
     }
     return replacement.ensureJob;
   }
