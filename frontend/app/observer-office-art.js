@@ -86,10 +86,11 @@ const ObserverOfficeArt = (() => {
        legs, inside the existing fallback bounds (16 px wide, crewHeight tall, scaled by the worker size) so hit
        regions and plates never move. */
     function human(ctx, foot, { size = 1, sitting = false, accent = C['viewer-body'], skin = 'blank' } = {}) {
-      const h = crewHeight * size, w = 16 * size, head = 4.5 * size, hip = foot.y - h * (sitting ? 0.34 : 0.46), shoulder = foot.y - h * (sitting ? 0.62 : 0.74);
+      const h = crewHeight * size, w = 16 * size, head = 4.5 * size, hip = foot.y - h * (sitting ? 0.56 : 0.46), shoulder = foot.y - h * (sitting ? 0.78 : 0.74);
       ctx.save(); ctx.strokeStyle = C['body-outline']; ctx.lineWidth = 1;
       ctx.fillStyle = C['viewer-body'];
-      if (sitting) ctx.fillRect(foot.x - w * 0.3, hip, w * 0.6, h * 0.12);
+      // Seated hips sit at the office chair role's cushion height (extent 0.9 of crew height ~ 0.56); shins drop to its foot ring.
+      if (sitting) { ctx.fillRect(foot.x - w * 0.3, hip, w * 0.6, h * 0.12); ctx.fillRect(foot.x - w * 0.26, hip, w * 0.18, h * 0.14); ctx.fillRect(foot.x + w * 0.08, hip, w * 0.18, h * 0.14); }
       else { ctx.fillRect(foot.x - w * 0.28, hip, w * 0.22, foot.y - hip); ctx.fillRect(foot.x + w * 0.06, hip, w * 0.22, foot.y - hip); }
       ctx.beginPath(); ctx.moveTo(foot.x - w * 0.42, hip); ctx.lineTo(foot.x - w * 0.36, shoulder); ctx.lineTo(foot.x + w * 0.36, shoulder); ctx.lineTo(foot.x + w * 0.42, hip); ctx.closePath();
       ctx.fillStyle = accent; ctx.fill(); ctx.stroke();

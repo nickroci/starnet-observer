@@ -946,7 +946,7 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   }
   // Recording context: colours, composite modes, role images (with their exact draw rectangles) and crew bodies, in order.
   function recorder() {
-    const log = [], images = [], events = [], composites = [], bodies = [];
+    const log = [], images = [], events = [], composites = [];
     let dash = [];
     const target = { measureText: text => ({ width: String(text).length * 7 }), setLineDash: value => { dash = value; },
       createRadialGradient: () => ({ addColorStop: (offset, color) => log.push('stop:' + norm(color)) }),
@@ -957,7 +957,7 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
       if (key === 'globalCompositeOperation') composites.push(value);
       if (key === 'imageSmoothingEnabled') composites.push('smoothing:' + value);
       t[key] = value; return true; } });
-    return { ctx, log, images, events, composites, bodies };
+    return { ctx, log, images, events, composites };
   }
   const statuses = ['working', 'blocked', 'idle', 'done', 'unknown', 'working'];
   const rows = Array.from({ length: 24 }, (_, i) => ({ id: 'w' + i, project: 'P' + (i % 8), projectId: 'p' + (i % 8), projectKind: 'group', repo: i % 16 < 8 ? 'api' : 'web',
@@ -974,10 +974,11 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
     return frame;
   };
   // ready: whether the human crew group is ready (office draws sprite bodies only then).
-  async function paintWith(theme, { fx = true, ready = true, focus = null, zoom = 1, stale = false, at = 4321, reduced = true } = {}) {
+  // sprites: a real sprite runtime in place of the constant-returning stub.
+  async function paintWith(theme, { fx = true, ready = true, focus = null, zoom = 1, stale = false, at = 4321, reduced = true, sprites = null } = {}) {
     const rec = recorder();
     const node = { clientWidth: 1600, clientHeight: 1000, width: 0, height: 0, style: {}, getContext: () => rec.ctx, addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({ left: 0, top: 0 }) };
-    const sprite = { drawBody: (c, body) => { rec.events.push('body:' + body.id); rec.bodies.push({ id: body.id, sitting: body.sitting, seatLift: body.seatLift }); return { top: body.py - 60, w: 30, h: 60 }; }, replacementState: () => (ready ? 'ready' : 'inherited'), ensureSkin: () => null };
+    const sprite = sprites || { drawBody: (c, body) => { rec.events.push('body:' + body.id); return { top: body.py - 60, w: 30, h: 60 }; }, replacementState: () => (ready ? 'ready' : 'inherited'), ensureSkin: () => null };
     const view = View.create({ theme, canvas: node, nameFor: id => 'W ' + id, hoverLabel: () => 'hover', reducedMotion: () => reduced,
       env: { raf: () => 1, caf() {}, dpr: () => 1, now: () => 0, createCanvas: () => node, sprites: sprite, Image: RoleImage, themeStatus: { reportWarning() {}, reportNotice() {} } } });
     await flush();
@@ -985,7 +986,7 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
     view.update(scene, { stale: () => stale, mailFrame, inspected: () => 'w1', repositorySelection: () => 'web' });
     if (zoom !== 1) view.zoomBy(zoom);
     if (focus) view.focus(focus);
-    rec.log.length = 0; rec.images.length = 0; rec.events.length = 0; rec.composites.length = 0; rec.bodies.length = 0;
+    rec.log.length = 0; rec.images.length = 0; rec.events.length = 0; rec.composites.length = 0;
     view.paint(at);
     return { ...rec, view, used: new Set(rec.log.map(entry => attribute(entry.slice(entry.indexOf(':') + 1))).filter(Boolean)) };
   }
@@ -1056,13 +1057,32 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   }
   assert.deepEqual(office.view.hitRegions(), station.view.hitRegions(), 'hit regions are identical');
   assert.deepEqual(office.view.camera(), station.view.camera());
-  /* Office chairs seat lower than the station's: a seated office body's lift cancels the sprite engine's ground bite
-     (-0.25 for measured sets), so the sit frame's lowest pixel lands on the chair point instead of the 7-unit
-     workstation lift. Station crew never carry an office lift. */
-  const GROUND_BITE = -0.25, seated = office.bodies.filter(body => body.sitting);
-  assert(seated.length > 0 && seated.length < office.bodies.length, 'the office paints seated and unseated crew');
-  for (const body of seated) assert.equal(GROUND_BITE - body.seatLift, 0, body.id + ': seated office feet land at the chair point');
-  assert(station.bodies.length === office.bodies.length && station.bodies.every(body => body.seatLift === undefined), 'station crew keep the engine seat lift');
+  /* The real sprite engine, with ready review-metadata replacement groups: seated main and helper crew keep the
+     station's seat placement in the office, so their returned extents and every hit region stay identical. */
+  {
+    const { load } = require('./_sprite-runtime');
+    const canonicalCrew = require('../frontend/assets/themes/starnet/theme.json').crew;
+    const runtime = async () => {
+      const sprites = { sprites: {} }, crew = {};
+      for (const [skin, group] of Object.entries(canonicalCrew)) {
+        for (const [track, paths] of Object.entries(group.tracks)) sprites.sprites[group.set + '.' + track] = paths.map(p => p.slice('assets/sprites/'.length));
+        crew[skin] = { ...group, set: 'office_' + skin, tracks: Object.fromEntries(Object.entries(group.tracks).map(([track, paths]) => [track, paths.map(p => p.replace('assets/sprites/', 'assets/themes/office/crew/'))])) };
+      }
+      const rt = await load({ data: { DEFAULT_SKIN: 'blank', SKINS: canonicalCrew }, sprites, initOptions: { crew }, image(img) { img.width = img.height = 144; img.onload(); } });
+      for (const skin of Object.keys(canonicalCrew)) { await rt.SPRITES.ensureSkin(skin); assert.equal(rt.SPRITES.replacementState(skin), 'ready'); }
+      return rt.SPRITES;
+    };
+    const realOffice = await paintWith(officeTheme, { sprites: await runtime() }), realStation = await paintWith(stationTheme, { sprites: await runtime() });
+    const seated = scene.workers.filter(worker => worker.row.status === 'working');
+    assert(seated.some(worker => worker.kind === 'helper') && seated.some(worker => worker.kind !== 'helper'), 'seated main and helper crew are exercised');
+    for (const worker of seated) {
+      const [inOffice, inStation] = [realOffice, realStation].map(run => run.view.hitRegions().find(region => region.id === worker.id));
+      assert(inOffice && inStation, worker.id + ': painted in both arts');
+      assert.equal(inOffice.top, inStation.top, worker.id + ': seated hit top is unchanged in the office');
+      assert.deepEqual(inOffice.head, inStation.head, worker.id + ': seated head anchor is unchanged in the office');
+    }
+    assert.deepEqual(realOffice.view.hitRegions(), realStation.view.hitRegions(), 'real-runtime hit regions are identical');
+  }
   // Procedural humans (no ready group) keep the same hit-tested bodies.
   assert.equal((await paintWith(officeTheme, { ready: false })).view.hitRegions().length, scene.workers.length);
   console.log('office art: all 34 roles at native size and whole pixels, native chairs, carriers at drone points, no station primitives or glow, two-tone outlined faces, steady statuses, depth and hits OK');
