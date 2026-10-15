@@ -17,6 +17,8 @@ const text = (value, length) => String(value || '').replace(/[\x00-\x1f\x7f]/g, 
 
 const COUNTERS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'];
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const freshObservation = (at, now) => Number.isFinite(at) && now - at <= 6000;
+const usageObservation = row => row.usage?.observedAt ?? (row.source === 'helper' ? row.observedAt : null);
 const emptyCoverage = () => ({ eligible: 0, available: 0, partial: 0, unavailable: 0, stale: 0 });
 function aggregateRows(rows, now) {
   const groups = new Map();
@@ -38,17 +40,19 @@ function aggregateRows(rows, now) {
     counters: Object.fromEntries(COUNTERS.map(key => [key, emptyCoverage()])) };
   const totals = Object.fromEntries(COUNTERS.map(key => [key, null]));
   const overflow = new Set();
-  const fresh = row => row.inventoryHealth === 'available' && Number.isFinite(row.observedAt) && now - row.observedAt <= 6000;
+  const fresh = row => row.inventoryHealth === 'available' && freshObservation(row.observedAt, now);
+  const freshUsage = row => fresh(row) && freshObservation(usageObservation(row), now);
   const rank = row => [fresh(row) ? 1 : 0, row.observedAt ?? -1, row.source === 'herdr' ? 1 : 0];
   const compare = (a, b) => { const ar = rank(a), br = rank(b);
-    return br[0] - ar[0] || br[1] - ar[1] || br[2] - ar[2] || String(a.id).localeCompare(String(b.id)); };
-  const signature = row => JSON.stringify([STATUSES.has(row.status) ? row.status : 'unknown',
-    COUNTERS.map(key => row.usage?.[key] || null)]);
+    return br[0] - ar[0] || br[1] - ar[1] || br[2] - ar[2] || Number(freshUsage(b)) - Number(freshUsage(a)) || String(a.id).localeCompare(String(b.id)); };
+  const status = row => STATUSES.has(row.status) ? row.status : 'unknown';
+  const signature = row => JSON.stringify(COUNTERS.map(key => row.usage?.[key] || null));
   for (const group of groups.values()) {
     const candidates = group.rows.sort(compare), row = candidates[0];
     const stale = !fresh(row);
     const peers = candidates.filter(value => JSON.stringify(rank(value)) === JSON.stringify(rank(row)));
-    if (group.verified && !stale && peers.some(value => signature(value) !== signature(row))) {
+    if (group.verified && !stale && peers.some(value => status(value) !== status(row) ||
+      freshUsage(value) && signature(value) !== signature(row))) {
       coverage.conflicting++; continue;
     }
     agents.observed++;
@@ -56,10 +60,11 @@ function aggregateRows(rows, now) {
     else agents.statuses[STATUSES.has(row.status) ? row.status : 'unknown']++;
     if (!group.verified) { agents.presenceOnly++; continue; }
     agents.verifiedSessions++; coverage.eligible++;
+    const usageStale = stale || row.usage != null && !freshUsage(row);
     let usable = 0, complete = 0;
     for (const key of COUNTERS) {
       const counter = coverage.counters[key]; counter.eligible++;
-      if (stale) { counter.stale++; continue; }
+      if (usageStale) { counter.stale++; continue; }
       const item = row.usage?.[key];
       if (!item || !Number.isSafeInteger(item.value) || item.value < 0 || !['available', 'partial'].includes(item.state)) {
         counter.unavailable++; continue;
@@ -70,7 +75,7 @@ function aggregateRows(rows, now) {
       if (!Number.isSafeInteger(sum)) overflow.add(key);
       totals[key] = overflow.has(key) ? null : sum;
     }
-    if (stale) coverage.stale++;
+    if (usageStale) coverage.stale++;
     else coverage[complete === COUNTERS.length ? 'available' : usable ? 'partial' : 'unavailable']++;
   }
   const usage = Object.fromEntries(COUNTERS.map(key => {
@@ -96,7 +101,7 @@ function makeObserver(options = {}) {
   const endpoint = options.endpoint || process.env.HERDR_SOCKET_PATH || path.join(os.homedir(), '.config/herdr/herdr.sock');
   const identities = options.identities || makeIdentityResolver({ execute, now, endpoint, readConfiguration: options.readIdentityConfiguration, readProcessBirth: options.readProcessBirth });
   let identityProofs = new Map();
-  let lastGood = [], coreRows = [], aggregate = aggregateRows([]), refreshStartedAt = null, pending = null, mail = null;
+  let lastGood = [], coreRows = [], refreshStartedAt = null, pending = null, mail = null;
   let closed = false, enrichment = null, enrichmentTarget = null, lineage = null;
   let desktopPending = null, busPending = null;
   const summaries = new Map(), warmQueue = new Map(), warmScheduled = new Map(), warmRunning = new Set();
@@ -239,7 +244,6 @@ function makeObserver(options = {}) {
     rowsBySource.herdr = roots;
     rowsBySource.helper = children;
     lastGood = [...roots, ...rowsBySource.desktop, ...children];
-    aggregate = aggregateRows(lastGood, now());
     const retained = new Set(lastGood.filter(row => row.source !== 'desktop').map(row => row.id));
     transcripts.retain(retained);
     for (const id of summaries.keys()) if (!retained.has(id)) summaries.delete(id);
@@ -299,11 +303,15 @@ function makeObserver(options = {}) {
             summaryResults.get(row.id).resolve({ available: false });
             continue;
           }
+          const readAt = now();
           let tool;
           try { tool = await transcripts.read(row.id, row.provider, row.sessionId); } catch (_) { tool = { available: false }; }
           summaryResults.get(row.id).resolve(tool);
           if (!closed && currentOwner(target.owners.get(row.id))) {
-            summaries.set(row.id, { owners: target.owners.get(row.id), tool });
+            // Timestamp-less injected adapters use the captured read start, never a later core poll.
+            const observedAt = tool.usage?.observedAt ?? readAt;
+            if (tool.usage && tool.usage.observedAt == null) tool = { ...tool, usage: { ...tool.usage, observedAt } };
+            summaries.set(row.id, { owners: target.owners.get(row.id), tool, observedAt });
             publish(); scheduleWarmup(target);
           }
         }
@@ -364,7 +372,12 @@ function makeObserver(options = {}) {
   function snapshot() {
     const available = Object.values(sources).some(source => source.health === 'available');
     const times = Object.values(sources).map(source => source.observedAt).filter(value => value !== null);
-    return { sessions: lastGood, aggregate, observedAt: times.length ? Math.max(...times) : null,
+    const at = now();
+    const sessions = lastGood.map(row => {
+      const observedAt = row.usage?.observedAt ?? (row.source === 'herdr' ? summaries.get(row.id)?.observedAt : row.observedAt);
+      return row.tool?.available && !freshObservation(observedAt, at) ? { ...row, tool: { ...row.tool, available: false } } : row;
+    });
+    return { sessions, aggregate: aggregateRows(sessions, at), observedAt: times.length ? Math.max(...times) : null,
       health: available ? 'available' : 'unavailable', error: available ? null : sources.herdr.reason,
       sources: { herdr: { ...sources.herdr }, desktop: { ...sources.desktop } },
       bus: mail ? publicBus(mail, lastGood) : null };

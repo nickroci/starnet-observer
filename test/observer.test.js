@@ -37,6 +37,7 @@ const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status:
 (async () => {
   await progressivePublication();
   await progressiveOwnership();
+  await progressiveOptionalFreshness();
   await boundedWarmup();
   await queuedWarmOwnership();
   await progressiveClose();
@@ -103,6 +104,7 @@ const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status:
   await identityEnrichmentOrdering();
   await usageAggregate();
   await aggregateAgeAndOverflow();
+  await aggregateOptionalEvidence();
   await claudeHelperNamespaces();
   await footerInspection();
   await footerFinalValidationRace();
@@ -850,6 +852,39 @@ async function aggregateAgeAndOverflow() {
   assert.deepEqual(result.aggregate.usage.outputTokens, { value: 2, state: 'available' }, 'other counters remain usable');
 }
 
+async function aggregateOptionalEvidence() {
+  let clock = 9000, conflict = false, firstId;
+  const child = 'obs_' + 'e'.repeat(24);
+  const usage = (value, observedAt) => ({ inputTokens: { value, state: 'available' }, observedAt });
+  const observer = makeObserver(progressiveOptions({ now: () => clock,
+    execute: async () => ({ stdout: JSON.stringify({ result: { agents: [pane('old'), pane('fresh')] } }) }),
+    transcripts: { retain() {}, read: async id => {
+      firstId ??= id;
+      return { available: true, last: { name: 'Read', phase: 'started' },
+        usage: usage(id === firstId ? 999 : 42, id === firstId && !conflict ? 1000 : clock) };
+    } },
+    helpers: { prepareChildren: async parents => ({ annotations: new Map(), overflow: new Map(), rows: [
+      { id: child, provider: 'claude', sessionId: 'child', source: 'helper', presence: 'verified-lineage',
+        inspectionIdentity: 'helper:' + child, parentId: parents[0].id, status: 'working',
+        inventoryHealth: 'available', observedAt: clock, usage: usage(777, 1000) }
+    ] }) }
+  }));
+  try {
+    const result = await observer.get();
+    assert.equal(result.aggregate.agents.observed, 2, 'duplicate roots count once alongside helper');
+    assert.equal(result.aggregate.agents.statuses.working, 2, 'fresh helper inventory keeps its status');
+    assert.deepEqual(result.aggregate.usage.inputTokens, { value: 42, state: 'partial' });
+    assert.equal(result.aggregate.coverage.conflicting, 0, 'expired duplicate usage cannot conflict with fresh evidence');
+    assert.equal(result.aggregate.coverage.stale, 1, 'new helper inventory cannot refresh its old bound usage');
+    assert.equal(result.aggregate.coverage.counters.inputTokens.stale, 1);
+    assert.equal(result.sessions.find(row => row.id === firstId).tool.available, false, 'newly accepted cached summaries keep their old source time');
+    clock += 3000; conflict = true;
+    const conflicting = await observer.get();
+    assert.equal(conflicting.aggregate.coverage.conflicting, 1, 'contradictory fresh duplicate usage still fails closed');
+    assert.equal(conflicting.aggregate.usage.inputTokens.value, null);
+  } finally { await observer.close(); }
+}
+
 async function claudeHelperNamespaces() {
   const { makeTranscriptObserver } = require('../sidecar/observer-transcripts.js');
   const { makeHelperObserver } = require('../sidecar/observer-helpers.js');
@@ -1130,6 +1165,63 @@ function progressiveOptions(overrides = {}) {
     helpers: { prepareChildren: async () => ({ rows: [], annotations: new Map(), overflow: new Map(), commitBindings() {} }) },
     desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) },
     bus: { read: async () => ({ health: 'available', rows: [], observedAt: 900 }) }, ...overrides };
+}
+async function progressiveOptionalFreshness() {
+  for (const timestamped of [true, false]) {
+    let clock = 1000, reads = 0;
+    const summary = deferred(), helper = deferred();
+    const usage = at => ({ inputTokens: { value: 42, state: 'available' },
+      ...(timestamped ? { observedAt: at } : {}) });
+    const last = { name: 'Read', phase: 'started', outcome: 'unknown', at: 900 };
+    const observer = makeCoreObserver(progressiveOptions({ now: () => clock,
+      transcripts: { retain() {}, read: async () => {
+        const at = clock; reads++; if (reads === 1) await summary.promise;
+        return { available: true, last, usage: usage(at) };
+      } },
+      helpers: { prepareChildren: async () => {
+        await helper.promise;
+        return { rows: [], annotations: new Map(), overflow: new Map(), commitBindings() {} };
+      } }
+    }));
+    try {
+      await observer.get();
+      summary.resolve();
+      const accepted = await inventoryWhen(observer, data => data.sessions[0].tool.available);
+      assert.equal(accepted.aggregate.usage.inputTokens.value, 42);
+      for (clock of [3000, 5000, 7000]) {
+        const live = await observer.get();
+        assert.equal(live.sessions[0].observedAt, clock);
+        assert.equal(live.sessions[0].tool.available, true, 'optional evidence is live through exactly six seconds');
+        assert.equal(live.aggregate.usage.inputTokens.value, 42);
+      }
+      clock = 7001;
+      const expired = await observer.get();
+      assert.equal(expired.sessions[0].tool.available, false, 'cached snapshots age optional activity at six seconds');
+      assert.equal(expired.sessions[0].observedAt, 7000, 'optional age never changes inventory observation');
+      assert.equal(expired.sessions[0].inventoryHealth, 'available');
+      assert.equal(expired.aggregate.agents.statuses.working, 1);
+      assert.equal(expired.aggregate.agents.stale, 0);
+      assert.deepEqual(expired.aggregate.usage.inputTokens, { value: null, state: 'unavailable' });
+      assert.equal(expired.aggregate.coverage.stale, 1);
+      assert.equal(expired.aggregate.coverage.counters.inputTokens.stale, 1);
+      assert.equal(expired.sessions[0].usage.observedAt, 1000, 'retain actual source/read observation');
+      assert.deepEqual(expired.sessions[0].tool.last, last, 'retain last-known tool evidence without advertising it live');
+      assert.equal(accepted.sessions[0].tool.available, true, 'previous published snapshot stays immutable');
+      assert.equal(reads, 1, 'unchanged ownership does not restart a held sweep');
+      clock = 9000;
+      const held = await observer.get();
+      assert.equal(held.sessions[0].observedAt, 9000);
+      assert.equal(held.aggregate.agents.statuses.working, 1);
+      assert.equal(held.aggregate.coverage.stale, 1, 'a later healthy core cannot renew held optional evidence');
+      helper.resolve(); await helper.promise;
+      await new Promise(resolve => setImmediate(resolve));
+      clock = 11000; await observer.get();
+      const recovered = await inventoryWhen(observer, data => data.sessions[0].usage?.observedAt === clock);
+      assert.equal(recovered.sessions[0].tool.available, true);
+      assert.equal(recovered.aggregate.usage.inputTokens.value, 42);
+      assert.equal(recovered.aggregate.coverage.stale, 0);
+    } finally { summary.resolve(); helper.resolve(); await observer.close(); }
+  }
 }
 async function progressiveOwnership() {
   for (const change of ['unchanged', 'session', 'process', 'removed', 'unavailable']) {
