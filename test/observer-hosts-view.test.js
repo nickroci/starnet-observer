@@ -28,13 +28,17 @@ for (const status of ['working', 'idle', 'done', 'unknown']) assert.equal(View.n
 
 const layout = Model.createLayout();
 const rows = [row('obs_local', { status: 'working' }), row('obs_blocked', { host: 'vm', status: 'blocked' }), row('obs_idle', { host: 'vm', status: 'idle' })];
-layout.reconcile(rows);
-const hosts = [{ id: 'vm', health: 'available', agents: 2 }, { id: 'empty', health: 'stale', observedAt: 1, agents: 0 }];
-// Only the vm's own bus reports a relay binding (this machine's does not): one relay, vm its only member, one outpost.
+// Only the vm's own bus reports a relay binding (this machine's does not); its roster lists two agents on whitenoise.
+const peers = ['a', 'b'].map(c => ({ id: 'peer_' + c.repeat(24), provider: 'codex', repo: 'llm-bus', lastSeen: Date.now() - 60000 }));
 const relays = Scene.relayNetworks([[null, { health: 'available', messages: [] }], ['vm', { health: 'available', messages: [],
-  remote: { relay: 'relay.example.dev', machine: 'vm-1', lastActivityAt: Date.now() - 60000, peers: [{ machine: 'whitenoise', repos: ['llm-bus'], agents: 5, lastSeen: Date.now() - 60000 }] } }]], Date.now());
+  remote: { relay: 'relay.example.dev', machine: 'vm-1', lastActivityAt: Date.now() - 60000, peers: [{ machine: 'whitenoise', repos: ['llm-bus'], agents: 2, lastSeen: Date.now() - 60000, list: peers }] } }]], Date.now());
+const ghosts = Scene.shadowRows(relays);
+layout.reconcile([...rows, ...ghosts]);
+const hosts = [{ id: 'vm', health: 'available', agents: 2 }, { id: 'empty', health: 'stale', observedAt: 1, agents: 0 },
+  { id: 'relay:whitenoise', shadow: true, health: 'shadow', machine: 'whitenoise', relay: 'relay.example.dev', member: 'vm', agents: 2 }];
 const scene = Scene.build(layout.onPage(0), 0, { hosts, relays });
-assert.equal(scene.links.length, 2, 'fixture: an observation link per remote ship'); assert.equal(scene.relays.length, 1, 'fixture: one relay');
+assert.equal(scene.links.length, 2, 'fixture: an observation link per observed remote ship, none to the shadow'); assert.equal(scene.relays.length, 1, 'fixture: one relay');
+assert.deepEqual(scene.workers.filter(worker => worker.row.shadow).map(worker => worker.id).sort(), peers.map(peer => peer.id), 'fixture: ghost crew seated on the shadow ship');
 const node = canvas(), ships = [];
 let now = 0, chosenHost = null; const staleIds = new Set();
 const view = View.create({ canvas: node, nameFor: id => id, onShip: host => { ships.push(host); chosenHost = host; }, hostSelection: () => chosenHost,
@@ -57,8 +61,18 @@ assert.ok(labelled(), 'remote ship label at overview');
 const drawn = text => node.ctx.texts.includes(text);
 assert.ok(drawn('ssh · observing'), 'a live host\'s observation link says what it is');
 assert.ok(drawn('ssh · stale'), 'a stale host\'s link shows its real state');
-assert.ok(drawn('RELAY · relay.example.dev'), 'the relay names its host');
-assert.ok(drawn('WHITENOISE · 5 agents · not observed'), 'an outpost names its machine and listed agents, and says it is not observed');
+{
+  // Zoomed onto the shadow ship's room: its ghost crew, its own label and the relay link's label are on screen.
+  const shadowRoom = scene.platforms.find(platform => platform.host === 'relay:whitenoise');
+  assert.ok(view.focusPlatform(shadowRoom.key)); node.ctx.texts.length = 0; now += 16; view.paint(now);
+  assert.ok(node.ctx.texts.some(text => /^◌ WHITENOISE · 2 agents · via relay · not observed/.test(text)), 'a shadow ship names its machine and says it is not observed');
+  assert.ok(node.ctx.texts.some(text => /^relay · relay\.example\.dev · live/.test(text)), 'the relay link, labelled in the gap before the shadow ship, names its relay and live state');
+  const vmShip = scene.ships.find(ship => ship.id === 'vm'), shadowShip = scene.ships.find(ship => ship.shadow);
+  assert.ok(shadowShip.rect.x > vmShip.rect.x + vmShip.rect.w, 'the shadow ship docks beside the ship it links to');
+  assert.equal(shadowShip.mail.hub.y, vmShip.mail.hub.y, 'level with its mailroom');
+  assert.deepEqual(scene.links.map(link => link.host), ['vm', 'empty'], 'the column and its ssh links are unchanged by a shadow');
+  view.overview(); now += 16; view.paint(now);
+}
 const vmRoom = scene.platforms.find(platform => platform.host === 'vm');
 assert.ok(view.focusPlatform(vmRoom.key)); node.ctx.texts.length = 0; now += 16; view.paint(now);
 assert.ok(labelled(), 'remote ship label when zoomed onto its room'); assert.ok(node.ctx.texts.some(text => /^P · 2/.test(text)), 'and the room sign survives');

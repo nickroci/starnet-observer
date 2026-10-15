@@ -415,6 +415,8 @@ const ObserverView = (() => {
   // Remote hulls are smaller and amber reads darker than cyan against space, so they get a firmer plate and a second,
   // deck-level rim; a down host keeps the same weight in the idle grey so the ship stays findable.
   function paintHull(ctx, ship, C = DEFAULT_SCENE.colors) {
+    // A shadow ship (an unobserved machine on a relay) is a faint, finely dashed outline: known only from the roster.
+    if (ship.shadow) { ctx.save(); ctx.globalAlpha = 0.7; ctx.setLineDash([2, 5]); ctx.lineWidth = 2; poly(ctx, rectPoly(ship.rect, -2.4), withAlpha(C.amber, 0.03), C.amber); ctx.restore(); return; }
     const r = ship.rect, live = shipLive(ship), rim = ship.local ? C.cyan : live ? C.amber : C.idle;
     poly(ctx, rectPoly(r, -2.4), withAlpha(rim, ship.local ? 0.035 : live ? 0.09 : 0.07));
     ctx.save(); ctx.globalAlpha = ship.local ? (live ? 0.7 : 0.4) : 0.9; ctx.setLineDash([6, 5]); ctx.lineWidth = ship.local ? 1.5 : 2.5;
@@ -442,7 +444,7 @@ const ObserverView = (() => {
       platform.decorationRegions.forEach((region, index) => { if (region.kind === 'wall' || region.kind === 'corner') art.region(ctx, platform, region, index); });
     }
     // An unreachable or stale remote ship is dimmed as a whole: its last rows are shown, never as live.
-    for (const ship of scene.ships || []) if (!ship.local && !shipLive(ship)) poly(ctx, rectPoly(ship.rect, 0), withAlpha(colors['body-outline'], 0.55));
+    for (const ship of scene.ships || []) if (!ship.local && !shipLive(ship)) poly(ctx, rectPoly(ship.rect, 0), withAlpha(colors['body-outline'], ship.shadow ? 0.4 : 0.55));
     if (art.pools) art.pools(ctx, scene);
     // Helper tethers: a dashed floor line from the helper's chair to its exact immediate parent's chair.
     for (const worker of scene.workers) if (worker.connector) {
@@ -586,7 +588,7 @@ const ObserverView = (() => {
       if (label) return label;
       const floor = Scene.fromScreen(point, camera);
       // Remote ships first: the flagship hull is large and must not swallow a click on a docked ship's floor.
-      const ships = (scene && scene.ships || []).slice().sort((a, b) => Number(a.local) - Number(b.local));
+      const ships = (scene && scene.ships || []).filter(ship => !ship.shadow).slice().sort((a, b) => Number(a.local) - Number(b.local));
       const hit = ships.find(ship => floor.x >= ship.rect.x && floor.x <= ship.rect.x + ship.rect.w && floor.y >= ship.rect.y && floor.y <= ship.rect.y + ship.rect.h);
       return hit ? { host: hit.local ? null : hit.id } : null;
     };
@@ -942,43 +944,18 @@ const ObserverView = (() => {
       if (live) glow(ctx, { ...link.to, z: 2.2 }, 14, C.cyan, animate ? 0.3 + 0.25 * Math.sin(now / 600) : 0.4);
       ctx.restore();
     }
-    /* llm-bus relay: a small satellite in space with a high beam to each bound mailroom's tower (marching while that bus
-       saw relay activity in the last 15 minutes, still and dashed while quiet, grey while its bus is unreadable) and a
-       thin tether to each machine its roster names that is not observed here. An outpost is a dashed outline with one
-       pip per listed agent: its rooms are not observed, so none are drawn. */
-    function beam(from, to, color, { width = 1.4, alpha = 0.8, dash = [4, 4], offset = 0 } = {}) {
-      const a = P(from), b = P(to);
-      ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.globalAlpha = alpha; ctx.setLineDash(dash); ctx.lineDashOffset = offset;
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.restore();
-    }
-    function paintRelay(relay, now, animate) {
-      for (const member of relay.members) {
-        const active = member.state === 'active', color = member.state === 'unknown' ? C.idle : C.amber;
-        beam(member.from, member.to, color, active ? { width: 4, alpha: 0.95, dash: [14, 8], offset: animate ? -(now / 40) % 22 : 0 } : { width: 3, alpha: 0.8, dash: [5, 8] });
-      }
-      for (const outpost of relay.outposts) {
-        beam(outpost.link.from, outpost.link.to, outpost.agents ? C.amber : C.idle, { width: 1, alpha: outpost.agents ? 0.6 : 0.35, dash: [1, 4] });
-        const r = outpost.rect;
-        ctx.save(); ctx.globalAlpha = outpost.agents ? 0.85 : 0.45; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.5;
-        poly(ctx, rectPoly(r, 0), withAlpha(C.amber, outpost.agents ? 0.06 : 0.03), outpost.agents ? C.amber : C.idle); ctx.restore();
-        for (let index = 0; index < Math.min(outpost.agents, 12); index++) {
-          const pip = P({ x: r.x + 1.2 + (index % 6) * 1.1, y: r.y + 2 + Math.floor(index / 6) * 2, z: 0.4 });
-          ctx.fillStyle = C.amber; ctx.fillRect(Math.round(pip.x) - 2, Math.round(pip.y) - 2, 4, 4);
-        }
-      }
-      // The satellite: a dark body on a short mast with two panel wings, its lamp lit while any member is active.
-      const c = relay.center, body = P(c), live = relay.members.some(member => member.state === 'active'), x = Math.round(body.x), y = Math.round(body.y);
-      if (live && decor) glow(ctx, c, 34, C.amber, animate ? 0.3 + 0.2 * Math.sin(now / 700) : 0.35);
-      // Drawn at twice the crew's pixel scale so it still reads at overview zoom.
-      ctx.save(); ctx.translate(x, y); ctx.scale(2, 2);
-      ctx.strokeStyle = C.rail; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 30); ctx.stroke();
-      ctx.fillStyle = C.cyan; ctx.globalAlpha = 0.75;
-      for (const left of [-52, 18]) ctx.fillRect(left, -7, 34, 12);
-      ctx.globalAlpha = 1; ctx.strokeStyle = C.rail; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(-18, -1); ctx.lineTo(18, -1); ctx.stroke();
-      ctx.fillStyle = C.hullRight; ctx.fillRect(-13, -13, 26, 22);
-      ctx.strokeStyle = C.amber; ctx.lineWidth = 2; ctx.strokeRect(-13, -13, 26, 22);
-      ctx.fillStyle = live ? C.amber : C.idle; ctx.fillRect(-4, -6, 8, 8);
+    /* llm-bus relay link: mailroom to mailroom, high above the decks, the path relayed couriers fly. It marches while
+       its observed end saw relay activity in the last 15 minutes, is still and dashed while quiet, and is grey while that
+       bus is unreadable. Each end gets a small relay lamp. */
+    function paintRelayLink(link, now, animate) {
+      const active = link.state === 'active', color = link.state === 'unknown' ? C.idle : C.amber, a = P(link.a), b = P(link.b);
+      ctx.save(); ctx.strokeStyle = color; ctx.lineCap = 'round';
+      if (active) { ctx.lineWidth = 3; ctx.globalAlpha = 0.9; ctx.setLineDash([10, 6]); ctx.lineDashOffset = animate ? -(now / 45) % 16 : 0; }
+      else { ctx.lineWidth = 2; ctx.globalAlpha = 0.65; ctx.setLineDash([4, 7]); }
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+      for (const end of [a, b]) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(end.x, end.y, 3.5, 0, Math.PI * 2); ctx.fill(); }
       ctx.restore();
+      if (active && decor) glow(ctx, link.b, 16, C.amber, animate ? 0.25 + 0.2 * Math.sin(now / 700) : 0.3);
     }
     // ---------- FX: glow and sparks on the station itself (world space, deterministic) ----------
     // A burst of rising pixel sparks around a screen point. Each spark loops on its own phase so there is no state.
@@ -1333,16 +1310,17 @@ const ObserverView = (() => {
         const hull = [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]].map(([x, y]) => screen({ x, y, z: 0 }));
         const hullOnScreen = Math.max(...hull.map(p => p.x)) > 0 && Math.min(...hull.map(p => p.x)) < viewport.width && Math.max(...hull.map(p => p.y)) > 0 && Math.min(...hull.map(p => p.y)) < viewport.height;
         const seen = !live && ship.observedAt ? ' · last seen ' + Model.age(ship.observedAt) : '';
-        const label = ship.local ? '● THIS MACHINE' : (live ? '● ' : '○ ') + String(ship.id).toUpperCase() + ' · ' + (ship.agents || 0) + ' agent' + (ship.agents === 1 ? '' : 's') +
+        const label = ship.shadow ? '◌ ' + String(ship.machine).toUpperCase() + ' · ' + (ship.agents || 0) + ' agent' + (ship.agents === 1 ? '' : 's') + ' · via relay · not observed'
+          : ship.local ? '● THIS MACHINE' : (live ? '● ' : '○ ') + String(ship.id).toUpperCase() + ' · ' + (ship.agents || 0) + ' agent' + (ship.agents === 1 ? '' : 's') +
           (live ? '' : ship.health === 'stale' ? ' · STALE' + seen : ' · ' + (ship.reason || 'unreachable'));
-        const color = ship.local ? C.cyan : live ? C.amber : C.idle;
+        const color = ship.shadow ? C.amber : ship.local ? C.cyan : live ? C.amber : C.idle;
         const plate = textPlate(clipText(label, viewport.width * 0.5, signSize(20)), at.x, at.y - (ship.local ? 0 : 10), { accent: color, size: signSize(20), color, priority: ship.local ? 48 : 58, dash: live ? null : [3, 3], force: !ship.local && hullOnScreen });
         plates.push({ ...plate,
-          ...(onShip ? { ship: { host: ship.local ? null : ship.id } } : {}) });
+          ...(onShip && !ship.shadow ? { ship: { host: ship.local ? null : ship.id } } : {}) });
         // A remote mailroom names its host once zoomed in; at overview the narrow gap belongs to the link label.
         if (!ship.local && ship.mail && tier !== 'overview') {
           const tower = ship.mail.tower, mailAt = screen({ x: tower.x + tower.w / 2, y: tower.y + tower.h / 2, z: 3.4 });
-          plates.push(textPlate('MAILROOM · ' + String(ship.id), mailAt.x, mailAt.y, { accent: C.amber, size: signSize(16), color: C.window, priority: 44 }));
+          plates.push(textPlate('MAILROOM · ' + String(ship.shadow ? ship.machine + ' (its own llm-bus)' : ship.id), mailAt.x, mailAt.y, { accent: C.amber, size: signSize(16), color: C.window, priority: 44 }));
         }
       }
       // Link labels: the observation link says what it is (and its real state); a relay says whether it was ever seen.
@@ -1351,19 +1329,14 @@ const ObserverView = (() => {
         plates.push(textPlate(live ? 'ssh · observing' : link.health === 'stale' ? 'ssh · stale' : 'ssh · unreachable', mid.x, mid.y - 4,
           { accent: live ? C.cyan : C.idle, size: 12, color: live ? C.cyan : C.idle, priority: 46, dash: [2, 2] }));
       }
-      // Relay labels: the relay's host name and what its members' buses say; outposts name the machine and its listed agents.
-      for (const relay of scene.relays || []) {
-        const at = screen({ ...relay.center, z: 4.4 }), live = relay.members.some(member => member.state === 'active');
-        const newest = Math.max(...relay.members.map(member => member.lastActivityAt ?? -Infinity));
-        const note = live ? 'live' : Number.isFinite(newest) ? 'quiet · last activity ' + Model.age(newest) : 'no activity seen';
-        plates.push(textPlate(clipText('RELAY · ' + relay.relay, viewport.width * 0.4, 12), at.x, at.y - 44, { accent: C.amber, size: 12, color: live ? C.amber : C.idle, priority: 47, dash: live ? null : [3, 3] }));
-        if (tier !== 'overview') plates.push(textPlate('llm-bus · ' + note, at.x, at.y - 2, { accent: C.amber, size: 11, color: C.dim, priority: 43 }));
-        for (const outpost of relay.outposts) {
-          const top = screen({ x: outpost.rect.x + outpost.rect.w / 2, y: outpost.rect.y, z: 0.6 });
-          const label = String(outpost.machine).toUpperCase() + ' · ' + outpost.agents + ' agent' + (outpost.agents === 1 ? '' : 's') + ' · not observed';
-          plates.push(textPlate(clipText(label, viewport.width * 0.35, 12), top.x, top.y - 6, { accent: outpost.agents ? C.amber : C.idle, size: 12, color: outpost.agents ? C.amber : C.idle, priority: 42, dash: [2, 2] }));
-          if (tier !== 'overview' && outpost.repos.length) plates.push(textPlate(clipText('shared: ' + outpost.repos.join(', '), viewport.width * 0.35, 11), top.x, top.y + 10, { accent: C.idle, size: 11, color: C.dim, priority: 41 }));
-        }
+      // Relay link labels: which relay carries the mail, and what the observed end's bus says about it.
+      for (const relay of scene.relays || []) for (const link of relay.links) {
+        // Just short of the far mailroom: the gap before that ship, clear of the decks the link passes over.
+        const t = Math.max(0.5, 1 - 7 / Math.max(1, Math.hypot(link.b.x - link.a.x, link.b.y - link.a.y))), live = link.state === 'active';
+        const mid = screen({ x: link.a.x + (link.b.x - link.a.x) * t, y: link.a.y + (link.b.y - link.a.y) * t, z: 2.2 });
+        const note = live ? 'live' : link.state === 'unknown' ? 'bus unreadable' : Number.isFinite(link.lastActivityAt) ? 'quiet · ' + Model.age(link.lastActivityAt) : 'quiet';
+        plates.push(textPlate(clipText('relay · ' + relay.relay + ' · ' + note, viewport.width * 0.4, 12), mid.x, mid.y - 4,
+          { accent: link.state === 'unknown' ? C.idle : C.amber, size: 12, color: live ? C.amber : C.dim, priority: 46, dash: live ? null : [3, 3] }));
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
       plates.push(textPlate('MAILROOM · llm-bus', hubAt.x, hubAt.y, { accent: C.amber, size: signSize(18), color: C.window, priority: 45 }));
@@ -1452,7 +1425,7 @@ const ObserverView = (() => {
         ctx.fillStyle = C['radar-sweep']; ctx.beginPath(); ctx.ellipse(at.x, at.y - 16, 14 * Math.abs(Math.cos(sweep)) + 3, 6, 0, 0, Math.PI * 2); ctx.fill();
         if (decor) glow(ctx, { ...top, z: 3.9 }, 22, C.amber, animate ? 0.35 + 0.3 * Math.max(0, Math.sin(now / 4000 * Math.PI * 2)) : 0.35);
       }
-      for (const relay of scene.relays || []) paintRelay(relay, now, animate);
+      for (const relay of scene.relays || []) for (const link of relay.links) paintRelayLink(link, now, animate);
       for (const link of scene.links || []) paintObservation(link, now, animate);
       // Depth-sorted solid furniture, apron posts and crew. Wholly offscreen furniture is never submitted; every crew
       // body is submitted so its sprite state advances, and the shared sprite seam skips its pixels when off stage.
@@ -1471,7 +1444,9 @@ const ObserverView = (() => {
         const c = worker.chair;
         if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: c.x + c.y - 0.6, draw: () => A.chair(ctx, worker) });
         const actor = byId.get(worker.id);
-        if (actor) items.push({ depth: actor.point.x + actor.point.y, tie: worker.id, draw: () => paintCrew(worker, actor, now, !live) });
+        // Shadow crew (a relay roster's unobserved agents) are drawn as ghosts: half opacity, never lively.
+        if (actor) items.push({ depth: actor.point.x + actor.point.y, tie: worker.id, draw: worker.row.shadow
+          ? () => { ctx.save(); ctx.globalAlpha = 0.45; try { paintCrew(worker, actor, now, true); } finally { ctx.restore(); } } : () => paintCrew(worker, actor, now, !live) });
       }
       const observatory = scene.observatory;
       if (observatory) {

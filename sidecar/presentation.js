@@ -13,9 +13,11 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
   const host = id => { if (id == null) return null; if (!hosts.has(id)) hosts.set(id, 'Ship ' + (hosts.size + 1)); return hosts.get(id); };
   // llm-bus relay names (relay host, machine ids, shared repo ids) are real names too: each gets a stable fictional alias.
   const aliases = new Map(), alias = (kind, prefix, id) => { const key = kind + '\0' + id; if (!aliases.has(key)) aliases.set(key, prefix + ' ' + ([...aliases.keys()].filter(k => k.startsWith(kind + '\0')).length + 1)); return aliases.get(key); };
-  const relayOf = relay => relay ? { direction: relay.direction, machine: alias('machine', 'Machine', relay.machine), repo: alias('repo', 'Shared repo', relay.repo), provider: relay.provider, state: relay.state } : undefined;
+  const relayOf = relay => relay ? { direction: relay.direction, machine: alias('machine', 'Machine', relay.machine), repo: alias('repo', 'Shared repo', relay.repo), provider: relay.provider,
+    ...(relay.peer ? { peer: relay.peer } : {}), state: relay.state } : undefined;
   const remoteOf = remote => remote ? { relay: alias('relay', 'Relay', remote.relay), machine: alias('machine', 'Machine', remote.machine), lastActivityAt: remote.lastActivityAt,
-    peers: (remote.peers || []).map(peer => ({ machine: alias('machine', 'Machine', peer.machine), repos: (peer.repos || []).map(repo => alias('repo', 'Shared repo', repo)), agents: peer.agents, lastSeen: peer.lastSeen })) } : undefined;
+    peers: (remote.peers || []).map(peer => ({ machine: alias('machine', 'Machine', peer.machine), repos: (peer.repos || []).map(repo => alias('repo', 'Shared repo', repo)), agents: peer.agents, lastSeen: peer.lastSeen,
+      list: (peer.list || []).map(agent => ({ id: agent.id, provider: agent.provider, repo: alias('repo', 'Shared repo', agent.repo), lastSeen: agent.lastSeen })) })) } : undefined;
   const mailOf = (message, extra = {}) => { const relay = relayOf(message.relay); return { id: message.id, ...extra, from: message.from, to: message.to, sentAt: message.sentAt, acknowledgedAt: message.acknowledgedAt, wake: message.wake, ...(relay ? { relay } : {}) }; };
   const roomNames = new Set(labels.rooms.map(room => room.name.toLowerCase()));
   const repoNames = new Set(labels.rooms.flatMap(room => room.repos).map(name => name.toLowerCase()));

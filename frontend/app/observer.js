@@ -12,7 +12,7 @@
   const clock = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
   const reducedMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   let latest, selected = null, page = 0, filter = 'all', ingested = null, ingestedStale = false, mailSelected = null, inventoryStale = true;
-  let pendingSpots = [], scene = null, grounded = true, byId = new Map();
+  let pendingSpots = [], scene = null, grounded = true, byId = new Map(), shadowById = new Map();
   // Visibility: a hidden page owns no subscription, deadline or frame; resume proves freshness before inspection.
   let active = false, unsubscribe = null, resumedAt = 0, awaitingProof = false, cachedAtResume = null;
   const rowFor = id => byId.get(id);
@@ -60,10 +60,12 @@
     onPlatform: () => { selected = null; if (latest) render(latest, true); },
     onMode: ({ mode, platform }) => showZoom(mode === 'platform' ? platform : null),
     // Read every frame, so a title Herdr publishes later replaces the fallback while still hovered.
-    hoverLabel: id => { const row = rowFor(id); return row ? ObserverModel.hoverLabel(row, rowStale(row)) : null; },
+    hoverLabel: id => { const row = rowFor(id); if (row) return ObserverModel.hoverLabel(row, rowStale(row));
+      const ghost = shadowById.get(id);   // a relay roster entry: what llm-bus lists, nothing observed
+      return ghost ? (PROVIDERS[ghost.provider] || 'Agent') + ' on ' + ghost.machine + ' · ' + ghost.repo + (ghost.lastActivityAt ? ' · active ' + ObserverModel.age(ghost.lastActivityAt) : '') + ' · via relay, not observed' : null; },
     idleLevel: id => { const row = rowFor(id); return row ? ObserverModel.idleAge(row).level : 0; },
     idleVigour: id => { const row = rowFor(id); return row ? ObserverModel.idleAge(row).vigour : 1; },
-    nameFor: id => { const row = rowFor(id); return row ? workerName(row) : ''; },
+    nameFor: id => { const row = rowFor(id); if (row) return workerName(row); const ghost = shadowById.get(id); return ghost ? (PROVIDERS[ghost.provider] || 'Agent') + ' · ' + ghost.machine : ''; },
     onCamera: ({ canZoomIn, canZoomOut }) => { get('zoom-in').disabled = !canZoomIn; get('zoom-out').disabled = !canZoomOut; } });
   /* One courier per host's bus, stepped by the view's frame: this machine's, plus one for each remote ship, whose
      flights stay inside that ship (its own mailroom and crew). A transition into stale or reduced grounds flights at
@@ -823,23 +825,30 @@
       else if (Date.now() > pendingSpawn.until) pendingSpawn = null;
     }
     const panelRows = hosts.length ? rows.filter(row => (row.host || null) === selectedHost) : rows;
-    layout.reconcile(rows.filter(row => row !== overseerRow));
+    /* llm-bus relays come from each observed bus's own binding. Each unobserved machine on a relay becomes a shadow ship
+       of ghost crew from the relay roster: on the floor only, never in byId, so nothing selects, inspects or controls it. */
+    const relayBuses = [[null, data?.bus || null], ...Object.entries(data?.hostBus || {}).filter(([id]) => hosts.some(host => host.id === id))];
+    const relays = ObserverScene.relayNetworks(relayBuses, Date.now()), ghosts = ObserverScene.shadowRows(relays);
+    shadowById = new Map(ghosts.map(row => [row.id, row]));
+    const shadowHosts = relays.flatMap(net => net.shadows.map(shadow => ({ id: shadow.host, shadow: true, health: 'shadow', machine: shadow.machine, relay: net.relay,
+      member: net.members[0]?.host ?? null, agents: Math.max(shadow.agents, ghosts.filter(row => row.host === shadow.host).length), lastSeen: shadow.lastSeen })));
+    // Each shadow ship docks beside the first observed ship on its relay (this machine first, when it is a member).
+    const sceneHosts = [...hosts, ...shadowHosts.filter((host, index) => shadowHosts.findIndex(other => other.id === host.id) === index)];
+    const relayKey = JSON.stringify([sceneHosts.filter(host => host.shadow).map(host => [host.id, host.agents]), relays.map(net => [net.relay, net.members.map(member => [member.host, member.state,
+      member.lastActivityAt && Math.floor((Date.now() - member.lastActivityAt) / 60000)])])]);
+    layout.reconcile([...rows.filter(row => row !== overseerRow), ...ghosts]);
     if (selected && !byId.has(selected)) { overview(); }
     if (page >= layout.pages()) setPage(layout.pages() - 1);
     if (!layout.onPage(page).length && rows.length) setPage(layout.pageFor(rows[0].id));
-    const rooms = layout.onPage(page), onFloor = rooms.flatMap(room => room.rows.map(value => value.row));
+    const rooms = layout.onPage(page), onFloor = rooms.flatMap(room => room.rows.map(value => value.row)).filter(row => !row.shadow), floorRows = [...rows, ...ghosts];
     // Geometry and row fields consumed by floor paint or movement; titles and tools are read live by the hover callbacks.
     const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider], ...(hosts.length ? [hosts.map(host => [host.id, host.health, host.agents, host.reason, host.health === 'available' ? null : Math.floor((clock() - (host.observedAt || 0)) / 60000)])] : [])], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
     const bus = data?.bus || null, messages = Array.isArray(bus?.messages) ? bus.messages : [];
     // Hover text, plates and pending envelopes read rows and bus live; a frozen floor repaints only when they change.
     const hostBus = data?.hostBus || {};
-    // llm-bus relays come from each observed bus's own binding; their member states are part of the scene.
-    const relays = ObserverScene.relayNetworks([[null, bus], ...Object.entries(hostBus).filter(([id]) => hosts.some(host => host.id === id))], Date.now());
-    const relayKey = JSON.stringify(relays.map(net => [net.relay, net.members.map(member => [member.host, member.state, member.lastActivityAt && Math.floor((Date.now() - member.lastActivityAt) / 60000)]),
-      net.outposts.map(outpost => [outpost.machine, outpost.agents, outpost.repos])]));
     const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages], Object.entries(hostBus).map(([id, value]) => [id, value.health, value.messages])]);
     if (key + relayKey !== sceneKey || !scene) {
-      sceneKey = key + relayKey; scene = ObserverScene.build(rooms, page, { overseer: overseerRow, overseerAccent: pack.scene?.colors?.cyan, relays, ...(hosts.length ? { hosts, localHealth: hostSources.local?.health } : {}) });
+      sceneKey = key + relayKey; scene = ObserverScene.build(rooms, page, { overseer: overseerRow, overseerAccent: pack.scene?.colors?.cyan, relays, ...(sceneHosts.length ? { hosts: sceneHosts, localHealth: hostSources?.local?.health } : {}) });
       // Row freshness is read from the current roster by id: the cached scene's row objects can be older.
       view.update(scene, { stale: () => isStale(latest), rowStale: worker => rowStale(rowFor(worker.id)), mailFrame, inspected: inspectedAgent,
         repositorySelection: () => selectedRepoId, onRepositoryToggle: toggleRepository });
@@ -849,13 +858,13 @@
     contentKey = content;
     // Bus metadata is still listed while the inventory is stale; flights need both to be live.
     const parked = mailStale(state);
-    if (data && (data !== ingested || parked !== ingestedStale)) { ingested = data; ingestedStale = parked; courier.update(bus, { now: clock(), deck: page, reduced: reducedMotion(), live: !parked, route: message => ObserverScene.route(scene, layout, message, rows) }); }
+    if (data && (data !== ingested || parked !== ingestedStale)) { ingested = data; ingestedStale = parked; courier.update(bus, { now: clock(), deck: page, reduced: reducedMotion(), live: !parked, route: message => ObserverScene.route(scene, layout, message, floorRows) }); }
     pendingSpots = ObserverScene.pending(scene, layout, messages);
     // Each remote host's own mail: its courier and pending envelopes stay on its own ship.
     for (const id of [...remoteCouriers.keys()]) if (!hostBus[id]) { remoteCouriers.delete(id); remotePending.delete(id); }
     for (const [id, value] of Object.entries(hostBus)) {
       const list = Array.isArray(value.messages) ? value.messages : [];
-      if (data !== ingestedHosts) courierFor(id).update(value, { now: clock(), deck: page, reduced: reducedMotion(), live: !isStale(state) && value.health === 'available', route: message => ObserverScene.route(scene, layout, message, rows, id) });
+      if (data !== ingestedHosts) courierFor(id).update(value, { now: clock(), deck: page, reduced: reducedMotion(), live: !isStale(state) && value.health === 'available', route: message => ObserverScene.route(scene, layout, message, floorRows, id) });
       remotePending.set(id, ObserverScene.pending(scene, layout, list, id));
     }
     ingestedHosts = data;

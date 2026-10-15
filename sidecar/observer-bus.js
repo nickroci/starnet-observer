@@ -23,7 +23,11 @@ const REMOTE_ADDRESS = /^([A-Za-z0-9_-]{1,128})\/([A-Za-z0-9_-]{1,128})\/(claude
 const RELAY_STATES = new Set(['queued_local', 'accepted_remote', 'delivered_local', 'acknowledged', 'expired']);
 const REMOTE_TABLES = ['remote_binding', 'remote_outbox', 'remote_imports', 'remote_peers'];
 const PEER_IDLE_MS = 24 * 3600 * 1000, MAX_PEERS = 2000, MAX_MACHINES = 32;
-const peerOf = address => { const match = REMOTE_ADDRESS.exec(address); return match ? { machine: match[1], repo: match[2], provider: match[3] } : null; };
+const MAX_PEER_AGENTS = 48;
+// A remote agent's page identity: an opaque hash of its full relay address, so the far side's native session id never
+// leaves this process, while a message and the roster entry for the same agent still join exactly.
+const peerId = address => 'peer_' + crypto.createHash('sha256').update('starnet-relay-peer-v1\0' + address).digest('hex').slice(0, 24);
+const peerOf = address => { const match = REMOTE_ADDRESS.exec(address); return match ? { machine: match[1], repo: match[2], provider: match[3], peer: peerId(address) } : null; };
 // "url|machine_id" (llm-bus Config.connection): the URL's host name only, never its path, port, query or user info.
 function relayBinding(connection) {
   if (typeof connection !== 'string') return null;
@@ -48,7 +52,7 @@ function selectRemote(database, rows, at) {
     const out = outbox.has(row.id), peer = out ? peerOf(row.recipient) : imports.has(row.id) ? peerOf(row.sender) : null;
     if (!peer) continue;
     const state = out ? (RELAY_STATES.has(outbox.get(row.id)) ? outbox.get(row.id) : 'unknown') : row.acknowledgedAt ? 'acknowledged' : 'delivered_local';
-    row.relay = { direction: out ? 'out' : 'in', machine: peer.machine, repo: peer.repo, provider: peer.provider, state };
+    row.relay = { direction: out ? 'out' : 'in', machine: peer.machine, repo: peer.repo, provider: peer.provider, peer: peer.peer, state };
     seen(row.sentAt);
   }
   const machines = new Map();
@@ -56,14 +60,18 @@ function selectRemote(database, rows, at) {
     let peer; try { peer = JSON.parse(payload); } catch (_) { continue; }
     if (!peer || !REMOTE_ID.test(peer.machine_id) || !REMOTE_ID.test(peer.repo_id) || peer.machine_id === binding.machine) continue;
     if (!machines.has(peer.machine_id) && machines.size >= MAX_MACHINES) continue;
-    const entry = machines.get(peer.machine_id) || { machine: peer.machine_id, repos: new Set(), agents: 0, lastSeen: null };
+    const entry = machines.get(peer.machine_id) || { machine: peer.machine_id, repos: new Set(), agents: 0, lastSeen: null, list: [] };
     machines.set(peer.machine_id, entry); entry.repos.add(peer.repo_id);
-    const last = seen(peer.last_seen);
+    const last = seen(peer.last_seen), address = typeof peer.address === 'string' ? peer.address : '', who = peerOf(address);
     // llm-bus's own roster rule: a session that reported its end, or has been idle 24 hours, is not listed.
-    if (!peer.ended && last !== null && at - last < PEER_IDLE_MS) entry.agents++;
+    if (!peer.ended && last !== null && at - last < PEER_IDLE_MS) {
+      entry.agents++;
+      if (who && who.machine === peer.machine_id && entry.list.length < MAX_PEER_AGENTS) entry.list.push({ id: who.peer, provider: who.provider, repo: who.repo, lastSeen: last });
+    }
     if (last !== null) entry.lastSeen = Math.max(entry.lastSeen ?? 0, last);
   }
-  const peers = [...machines.values()].map(entry => ({ machine: entry.machine, repos: [...entry.repos].sort().slice(0, 16), agents: entry.agents, lastSeen: entry.lastSeen }))
+  const peers = [...machines.values()].map(entry => ({ machine: entry.machine, repos: [...entry.repos].sort().slice(0, 16), agents: entry.agents, lastSeen: entry.lastSeen,
+    list: entry.list.sort((a, b) => a.repo.localeCompare(b.repo) || a.id.localeCompare(b.id)) }))
     .sort((a, b) => a.machine.localeCompare(b.machine));
   return { relay: binding.relay, machine: binding.machine, peers, lastActivityAt };
 }
@@ -236,6 +244,6 @@ function publicBus(state, sessions) {
     messages: state.rows.map(row => ({ id: row.id, ...(row.identity === undefined ? {} : { identity: row.identity }), from: endpoint(row.sender), to: endpoint(row.recipient),
       sentAt: row.sentAt, acknowledgedAt: row.acknowledgedAt, wake: row.wake, ...(row.relay ? { relay: { ...row.relay } } : {}) })),
     ...(state.remote ? { remote: { relay: state.remote.relay, machine: state.remote.machine, lastActivityAt: state.remote.lastActivityAt,
-      peers: state.remote.peers.map(peer => ({ ...peer, repos: peer.repos.slice() })) } } : {}) };
+      peers: state.remote.peers.map(peer => ({ ...peer, repos: peer.repos.slice(), list: (peer.list || []).map(agent => ({ ...agent })) })) } } : {}) };
 }
 module.exports = { makeBusReader, publicBus, defaultBusPath, WINDOW, makePrivateSnapshotQuery, sanitizeMessageInspection, relayBinding, RELAY_STATES };

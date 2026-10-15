@@ -39,23 +39,25 @@ const ObserverScene = (() => {
      the ships: an observation link (the hub's ssh stream, not a mail path) spans the gap. Cross-machine mail exists only
      through an llm-bus relay, drawn from each bus's own relay binding (see relayNetworks below), never from config. */
   const SHIP_GAP_Y = 8, HULL_MARGIN = 3, REMOTE_MARGIN = 2, ROOM_Y = (bank, index) => (bank ? -42 : -48) + 32 * index;
-  const mailroomAt = top => ({ rect: { x: 0, y: top, w: 14, h: 12 }, hub: { x: 7, y: top + 6, z: 0 },
-    tower: { x: 5, y: top + 1, w: 4, h: 3 }, pads: [4, 7, 10].map(x => ({ x, y: top + 9, z: 0 })),
-    pod: [{ x: 11, y: top + 9, z: 0 }, { x: 11, y: top + 6, z: 0 }, { x: 7, y: top + 6, z: 0 }],
-    chute: [{ x: 2, y: top + 9, z: 0 }, { x: 2, y: top + 6, z: 0 }, { x: 7, y: top + 6, z: 0 }] });
-  const remoteRoomRect = (top, slot) => ({ x: slot % 2 ? 16 : -22, y: top + 32 * Math.floor(slot / 2), w: 20, h: 26 });
+  // `dx` shifts a whole ship sideways: 0 for the column of observed ships, positive for a shadow ship docked beside one.
+  const mailroomAt = (top, dx = 0) => ({ rect: { x: dx, y: top, w: 14, h: 12 }, hub: { x: dx + 7, y: top + 6, z: 0 },
+    tower: { x: dx + 5, y: top + 1, w: 4, h: 3 }, pads: [4, 7, 10].map(x => ({ x: dx + x, y: top + 9, z: 0 })),
+    pod: [{ x: dx + 11, y: top + 9, z: 0 }, { x: dx + 11, y: top + 6, z: 0 }, { x: dx + 7, y: top + 6, z: 0 }],
+    chute: [{ x: dx + 2, y: top + 9, z: 0 }, { x: dx + 2, y: top + 6, z: 0 }, { x: dx + 7, y: top + 6, z: 0 }] });
+  const remoteRoomRect = (top, slot, dx = 0) => ({ x: dx + (slot % 2 ? 16 : -22), y: top + 32 * Math.floor(slot / 2), w: 20, h: 26 });
+  const SHADOW_GAP = 14, REMOTE_LEFT = -24, REMOTE_RIGHT = 38;
   const hullAround = (rects, HULL_MARGIN = 3) => {
     const minX = Math.min(...rects.map(r => r.x)), minY = Math.min(...rects.map(r => r.y));
     const maxX = Math.max(...rects.map(r => r.x + r.w)), maxY = Math.max(...rects.map(r => r.y + r.h));
     return { x: minX - HULL_MARGIN, y: minY - HULL_MARGIN, w: maxX - minX + 2 * HULL_MARGIN, h: maxY - minY + 2 * HULL_MARGIN };
   };
   /* llm-bus relay networks, from what each observed bus reports about its own binding (publicBus `remote`): one network
-     per relay host. A member is an observed mailroom bound to it (host null = this machine); an outpost is a machine
-     the relay's roster names that is not observed here, so its rooms are unknown and only its listed agent count is
-     shown. A member is 'active' when its bus saw relay activity (a relayed message or a peer's activity time) in the
-     last 15 minutes, 'quiet' otherwise, and 'unknown' while its bus is not currently readable: the cached roster is not
-     proof that a bridge is running. */
-  const RELAY_ACTIVE_MS = 15 * 60000, MAX_RELAYS = 4, MAX_OUTPOSTS = 8;
+     per relay host. A member is an observed mailroom bound to it (host null = this machine). A shadow is a machine the
+     relay's roster names that this observer does not watch: the page draws it as a ghosted ship of its own (see
+     shadowRows), with one desk per agent the roster lists, in a room per shared repo. A member is 'active' when its bus
+     saw relay activity (a relayed message or a peer's activity time) in the last 15 minutes, 'quiet' otherwise, and
+     'unknown' while its bus is not currently readable: the cached roster is not proof that a bridge is running. */
+  const RELAY_ACTIVE_MS = 15 * 60000, MAX_RELAYS = 4, MAX_SHADOWS = 6, PEER = /^peer_[a-f0-9]{24}$/;
   function relayNetworks(buses, now) {
     const nets = new Map();
     for (const [host, bus] of buses) {
@@ -67,20 +69,34 @@ const ObserverScene = (() => {
         state: bus.health !== 'available' ? 'unknown' : last !== null && now - last < RELAY_ACTIVE_MS ? 'active' : 'quiet' });
       for (const peer of Array.isArray(remote.peers) ? remote.peers : []) {
         if (!peer || typeof peer.machine !== 'string') continue;
-        const known = net.peers.get(peer.machine);
+        const known = net.peers.get(peer.machine), list = new Map((known?.list || []).map(agent => [agent.id, agent]));
+        for (const agent of Array.isArray(peer.list) ? peer.list : []) if (agent && PEER.test(agent.id) && typeof agent.repo === 'string') list.set(agent.id, { id: agent.id, provider: agent.provider, repo: agent.repo, lastSeen: Number.isFinite(agent.lastSeen) ? agent.lastSeen : null });
         net.peers.set(peer.machine, { machine: peer.machine, agents: Math.max(known?.agents || 0, Number.isSafeInteger(peer.agents) ? peer.agents : 0),
           repos: [...new Set([...(known?.repos || []), ...(Array.isArray(peer.repos) ? peer.repos.filter(repo => typeof repo === 'string') : [])])].sort(),
-          lastSeen: Math.max(known?.lastSeen ?? -Infinity, Number.isFinite(peer.lastSeen) ? peer.lastSeen : -Infinity) });
+          lastSeen: Math.max(known?.lastSeen ?? -Infinity, Number.isFinite(peer.lastSeen) ? peer.lastSeen : -Infinity), list: [...list.values()] });
       }
     }
     return [...nets.values()].map(net => {
       const machines = new Set(net.members.map(member => member.machine));
       return { relay: net.relay, members: net.members.sort((a, b) => (a.host === null ? -1 : b.host === null ? 1 : String(a.host).localeCompare(String(b.host)))),
-        outposts: [...net.peers.values()].filter(peer => !machines.has(peer.machine)).map(peer => ({ ...peer, lastSeen: Number.isFinite(peer.lastSeen) ? peer.lastSeen : null }))
-          .sort((a, b) => b.agents - a.agents || a.machine.localeCompare(b.machine)).slice(0, MAX_OUTPOSTS) };
+        shadows: [...net.peers.values()].filter(peer => !machines.has(peer.machine))
+          .map(peer => ({ ...peer, host: 'relay:' + peer.machine, lastSeen: Number.isFinite(peer.lastSeen) ? peer.lastSeen : null, list: peer.list.sort((a, b) => a.repo.localeCompare(b.repo) || a.id.localeCompare(b.id)) }))
+          .sort((a, b) => b.agents - a.agents || a.machine.localeCompare(b.machine)).slice(0, MAX_SHADOWS) };
     }).sort((a, b) => a.relay.localeCompare(b.relay));
   }
-  const towerTop = mailroom => ({ x: mailroom.tower.x + mailroom.tower.w / 2, y: mailroom.tower.y + mailroom.tower.h / 2, z: 3.2 });
+  /* The shadow crew: one floor row per agent a relay roster lists for an unobserved machine, laid out on that machine's
+     own ship exactly like observed crew, but never selectable, inspectable or controllable. Status is 'unknown': the
+     roster says only that the agent was active in the last day, and when it was last seen. */
+  function shadowRows(nets) {
+    const rows = [], seen = new Set();
+    for (const net of nets) for (const shadow of net.shadows) for (const agent of shadow.list) {
+      if (seen.has(agent.id)) continue; seen.add(agent.id);
+      rows.push({ id: agent.id, host: shadow.host, shadow: true, source: 'relay', relay: net.relay, machine: shadow.machine, provider: agent.provider === 'codex' ? 'codex' : 'claude',
+        status: 'unknown', project: agent.repo, projectId: 'relay:' + shadow.machine + ':' + agent.repo, projectKind: 'repository', repo: agent.repo, repoId: agent.repo,
+        title: agent.repo + ' on ' + shadow.machine, lastActivityAt: agent.lastSeen, tool: { available: false } });
+    }
+    return rows;
+  }
   function build(rooms, page, extras = {}) {
     // Ships appear only when remote hosts are configured; a single-host station is laid out exactly as before.
     const remoteHosts = Array.isArray(extras.hosts) ? extras.hosts.map(host => ({ ...host })) : [];
@@ -89,11 +105,19 @@ const ObserverScene = (() => {
     // Ship tops: below the flagship hull's bottom edge (its lowest connector), then below each remote hull in turn.
     const roomY = room => { const slot = room.slot % 8; return ROOM_Y(slot % 2, Math.floor(slot / 2)); };
     let cursor = Math.max(12, ...rooms.filter(room => !room.host).map(room => roomY(room) + 29)) + HULL_MARGIN;
-    const tops = new Map(), mailrooms = new Map();
-    for (const host of remoteHosts) {
+    const tops = new Map(), mailrooms = new Map(), dxs = new Map();
+    for (const host of remoteHosts.filter(host => !host.shadow)) {
       const top = cursor + SHIP_GAP_Y + REMOTE_MARGIN, own = rooms.filter(room => room.host === host.id);
-      tops.set(host.id, top); mailrooms.set(host.id, mailroomAt(top));
+      tops.set(host.id, top); mailrooms.set(host.id, mailroomAt(top)); dxs.set(host.id, 0);
       cursor = Math.max(top + 12, ...own.map(room => remoteRoomRect(top, room.slot % 8).y + 29)) + REMOTE_MARGIN;
+    }
+    /* A shadow ship (an unobserved machine on a relay) docks beside the observed ship it is linked to, level with that
+       ship's mailroom, so the column of observed ships and their ssh links never change; several shadows line up east. */
+    const localRight = Math.max(47, ...rooms.filter(room => !room.host).map(room => (room.slot % 8) % 2 ? 47 : 0)), eastOf = new Map();
+    for (const host of remoteHosts.filter(host => host.shadow)) {
+      const member = host.member !== undefined && (host.member === null || tops.has(host.member)) ? host.member : null;
+      const right = eastOf.get(member) ?? (member === null ? localRight : REMOTE_RIGHT), dx = right + SHADOW_GAP - REMOTE_LEFT, top = member === null ? 0 : tops.get(member);
+      tops.set(host.id, top); dxs.set(host.id, dx); mailrooms.set(host.id, mailroomAt(top, dx)); eastOf.set(member, dx + REMOTE_RIGHT);
     }
     const mail = { rect: { x: 0, y: 0, w: 14, h: 12 }, hub: { x: 7, y: 6, z: 0 },
       tower: { x: 5, y: 1, w: 4, h: 3 }, pads: [4, 7, 10].map(x => ({ x, y: 9, z: 0 })),
@@ -103,8 +127,8 @@ const ObserverScene = (() => {
     for (const room of rooms) {
       const slot = room.slot % 8, bank = slot % 2, index = Math.floor(slot / 2);
       const own = room.host ? mailrooms.get(room.host) : mail, dock = own.hub;
-      const rect = room.host ? remoteRoomRect(tops.get(room.host), slot) : { x: bank ? 24 : -30, y: ROOM_Y(bank, index), w: 20, h: 26 };
-      const spineX = room.host ? 7 : bank ? 19 : -5, entry = pointAt(rect, 10, 25), elbow = pointAt(rect, 10, 28), join = { x: spineX, y: elbow.y, z: 0 };
+      const rect = room.host ? remoteRoomRect(tops.get(room.host), slot, dxs.get(room.host) || 0) : { x: bank ? 24 : -30, y: ROOM_Y(bank, index), w: 20, h: 26 };
+      const spineX = room.host ? 7 + (dxs.get(room.host) || 0) : bank ? 19 : -5, entry = pointAt(rect, 10, 25), elbow = pointAt(rect, 10, 28), join = { x: spineX, y: elbow.y, z: 0 };
       const bankKey = room.host ? room.host : bank;
       if (!banks.has(bankKey)) banks.set(bankKey, { x: spineX, host: room.host || null, dock, ys: [] }); banks.get(bankKey).ys.push(join.y);
       walkways.push(onHost(strip(entry, elbow, 'connector'), room.host), onHost(strip(elbow, join, 'connector'), room.host));
@@ -187,42 +211,36 @@ const ObserverScene = (() => {
         const own = mailrooms.get(host.id);
         const parts = [own.rect, ...platforms.filter(p => p.host === host.id).map(p => p.rect), ...walkways.filter(w => w.host === host.id).map(w => w.rect)];
         const health = host.health || 'unavailable', rect = hullAround(parts, REMOTE_MARGIN);
-        ships.push({ id: host.id, local: false, health, observedAt: host.observedAt ?? null, reason: host.reason || null, agents: host.agents ?? 0, mail: own, rect });
+        ships.push({ id: host.id, local: false, health, observedAt: host.observedAt ?? null, reason: host.reason || null, agents: host.agents ?? 0, mail: own, rect,
+          ...(host.shadow ? { shadow: true, machine: host.machine, relay: host.relay, lastSeen: host.lastSeen ?? null } : {}) });
         // Observation link: the hub's ssh stream to this host, hull to hull across the gap. Its state is the stream's
-        // real health, never the config; it is telemetry, not a corridor or a mail path.
-        links.push({ host: host.id, health, from: { x: 12, y: above.y + above.h }, to: { x: 12, y: rect.y } });
-        above = rect;
+        // real health, never the config; it is telemetry, not a corridor or a mail path. A shadow ship is not observed.
+        if (!host.shadow) { links.push({ host: host.id, health, from: { x: 12, y: above.y + above.h }, to: { x: 12, y: rect.y } }); above = rect; }
       }
     }
-    /* Relays float in space east of everything observed; each bound mailroom's tower beams up to its relay, and the
-       relay's unobserved machines sit beyond it as outposts. Nothing here is a corridor: crew never walk these. */
-    // A relay sits level with the mailrooms it serves, just clear of whatever occupies that band, so a relay used only by
-    // a remote ship floats beside that ship rather than across the station.
-    const relays = [], solid = [mail.rect, observatory.rect, ...platforms.map(p => p.rect), ...(ships.length ? ships.map(ship => ship.rect) : [])];
-    const mailroomFor = host => host === null ? mail : mailrooms.get(host) || null;
-    let relayCursor = -Infinity;
+    /* Relay links: llm-bus relays mail mailroom to mailroom, so each network joins its members' mailrooms to each other
+       and to every shadow ship's mailroom. Couriers for relayed mail fly along these, high above the decks; crew never
+       walk them. A link's state is its observed member's (active, quiet or unknown). */
+    const relays = [], hubOf = host => host === null ? mail : mailrooms.get(host) || null;
     for (const net of Array.isArray(extras.relays) ? extras.relays : []) {
-      const members = net.members.filter(member => mailroomFor(member.host));
+      const members = net.members.filter(member => hubOf(member.host)), shadows = (net.shadows || []).filter(shadow => hubOf(shadow.host));
       if (!members.length) continue;
-      const ys = members.map(member => mailroomFor(member.host).hub.y), height = Math.max(6, net.outposts.length * 8);
-      const top = Math.max(relayCursor, (Math.min(...ys) + Math.max(...ys)) / 2 - height / 2);
-      const band = solid.filter(rect => rect.y < top + height + 2 && rect.y + rect.h > top - 2), relayX = Math.max(...(band.length ? band : solid).map(rect => rect.x + rect.w)) + 18;
-      const rect = { x: relayX, y: top + height / 2 - 2, w: 4, h: 4 }, center = { x: rect.x + 2, y: rect.y + 2, z: 3.2 };
-      relays.push({ key: 'relay:' + net.relay, relay: net.relay, rect, center,
-        members: members.map(member => ({ ...member, from: towerTop(mailroomFor(member.host)), to: center })),
-        outposts: net.outposts.map((outpost, index) => {
-          const box = { x: relayX + 12, y: top + index * 8 + 1, w: 8, h: 6 };
-          return { ...outpost, rect: box, link: { from: center, to: { x: box.x, y: box.y + box.h / 2, z: 3.2 } } };
-        }) });
-      relayCursor = top + height + 6;
+      const links = [];
+      members.forEach((member, index) => {
+        for (const other of [...members.slice(index + 1).map(value => ({ host: value.host, machine: value.machine })), ...shadows.map(value => ({ host: value.host, machine: value.machine, shadow: true }))]) {
+          const a = hubOf(member.host).hub, b = hubOf(other.host).hub;
+          links.push({ from: member.host, to: other.host, machine: other.machine, shadow: !!other.shadow, state: member.state, lastActivityAt: member.lastActivityAt, a: { ...a, z: 2.2 }, b: { ...b, z: 2.2 } });
+        }
+      });
+      relays.push({ key: 'relay:' + net.relay, relay: net.relay, members: members.map(member => ({ host: member.host, machine: member.machine, state: member.state, lastActivityAt: member.lastActivityAt })), links });
     }
     const extents = [mail.rect, ...platforms.map(p => p.rect), ...walkways.map(w => w.rect), ...ships.map(ship => ship.rect),
-      ...relays.flatMap(relay => [relay.rect, ...relay.outposts.map(outpost => outpost.rect)])].map(rect => ({ rect }))
+      ].map(rect => ({ rect }))
       .concat(observatory.extents);
     const bounds = projectedBounds(extents);
     const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.section || b.repo)]).sort(),
       ...(ships.length ? [ships.map(ship => [ship.id, ship.health, ship.rect])] : []),
-      ...(relays.length ? [relays.map(relay => [relay.key, relay.members.map(member => member.host), relay.outposts.map(outpost => outpost.machine)])] : []),
+      ...(relays.length ? [relays.map(relay => [relay.key, relay.links.map(link => [link.from, link.to])])] : []),
       workers.map(w => [w.id, w.kind, w.parentId, w.chair.x, w.chair.y]).sort()]);
     return { page, revision, platforms, walkways, workers, helperOverflow, observatory, mail, bounds, ...(ships.length ? { ships, links } : {}), ...(relays.length ? { relays } : {}) };
   }
@@ -284,31 +302,39 @@ const ObserverScene = (() => {
     }
     return { key: 'chute', points: own.chute };
   }
-  /* A relayed message's far side is the relay this host's mailroom is bound to: the drone flies between the mailroom and
-     the relay (up the tower beam), never to another ship. Each end observes only its own half of a crossing. */
-  function relayEnd(scene, host) {
-    const relay = (scene.relays || []).find(value => value.members.some(member => member.host === host));
-    if (!relay) return null;
-    const own = mailOf(scene, host) || scene.mail, tower = towerTop(own);
-    return { key: relay.key, points: [{ ...relay.center, z: 0 }, { x: tower.x, y: tower.y, z: 0 }, own.hub], outposts: relay.outposts };
+  /* A relayed message's far side, as courier waypoints ending at this host's own hub: the far agent's desk on its shadow
+     ship (desk → its mailroom → across the relay link → here), else that machine's mailroom (a shadow ship without that
+     agent listed, or an observed machine, whose own bus shows the other half of the crossing). Null when no relay link
+     from this host reaches that machine: the message then uses the plain outside chute. */
+  function relayEnd(scene, message, host) {
+    const relay = message.relay, own = mailOf(scene, host) || scene.mail;
+    const link = (scene.relays || []).flatMap(value => value.links).find(value => (value.from === host && value.machine === relay.machine) ||
+      (value.to === host && (scene.relays || []).some(net => net.members.some(member => member.host === value.from && member.machine === relay.machine))));
+    if (!link) return null;
+    const farHost = link.from === host ? link.to : link.from, far = mailOf(scene, farHost);
+    if (!far) return null;
+    const ghost = link.shadow && relay.peer ? scene.workers.find(worker => worker.id === relay.peer && worker.row.host === farHost) : null;
+    return ghost ? { key: ghost.id, points: [...ghost.route, own.hub], desk: true, link } : { key: 'ship:' + farHost, points: [far.hub, own.hub], desk: false, link, observed: !link.shadow };
   }
   function route(scene, layout, message, rows, host = null) {
-    const far = message.relay ? relayEnd(scene, host) : null, out = message.relay?.direction === 'out';
-    const from = far && !out ? far : endpoint(scene, layout, message.from, host), to = far && out ? far : endpoint(scene, layout, message.to, host), recipient = rows.find(r => r.id === message.to);
+    const far = message.relay ? relayEnd(scene, message, host) : null, out = message.relay?.direction === 'out';
+    const from = far && !out ? far : endpoint(scene, layout, message.from, host), to = far && out ? far : endpoint(scene, layout, message.to, host), recipient = rows.find(r => r.id === (far && out ? message.relay.peer : message.to));
     return { key: from.key + '>' + to.key, from: from.points, to: to.points, color: recipient ? layout.colorFor(Model.projectKey(recipient)).accent : null };   // the courier colours unassigned recipients
   }
   function pending(scene, layout, messages, host = null) {
     const spots = new Map();
     for (const message of messages) {
       if (message.acknowledgedAt) continue;
-      // Outgoing relayed mail waits where it was last proven to be: this mailroom until the relay accepts it, then the relay.
-      // Delivered: it waits at the far machine's outpost; a far machine observed here shows its own copy, so none is drawn.
-      const far = message.relay?.direction === 'out' ? relayEnd(scene, host) : null, state = far && message.relay.state;
-      if (state === 'expired') continue;
-      const outpost = state === 'delivered_local' ? far.outposts.find(value => value.machine === message.relay.machine) : null;
-      if (state === 'delivered_local' && !outpost) continue;
-      const end = !far ? endpoint(scene, layout, message.to, host) : outpost ? { key: 'outpost:' + outpost.machine, points: [{ x: outpost.rect.x + outpost.rect.w / 2, y: outpost.rect.y + outpost.rect.h / 2, z: 0 }] }
-        : state === 'queued_local' ? { key: 'uplink', points: [far.points[1]] } : far, key = end.key + ':' + (end.deck || '');
+      /* Outgoing relayed mail waits where llm-bus last proved it is: this mailroom while queued, halfway along the relay
+         link once the relay holds it, and at the far agent's desk once delivered there (an observed far machine shows
+         its own copy, so none is drawn here). Expired mail is not waiting anywhere. */
+      const far = message.relay?.direction === 'out' ? relayEnd(scene, message, host) : null, state = far && message.relay.state;
+      if (state === 'expired' || (state === 'delivered_local' && far.observed)) continue;
+      const own = mailOf(scene, host) || scene.mail;
+      const end = !far ? endpoint(scene, layout, message.to, host)
+        : state === 'queued_local' ? { key: 'queued', points: [own.chute[0]] }
+        : state === 'accepted_remote' ? { key: 'relay:' + far.key, points: [{ x: (far.link.a.x + far.link.b.x) / 2, y: (far.link.a.y + far.link.b.y) / 2, z: 0 }] }
+        : { key: far.key, points: far.points }, key = end.key + ':' + (end.deck || '');
       if (!spots.has(key)) spots.set(key, { point: { ...end.points[0], z: 1.2 }, count: 0, mark: false, label: end.deck ? 'D' + end.deck : '' });
       const spot = spots.get(key); spot.count++; if (['failed', 'unsupported', 'unknown'].includes(message.wake)) spot.mark = true;
     }
@@ -589,6 +615,6 @@ const ObserverScene = (() => {
     }
     return { reconcile, step, reset };
   }
-  return { build, relayNetworks, mailOf, project, unproject, fit, focus, platformBounds, focusPlatform, hitPlatform, zoomAt, pan, toScreen, fromScreen, hitTest, endpoint, route, pending, createMovement };
+  return { build, relayNetworks, shadowRows, mailOf, project, unproject, fit, focus, platformBounds, focusPlatform, hitPlatform, zoomAt, pan, toScreen, fromScreen, hitTest, endpoint, route, pending, createMovement };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverScene;
