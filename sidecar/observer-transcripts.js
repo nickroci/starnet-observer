@@ -310,18 +310,15 @@ function makeTranscriptObserver(options = {}) {
     if (wasReady) await state.promise;
     return state.ready ? state.projection : null;
   }
-  // Tail projection and index agree or the claim is ambiguous (null), exactly like a repeated spawn in one file.
+  // A complete full-file index owns both claims and their absence. Bounded header
+  // metadata may be cached across edits outside its validated prefix and tail.
   function mergedSpawn(projection, index, child) {
+    if (index && !index.helperClaimsPartial) return index.helperSpawns.get(child);
     const hasTail = !!projection?.helperSpawns.has(child), hasIndex = !!index?.helperSpawns.has(child);
     if (!hasTail && !hasIndex) return undefined;
     const tail = hasTail ? projection.helperSpawns.get(child) : undefined, indexed = hasIndex ? index.helperSpawns.get(child) : undefined;
     if (tail === null || indexed === null || tail && indexed && tail.toolUseId !== indexed.toolUseId) return null;
     return tail || indexed;
-  }
-  function mergedEvent(projection, index, child) {
-    const tail = projection?.helperEvents.get(child), indexed = index?.helperEvents.get(child);
-    if (!tail || !indexed) return tail || indexed;
-    return indexed.observedAt != null && (tail.observedAt == null || indexed.observedAt > tail.observedAt) ? indexed : tail;
   }
   // Hide the mutable maps: traversal receives only an immutable claim-presence lookup.
   // Null is still a claim, so an ambiguous ancestor cannot be guessed away.
@@ -330,8 +327,10 @@ function makeTranscriptObserver(options = {}) {
     const spawns = new Map(), events = new Map();
     for (const child of new Set([...(projection?.helperSpawns.keys() || []), ...(index?.helperSpawns.keys() || [])])) {
       const spawn = mergedSpawn(projection, index, child);
+      if (spawn === undefined) continue;
       spawns.set(child, spawn && Object.freeze({ ...spawn }));
-      const event = mergedEvent(projection, index, child);
+      // An absent/evicted indexed event means unknown; a stale header cannot restore it.
+      const event = (index || projection)?.helperEvents.get(child);
       if (event) events.set(child, Object.freeze({ ...event }));
     }
     return Object.freeze({ available: !!index && !index.helperClaimsPartial, has: child => spawns.has(child), spawn: child => spawns.get(child), event: child => events.get(child) });

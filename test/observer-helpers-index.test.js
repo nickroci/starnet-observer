@@ -224,6 +224,42 @@ const notification = (child, status) => line({ type: 'queue-operation', operatio
     assert(afterEventOverflow, 'status-event eviction does not erase complete spawn-absence proof');
     assert.equal((await helpers.inspect(afterEventOverflow)).available, true, 'status-only overflow does not deny complete private ancestry proof');
 
+    // The header projection validates only its short prefix and tail on reuse.
+    // Restore exact mtime after a header-only edit: the full index must still own absence.
+    await child('header');
+    const fixedTime = new Date('2026-10-15T12:00:00Z');
+    const rewriteAtFixedTime = async text => { await fs.writeFile(parentFile, text); await fs.utimes(parentFile, fixedTime, fixedTime); };
+    const headerClaim = head + padding(20, 'header') + spawn('header') + padding(1700, 'tail');
+    await rewriteAtFixedTime(headerClaim);
+    result = await helpers.children([parent]);
+    const selectedHeader = result.rows.find(row => row.sessionId === 'header');
+    assert(selectedHeader);
+    assert.equal((await helpers.inspect(selectedHeader)).available, true);
+    await rewriteAtFixedTime(headerClaim.replace('"Agent"', '"Other"'));
+    assert.equal((await helpers.inspect(selectedHeader)).available, false, 'full-index absence revokes stale header proof before discovery despite restored mtime');
+    result = await helpers.children([parent]);
+    assert.deepEqual(names(result), [], 'full-index absence withdraws the helper despite cached header claim');
+    assert.equal((await helpers.inspect(selectedHeader)).available, false, 'revocation persists after discovery');
+
+    // A rejected stale header claim must not survive as an undefined map entry
+    // whose presence would wrongly contradict a valid nested immediate parent.
+    const headerAncestor = head + padding(20, 'header') + spawn('nested', 'root-header') + padding(1700, 'tail') + spawn('scout');
+    await rewriteAtFixedTime(headerAncestor);
+    result = await helpers.children([parent]);
+    assert.deepEqual(names(result), ['scout']);
+    await rewriteAtFixedTime(headerAncestor.replace('"Agent"', '"Other"'));
+    result = await helpers.children([parent]);
+    assert.deepEqual(names(result), ['nested', 'scout'], 'absent indexed claim is absent from ancestor presence lookup');
+    assert.equal((await helpers.inspect(result.rows.find(row => row.sessionId === 'nested'))).available, true);
+
+    const headerEvent = head + padding(20, 'header') + spawn('header') + notification('header', 'completed') + padding(1700, 'tail');
+    await rewriteAtFixedTime(headerEvent);
+    result = await helpers.children([parent]);
+    assert.equal(result.rows[0].status, 'done');
+    await rewriteAtFixedTime(headerEvent.replace('<status>completed</status>', '<status>unrelated</status>'));
+    result = await helpers.children([parent]);
+    assert.equal(result.rows[0].status, 'unknown', 'full-index event absence withdraws stale cached terminal status');
+
     console.log('observer helpers index: spawns outside the tail, append, conflict, rewrite/replacement reset, sidecar corroboration and activity status PASS');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
