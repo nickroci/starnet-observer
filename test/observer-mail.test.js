@@ -138,3 +138,28 @@ assert.deepEqual(Mail.along([{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }], 0.
   courier.step(2000 + Mail.FADE); assert.equal(courier.frame(2000 + Mail.FADE, {}).envelopes.length, 0, 'acknowledged envelope expires on original engine clock');
 }
 console.log('observer mail: stale bus/inventory grounding and rebase, no history replay, route batching, clocked legs, queue/overflow bounds, ACK fade, stale/deck/gap/reduced/resume rebase and projected frames OK');
+
+// Theme mail colours change only appearance: same flights, positions and parcels' destination colours as the default.
+{
+  const defaults = require('../frontend/assets/themes/starnet/theme.json').scene.colors;
+  const colors = { ...defaults, 'mail-pending': '#102030', 'mail-acknowledged': '#203040', 'mail-unassigned': '#304050' };
+  // A route whose recipient has no project colour (Scene.route returns null) flies in the unassigned colour.
+  const mixed = item => ({ ...route(item), color: item.to === 'external' ? null : '#abcdef' });
+  const drive = courier => {
+    courier.update(bus([message(1)]), { now: 0, deck: 0, route: mixed });
+    courier.update(bus([message(1), message(2), message(3, { to: 'external' })]), { now: 1000, deck: 0, route: mixed });
+    courier.update(bus([message(1, { acknowledgedAt: 'now' }), message(2), message(3, { to: 'external' })]), { now: 1500, deck: 0, route: mixed });
+    const pending = [{ point: { x: 3, y: 4 }, count: 1, mark: false, label: '' }];
+    return { state: courier.state(), frame: courier.frame(1700, { pending, pads: [{ x: 1, y: 1 }] }) };
+  };
+  const plain = drive(Mail.createCourier()), themed = drive(Mail.createCourier({ colors }));
+  assert.deepEqual(themed.state, plain.state, 'same flights and queue');
+  const shape = frame => JSON.stringify({ drones: frame.drones.map(drone => ({ ...drone, parcels: drone.parcels.length })), envelopes: frame.envelopes.map(({ color, ...rest }) => rest) });
+  assert.equal(shape(themed.frame), shape(plain.frame), 'same drone and envelope positions');
+  const parcels = frame => frame.drones.flatMap(drone => drone.parcels);
+  assert.deepEqual(parcels(plain.frame).sort(), ['#abcdef', defaults['mail-unassigned']].sort(), 'default unassigned colour comes from the canonical pack');
+  assert.deepEqual(parcels(themed.frame).sort(), ['#abcdef', '#304050'].sort(), 'recipient colours stay; unassigned is themed');
+  assert.deepEqual(plain.frame.envelopes.map(envelope => envelope.color), [defaults['mail-pending'], defaults['mail-acknowledged']]);
+  assert.deepEqual(themed.frame.envelopes.map(envelope => envelope.color), ['#102030', '#203040'], 'pending and acknowledged envelopes are themed');
+  console.log('theme mail colours: same routes and frames, themed envelopes and unassigned parcels OK');
+}

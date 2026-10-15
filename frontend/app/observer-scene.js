@@ -157,7 +157,7 @@ const ObserverScene = (() => {
   }
   function route(scene, layout, message, rows) {
     const from = endpoint(scene, layout, message.from), to = endpoint(scene, layout, message.to), recipient = rows.find(r => r.id === message.to);
-    return { key: from.key + '>' + to.key, from: from.points, to: to.points, color: recipient ? layout.colorFor(Model.projectKey(recipient)).accent : '#c9d3da' };
+    return { key: from.key + '>' + to.key, from: from.points, to: to.points, color: recipient ? layout.colorFor(Model.projectKey(recipient)).accent : null };   // the courier colours unassigned recipients
   }
   function pending(scene, layout, messages) {
     const spots = new Map();

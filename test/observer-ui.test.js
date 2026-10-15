@@ -7,6 +7,7 @@ const ObserverMail = require('../frontend/app/observer-mail.js');
 const ObserverInspector = require('../frontend/app/observer-inspector.js');
 const ObserverMailInspector = require('../frontend/app/observer-mail-inspector.js');
 const ObserverScene = require('../frontend/app/observer-scene.js');
+const ThemePack = require('../frontend/app/theme-pack.js');
 let document;
 // DOM double with real move semantics: inserting an attached node detaches it first, as the browser does.
 let created = 0, listenersAdded = 0;
@@ -60,7 +61,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   const bodyStyles = new Map(); document.body.style.setProperty = (key, value) => bodyStyles.set(key, value);
   const ObserverView = { create(created) { viewOptions = created; return { setFx(on) { fxState = on; }, fx() { return fxState; }, update(next, payload) { updates.push({ scene: next, options: payload }); }, focus(id) { focuses.push(id); },
     overview() { focuses.push(null); }, zoomBy(factor) { zooms.push(factor); }, start() { lifecycle.push('start'); }, stop() { lifecycle.push('stop'); }, invalidate() { invalidations.push(1); } }; } };
-  const context = { console, Date, Set, Map, document, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, encodeURIComponent,
+  const context = { console, Date, Set, Map, document, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, ThemePack, encodeURIComponent,
     window: { __OBSERVER_THEME__: { fx: false, colors: { accent: '#77dce8', background: '#02060b' } }, localStorage: { getItem() { return 'on'; }, setItem() {} }, addEventListener(name, fn) { events[name] = fn; } }, SPRITES: { init: async () => {} },
     Harness: { api: { get: path => { reads.push(path); return new Promise(() => {}); } } },
     QuerySpine: { define(key, options) { specs.set(key, options); if (key === 'observer.sessions') spec = options; },
@@ -75,6 +76,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   // A real poll always parses a new data object; tests that edit rows in place republish them the same way.
   const poll = () => ({ ...snapshot, data: { ...snapshot.data } });
   assert.equal(viewOptions.canvas, elements.world); assert.deepEqual(lifecycle, ['start'], 'one view, started once');
+  assert.equal(viewOptions.theme, ThemePack.getDefault(), 'without a selected snapshot the view paints the canonical default');
   assert.equal(fxState, false, 'explicit theme FX wins over saved browser preference');
   assert.equal(elements['fx-toggle'].attributes['aria-pressed'], 'false');
   assert.equal(themedStyles.size, 0, 'interface colours come from the theme pack helper, not observer.js');
@@ -245,6 +247,39 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     await new Promise(resolve => setImmediate(resolve));
   }
   console.log('observer UI: unresolved, rejected and throwing sprite init never block startup OK');
+  // The selected snapshot reaches the view, layout accents, courier colours and crew init; crew failure warns once and repaints.
+  {
+    const base = ThemePack.getDefault(), accents = Array.from({ length: 10 }, (_, index) => '#c0' + String(index).padStart(2, '0') + 'c' + index);
+    const pack = { version: 1, requestedId: 'synthetic', effectiveId: 'synthetic', warnings: [], ui: base.ui, crew: { blank: base.crew.blank },
+      scene: { ...base.scene, colors: { ...base.scene.colors, 'mail-pending': '#102030' }, projectAccents: accents, backgroundFx: 'none', ambientFx: 'none' } };
+    const own = Object.fromEntries(Object.keys(elements).map(id => [id, element()])), renders = [], inits = [], warnings = [];
+    let created = null, invalidated = 0, live = null, options = null;
+    const ownDocument = { documentElement: element(), body: element(), activeElement: null, hidden: false, getElementById: id => own[id], createElement: element, addEventListener() {} };
+    own.filters.children = ['all', 'working', 'blocked'].map(value => { const node = element(); node.dataset.filter = value; return node; });
+    vm.runInNewContext(fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8'), { ...context, document: ownDocument,
+      window: { ...context.window, __OBSERVER_THEME_PACK__: pack }, SPRITES: { init: arg => { inits.push(arg); return Promise.resolve(); } },
+      ThemePack: { ...ThemePack, reportWarning: warning => warnings.push(warning) },
+      ObserverView: { create: value => { created = value; return { update: (next, payload) => { renders.push(next); options = payload; }, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate: () => { invalidated++; } }; } },
+      QuerySpine: { define() {}, invalidate: () => Promise.resolve(), subscribe(key, fn) { if (key === 'observer.sessions') live = fn; return () => {}; } } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(created.theme, pack, 'the view receives the selected snapshot'); assert(Object.isFrozen(pack.scene.colors), 'and it is frozen');
+    assert.equal(inits.length, 1); assert.equal(inits[0].crew, pack.crew, 'sprite init receives the snapshot crew'); assert.equal(typeof inits[0].onDegraded, 'function');
+    const settled = invalidated;
+    const rows = sessions.slice(0, 2).map(row => ({ ...row, sessionId: 'mail-' + row.id }));
+    live({ data: { sessions: rows, health: 'available', observedAt: Date.now(), bus: { health: 'available', reason: null, observedAt: Date.now(), window: 100,
+      messages: [{ id: 1, from: 'obs_1', to: 'obs_0', sentAt: new Date().toISOString(), acknowledgedAt: null, wake: 'none', identity: 'mail_' + '1'.repeat(64) }] } } });
+    const accent = renders.at(-1).platforms[0].accent;
+    assert(accents.includes(accent) && !base.scene.projectAccents.includes(accent), 'platform accents come from the snapshot slots');
+    assert.deepEqual(options.mailFrame(1000).envelopes.map(envelope => envelope.color), ['#102030'], 'pending envelopes use the snapshot mail colour');
+    inits[0].onDegraded({ skin: 'blank', reason: 'image-load' });
+    assert.equal(warnings.length, 1); assert.equal(invalidated, settled + 1, 'a degraded crew group repaints the scene once');
+    assert.deepEqual({ code: warnings[0].code, pack: warnings[0].pack, group: warnings[0].group }, { code: 'crew-load', pack: 'synthetic', group: 'blank' });
+    assert.equal(warnings[0].message, 'Theme pack synthetic crew blank did not load; showing the default crew.');
+    inits[0].onDegraded({ skin: '../assets/x.png', reason: 'image-dimensions', error: new Error('/private/path') });
+    assert.deepEqual([warnings[1].code, warnings[1].group], ['crew-dimensions', 'unknown'], 'unsafe group names never reach the warning');
+    assert(!warnings[1].message.includes('/') && !warnings[1].message.includes('Error'), 'no paths or raw errors');
+  }
+  console.log('observer UI: snapshot reaches view, layout accents, courier colours and crew init; crew degradation warns and repaints OK');
 
   // ---------- Task 2: work follows visible change ----------
   {
