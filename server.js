@@ -50,13 +50,14 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       try { for await (const chunk of req) { bytes += chunk.length; if (bytes > 4096) return json(413, { error: 'Body too large' }); chunks.push(chunk); } } catch (_) { return json(400, { error: 'Body unreadable' }); }
       let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch (_) { return json(400, { error: 'Invalid JSON' }); }
       if (!body || typeof body !== 'object' || Array.isArray(body)) return json(400, { error: 'JSON object required' });
+      if (action[1] === 'overseer' && !['claude', 'codex'].includes(body.provider)) return json(400, { error: 'invalid-provider' });
       // Pane ids may be host-namespaced (`herdr-dev-2/w1:p1`); control refuses hosts that are not configured remotes.
       if (!['overseer', 'spawn-host'].includes(action[1]) && (typeof body.paneId !== 'string' || !TARGET.test(body.paneId))) return json(400, { error: 'paneId required' });
       if (action[1] === 'spawn-host' && (typeof body.host !== 'string' || body.folder !== undefined && body.folder !== null && typeof body.folder !== 'string')) return json(400, { error: 'host and folder must be strings' });
       // Presentation masks host identities, so remote control (which would echo them) is unavailable there.
       if (presentation && (action[1] === 'spawn-host' || typeof body.paneId === 'string' && !PANE.test(body.paneId))) return json(403, controlResult(action[1], null, new Error('control-unavailable')));
       try {
-        const result = action[1] === 'overseer' ? await control.overseer() : action[1] === 'spawn-host' ? await control.spawnHost(body.host, body.folder ?? null) : await control[action[1]](body.paneId);
+        const result = action[1] === 'overseer' ? await control.overseer(body.provider) : action[1] === 'spawn-host' ? await control.spawnHost(body.host, body.folder ?? null) : await control[action[1]](body.paneId);
         return json(200, controlResult(action[1], result));
       }
       catch (thrown) { const error = thrown instanceof Error ? thrown : new Error(String(thrown)); const status = Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 500; if (status >= 500) console.warn('[observer control]', presentation ? controlResult(action[1], null, error).error : redact(String(error.message))); return json(status, controlResult(action[1], null, error)); }

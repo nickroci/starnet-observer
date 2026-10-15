@@ -112,6 +112,6 @@ assert.equal(Model.projectName({ project: 'web' }), 'web');
   const [room] = homeLayout.onPage(0);
   assert.equal(room.name, '~ home', 'the room sign');
   const homeScene = Scene.build(homeLayout.onPage(0), 0);
-  assert.deepEqual(homeScene.platforms[0].sections.map(section => section.label).sort(), ['tools', '~ home'], 'section labels');
+  assert.deepEqual(homeScene.platforms[0].sections.map(section => section.label).sort(), ['tools · Checkout unavailable', '~ home · Checkout unavailable'], 'section labels retain home alias and checkout proof state');
 }
 console.log('observer hosts view: "~ home" labels, blocked "!" badge (fresh only, overview too), ship floor/label selection, observation/relay labels, links only with remotes OK');

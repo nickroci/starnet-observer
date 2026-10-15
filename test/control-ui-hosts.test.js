@@ -1,4 +1,5 @@
 'use strict';
+const sessionItems = node => node.className?.split(' ').includes('session-item') ? [node] : (node.children || []).flatMap(sessionItems);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -45,7 +46,7 @@ function element() {
   // Remote rows (multi-host hub) get the same actions, posting their host-namespaced pane id.
   const remote = { ...sessions[0], id: 'obs_' + 'c'.repeat(24), paneId: 'herdr-dev-2/w1:p2', host: 'herdr-dev-2', projectId: 'prj_remote', title: 'Remote', observedAt: Date.now() };
   listener({ data: { sessions: [sessions[0], remote], health: 'available', observedAt: Date.now() } });
-  const remoteItem = elements.sessions.children.flatMap(section => section.children[2].children).find(item => item.children[0].dataset.sessionId === remote.id);
+  const remoteItem = sessionItems(elements.sessions).find(item => item.children[0].dataset.sessionId === remote.id);
   assert.equal(remoteItem.children[3].hidden, false, 'a live remote pane gets attach');
   remoteItem.children[3].handlers.click(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(lastPost(), JSON.stringify(['/api/control/attach', { paneId: 'herdr-dev-2/w1:p2' }]));
@@ -62,7 +63,7 @@ function element() {
   const tabs = elements['host-tabs'];
   assert.equal(tabs.hidden, false); assert.deepEqual(tabs.children.map(tab => tab.dataset.host), ['', 'empty', 'herdr-dev-2'], 'one tab per host, this machine first');
   assert.equal(tabs.children[0].attributes['aria-selected'], 'true'); assert.equal(elements['crew-title'].textContent, 'This machine crew');
-  const listed = () => elements.sessions.children.flatMap(section => section.children[2].children).map(item => item.children[0].dataset.sessionId);
+  const listed = () => sessionItems(elements.sessions).map(item => item.children[0].dataset.sessionId);
   assert.deepEqual(listed(), [sessions[0].id], 'this machine lists only local rows');
   assert.equal(elements['host-spawn'].hidden, true, 'no "New agent in ~" row for a local host that has agents');
   assert.equal(elements['mail-title'].textContent, 'Mailroom · this machine · recent 100');
@@ -78,7 +79,7 @@ function element() {
   assert.equal(elements['mail-ledger'].children.length, 2, 'and lists that host’s own bus');
   assert.match(elements['mail-counts'].textContent, /^1 pending · 1 acknowledged/);
   // Blocked: the row reads "waiting for input", carries the attach hint and a prominent attach button.
-  const blockedItem = elements.sessions.children.flatMap(section => section.children[2].children)[0];
+  const blockedItem = sessionItems(elements.sessions)[0];
   assert.equal(blockedItem.title, 'Waiting for input — press ⇱ to attach'); assert.match(blockedItem.className, /needs-input/);
   assert.match(blockedItem.children[3].className, /prominent/);
   const walk = node => [node, ...(node.children || []).flatMap(walk)], statusNode = walk(blockedItem).find(node => /^status /.test(node.className || ''));

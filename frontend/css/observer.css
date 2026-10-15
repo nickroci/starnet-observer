@@ -235,6 +235,22 @@ body.control .session-row .row-top { padding-right:98px; } body.control .session
 .session-item.needs-input .session-row { border-color:var(--blocked); box-shadow:inset 3px 0 0 var(--blocked); }
 .session-item.needs-input .status.blocked { font-weight:bold; text-shadow:0 0 6px var(--mail-glow); }
 .row-attach.prominent { color:var(--danger-tab-ink); background:var(--blocked); border-color:var(--blocked); box-shadow:0 0 10px var(--mail-glow); }
+/* Provider choice is an explicit launch confirmation; native dialog owns keyboard modality. */
+.overseer-chooser { max-width: min(30rem, calc(100vw - 2rem)); padding: 1.5rem; color: var(--ink); background: var(--panel); border: 1px solid var(--chrome); border-radius: var(--shape-panel); }
+.overseer-chooser::backdrop { background: var(--modal-backdrop); }
+.overseer-chooser h2 { margin-bottom: 1rem; font: 24px/1.1 var(--term); color: var(--phosphor); }
+.overseer-chooser label { display: block; margin-bottom: .5rem; }
+.overseer-chooser select { width: 100%; padding: .5rem; color: var(--ink); background: var(--bg); font: inherit; }
+.overseer-chooser p { margin: 1rem 0; }
+.overseer-actions { display: flex; justify-content: flex-end; gap: .75rem; }
+.overseer-actions button { padding: .5rem 1rem; }
+.overseer-chooser :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+
+/* Text and dividers expose checkout boundaries without depending on color. */
+.checkout-group { margin-top:10px; padding-top:8px; border-top:1px solid var(--chrome); min-width:0; }
+.checkout-heading { margin:0 0 6px; font-size:12px; overflow-wrap:anywhere; }
+.folder-heading { margin:7px 0 4px; font-size:11px; color:var(--dim); overflow-wrap:anywhere; }
+
 /* Pixel profile: Jersey 10 for interface text and Silkscreen for small tags, both regular 400 from the selected pack and never
    synthesized. Fixed numeric readouts, tool/code text and the station drawing keep their own fonts; only interface metrics scale. */
 :where(:root[data-type-profile=pixel]) body { font:400 calc(21px * var(--type-scale))/1.25 'Jersey 10',system-ui,sans-serif; }

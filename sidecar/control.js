@@ -173,7 +173,7 @@ function makeControl(options = {}) {
     const created = await herdr(['tab', 'create', '--workspace', pane.workspace_id, '--cwd', cwd, '--label', name, '--no-focus'], 10000, host);
     const target = created && created.root_pane && created.root_pane.pane_id;
     if (!validPane(target)) throw new Error('tab create returned no pane');
-    await startIn(target, name, host);
+    await startIn(target, name, 'claude', host);
     return { ok: true, action: 'spawn', paneId: shown(host, target), name, project: path.posix.basename(cwd) };
   }
   /* Start Claude in a folder on a configured remote host, even one with no agents yet. The folder is that host's home
@@ -196,23 +196,24 @@ function makeControl(options = {}) {
       : await herdr(['workspace', 'create', '--cwd', cwd, '--label', label, '--no-focus'], 10000, host);
     const target = created && created.root_pane && created.root_pane.pane_id;
     if (!validPane(target)) throw new Error((existing ? 'tab' : 'workspace') + ' create returned no pane');
-    await startIn(target, name, host);
+    await startIn(target, name, 'claude', host);
     return { ok: true, action: 'spawn-host', host, paneId: shown(host, target), name, folder: cwd };
   }
-  // Start Claude in that pane, tolerating a startup dialog the same way spawn does.
-  async function startIn(target, name, host = null) {
+  // Start the selected provider in that pane, tolerating a startup dialog the same way spawn does.
+  async function startIn(target, name, provider, host = null) {
     try { await runHerdr(host, ['pane', 'wait-output', '--regex', PROMPT, target, '--timeout', '15000'], { timeout: 20000 }); } catch (_) { /* start anyway */ }
-    const startArgs = ['agent', 'start', name, '--kind', 'claude', '--pane', target, '--timeout', '60000'];
-    if (claudeArgs.length) startArgs.push('--', ...claudeArgs);
+    const startArgs = ['agent', 'start', name, '--kind', provider, '--pane', target, '--timeout', '60000'];
+    if (provider === 'claude' && claudeArgs.length) startArgs.push('--', ...claudeArgs);
     let started = false, lastError = null;
     for (let attempt = 0; attempt < 3 && !started; attempt++) {
       try { await herdr(startArgs, 70000, host); started = true; }
       catch (error) { lastError = error; try { const found = await herdr(['agent', 'get', target], 5000, host); if (!found?.agent) throw new Error('no-agent-in-pane'); started = true; } catch (_) { await wait(1000); } }
     }
-    if (!started) throw new Error('Claude did not start in ' + shown(host, target) + (lastError ? ': ' + lastError.message : ''));
+    if (!started) throw new Error(provider + ' did not start in ' + shown(host, target) + (lastError ? ': ' + lastError.message : ''));
   }
   // Only our persisted launch proof identifies the singleton; labels are display text.
-  async function overseer() {
+  async function overseer(provider) {
+    if (!['claude', 'codex'].includes(provider)) throw badRequest('invalid-provider');
     const loaded = await overseerState.read();
     if (['committed', 'reserved'].includes(loaded.state) && loaded.record.paneId) {
       const inventory = await herdr(['agent', 'list'], 5000);
@@ -230,17 +231,19 @@ function makeControl(options = {}) {
     let committed = false;
     try {
       await fs.mkdir(overseerHome, { recursive: true, mode: 0o700 });
-      const brief = path.join(overseerHome, 'CLAUDE.md');
-      try { await fs.access(brief); } catch (_) { await fs.writeFile(brief, OVERSEER_BRIEF); }
+      for (const filename of ['AGENTS.md', 'CLAUDE.md']) {
+        try { await fs.writeFile(path.join(overseerHome, filename), OVERSEER_BRIEF, { flag: 'wx', mode: 0o600 }); }
+        catch (error) { if (error.code !== 'EEXIST') throw error; }
+      }
       const created = await herdr(['workspace', 'create', '--cwd', overseerHome, '--label', 'overseer', '--no-focus'], 10000);
       const target = created && created.root_pane && created.root_pane.pane_id;
       if (!validPane(target)) throw new Error('workspace create returned no pane');
       await overseerState.notePane(owner, target);
-      await startIn(target, 'overseer');
+      await startIn(target, 'overseer', provider);
       const result = await herdr(['agent', 'get', target], 5000);
       const got = await herdr(['pane', 'get', target], 5000);
       const agent = result?.agent, pane = got?.pane;
-      if (!agent || !pane || agent.pane_id !== target || pane.pane_id !== target || agent.agent !== 'claude' ||
+      if (!agent || !pane || agent.pane_id !== target || pane.pane_id !== target || agent.agent !== provider ||
           agent.workspace_id !== pane.workspace_id || agent.terminal_id !== pane.terminal_id) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
       await overseerState.commit(owner, agent);
       committed = true;

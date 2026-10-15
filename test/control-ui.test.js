@@ -1,4 +1,5 @@
 'use strict';
+const sessionItems = node => node.className?.split(' ').includes('session-item') ? [node] : (node.children || []).flatMap(sessionItems);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -31,8 +32,9 @@ async function controls(enabled, presentation) {
   const filters = ['all', 'working', 'blocked'].map(value => { const button = element(); button.dataset.filter = value; return button; });
   document = { documentElement: element(), body: element(), activeElement: null, hidden: false,
     getElementById: id => elements[id] || (elements[id] = element()), querySelector: selector => selector === '.read-only' ? badge : null,
-    createElement: element, addEventListener() {} };
+    createElement: tag => Object.assign(element(), { tagName: tag.toUpperCase() }), addEventListener() {} };
   elements.filters = element(); elements.filters.children = filters;
+  const find = id => { const walk = node => node.id === id ? node : node.children.map(walk).find(Boolean); return walk(document.body); };
   const posts = [], confirms = []; const lastPost = () => JSON.stringify(posts.at(-1));
   let confirmAnswer = false, listener, viewOptions, failing = false;
   const context = { console, Date, Set, Map, document, setTimeout: () => 1, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ThemePack, encodeURIComponent,
@@ -54,7 +56,7 @@ async function controls(enabled, presentation) {
   const tick = () => new Promise(resolve => setImmediate(resolve));
   publish(sessions);
   assert.equal(badge.textContent, presentation ? 'LIVE · FICTIONAL LABELS' + (enabled ? ' · CONTROLS ON' : '') : enabled ? 'CONTROLS ON' : 'READ ONLY');
-  const group = elements.sessions.children[0], heading = group.children[0], rows = group.children[2].children;
+  const group = elements.sessions.children[0], heading = group.children[0], rows = sessionItems(group);
   assert.equal(rows.length, 2);
   const [herdrRow, desktopRow] = rows.map(item => ({ item, button: item.children[0], inspect: item.children[2], attach: item.children[3], close: item.children[4] }));
   if (!enabled) {
@@ -77,12 +79,35 @@ async function controls(enabled, presentation) {
       assert.equal(button.disabled, false, 'action clears pending state after success and failure');
       assert.equal(elements['control-notice'].textContent.includes('Could not'), failing);
     }
+    const beforeChooser = posts.length;
     viewOptions.onObservatory(); await tick();
-    assert.equal(lastPost(), JSON.stringify(['/api/control/overseer', {}]));
+    const dialog = find('overseer-chooser'), provider = find('overseer-provider');
+    assert.equal(dialog.open, true);
+    assert.equal(provider.value, 'claude');
+    assert.equal(document.activeElement, provider);
+    assert.equal(provider.attributes['aria-label'], 'Overseer provider');
+    provider.value = 'codex';
+    provider.handlers.change();
+    assert.match(find('overseer-confirmation').textContent, /Codex/);
+    assert.equal(posts.length, beforeChooser, 'changing provider never launches or closes a pane');
+    find('overseer-cancel').handlers.click();
+    assert.equal(posts.length, beforeChooser);
+    assert.equal(document.activeElement, elements.world);
+    viewOptions.onObservatory();
+    find('overseer-chooser').handlers.cancel({ preventDefault() {} });
+    assert.equal(posts.length, beforeChooser, 'Escape cancels without mutations');
+    assert.equal(document.activeElement, elements.world);
+    viewOptions.onObservatory();
+    const chosen = failing ? 'codex' : 'claude';
+    find('overseer-provider').value = chosen;
+    find('overseer-start').handlers.click(); await tick();
+    assert.equal(lastPost(), JSON.stringify(['/api/control/overseer', { provider: chosen }]));
+    assert.equal(document.activeElement, elements.world);
     assert.equal(elements['control-notice'].textContent.includes('Could not'), failing);
   }
+  herdrRow.button.focus();
   publish(sessions.map(row => ({ ...row })));
-  assert.equal(elements.sessions.children[0].children[2].children[0], herdrRow.item);
+  assert.equal(sessionItems(elements.sessions.children[0])[0], herdrRow.item);
   assert.equal(document.activeElement, herdrRow.button, 'polls and controls preserve row focus');
   publish([{ ...sessions[0], observedAt: Date.now() - 6001 }]);
   assert.equal(herdrRow.attach.hidden, true); assert.equal(herdrRow.close.hidden, true);

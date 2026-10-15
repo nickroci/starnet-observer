@@ -10,12 +10,27 @@ const ObserverModel = (() => {
   const hostOf = row => typeof row.host === 'string' && row.host ? row.host : null;
   const projectKey = row => (hostOf(row) ? 'host:' + hostOf(row) + '|' : '') + (row.projectId || 'folder:' + (row.project || 'Unassigned'));
   const repoKey = row => row.repoId || projectKey(row);
-  // Agents in different sub-folders of one repository sit in different sections (low walls between them).
+  // Checkout proof owns identity; labels and basenames never distinguish sections.
   const folderOf = row => typeof row.folder === 'string' ? row.folder : '';
-  const sectionKey = row => repoKey(row) + (folderOf(row) ? '#' + folderOf(row) : '');
   // A room for the user's home folder reads "~ home" rather than the bare user name (display only).
   const projectName = row => row.projectHome ? '~ home' : (row.project || 'Unassigned');
-  const sectionLabel = row => (row.projectHome && row.repoKind !== 'repository' ? '~ home' : row.repo || row.project || 'Unassigned') + (folderOf(row) ? ' / ' + folderOf(row) : '');
+  const checkoutIdOf = row => typeof row.checkoutId === 'string' && row.checkoutId ? row.checkoutId : null;
+  const checkoutKey = row => JSON.stringify([repoKey(row), checkoutIdOf(row)]);
+  const sectionKey = row => JSON.stringify([repoKey(row), checkoutIdOf(row), folderOf(row)]);
+  const checkoutLabel = row => !checkoutIdOf(row) ? 'Checkout unavailable' : row.checkoutKind === 'main' ? 'Main checkout'
+    : row.checkoutKind === 'worktree' ? 'Worktree ' + (row.worktree || 'unnamed') : row.checkoutKind === 'folder' ? 'Local folder' : 'Checkout unavailable';
+  // Extend only colliding opaque suffixes; ordering and repeated rows do not affect the result.
+  function checkoutSuffix(id, ids) {
+    if (!id) return '';
+    const others = [...new Set(ids)].filter(other => other && other !== id);
+    let length = Math.min(4, id.length);
+    const max = Math.max(id.length, ...others.map(other => other.length));
+    while (length < max && others.some(other => other.slice(-length) === id.slice(-length))) length++;
+    return id.slice(-length);
+  }
+  const sectionLabel = row => (row.projectHome && row.repoKind !== 'repository' ? '~ home' : row.repo || row.project || 'Unassigned') + ' · ' + checkoutLabel(row) + (folderOf(row) ? ' / ' + folderOf(row) : '');
+  const sectionData = row => ({ checkoutId: checkoutIdOf(row), checkoutKind: row.checkoutKind || null, worktree: row.worktree || null,
+    repoLabel: row.projectHome && row.repoKind !== 'repository' ? '~ home' : row.repo || row.project || 'Unassigned', checkoutLabel: checkoutLabel(row), folder: folderOf(row), label: sectionLabel(row) });
   // Gaps between reserved root desks; a section shares eight safe stations.
   const helperStations = [6, 9].flatMap(y => [4.25, 8.25, 14.25, 18].map(x => ({ x, y, w: 1, h: 0.72 })));
   const isHelper = row => row.source === 'helper' || Object.hasOwn(row, 'parentId');
@@ -146,9 +161,15 @@ const ObserverModel = (() => {
       for (const row of roots) {
         const project = projectKey(row), repo = repoKey(row), section = sectionKey(row), previous = panes.get(row.id);
         names.set(project, projectName(row)); owners.set(project, hostOf(row));
-        if (previous && previous.project === project && previous.repo === repo && (previous.section || previous.repo) === section) continue;
+        if (previous && previous.project === project && previous.repo === repo && previous.section === section) {
+          const block = wings.get(project)[previous.block], data = sectionData(row);
+          if (JSON.stringify(block) !== JSON.stringify({ ...block, ...data })) { Object.assign(block, data); changed = true; }
+          continue;
+        }
         if (previous) { panes.delete(row.id); moved.push(row.id); }
-        panes.set(row.id, { project, repo, section, ...allocate(project, repo, sectionLabel(row), section) }); changed = true;
+        const allocation = allocate(project, repo, sectionLabel(row), section);
+        Object.assign(wings.get(project)[allocation.block], sectionData(row));
+        panes.set(row.id, { project, repo, section, ...allocation }); changed = true;
       }
       for (const [project, blocks] of wings) {
         const used = new Set(Array.from(panes.values()).filter(pane => pane.project === project).map(pane => pane.block));
@@ -213,6 +234,6 @@ const ObserverModel = (() => {
     return { reconcile, pages, onPage, pageFor, colorFor,
       seatFor: id => { const pane = panes.get(id); return pane ? pane.block * BLOCK_SEATS + pane.seat : undefined; } };
   }
-  return { projectName, projectKey, hostOf, repoKey, helperStations, hash, palette, activity, age, idleAge, taskTitle, hoverLabel, createLayout };
+  return { projectName, hostOf, projectKey, repoKey, checkoutKey, checkoutLabel, checkoutSuffix, sectionKey, helperStations, hash, palette, activity, age, idleAge, taskTitle, hoverLabel, createLayout };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverModel;

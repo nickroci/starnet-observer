@@ -350,7 +350,7 @@ async function nestedHelperGrouping() {
       helpers: makeHelperObserver({ now: () => 1000, transcripts, readEdges: () => ({ rows: edges }) }),
       execute: async () => ({ stdout: JSON.stringify({ result: { agents: inventory } }) }),
       projects: { resolve: async cwd => ({ projectId: cwd, project: cwd, projectKind: 'repository-parent',
-        repoId: cwd + '-repo', repo: cwd + ' repo', worktreeId: cwd + '-worktree', worktree: cwd + ' worktree' }) },
+        repoId: cwd + '-repo', repo: cwd + ' repo', checkoutId: cwd + '-checkout', checkoutKind: 'worktree', folder: 'src', worktreeId: cwd + '-worktree', worktree: cwd + ' worktree' }) },
       desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) },
       bus: { read: () => ({ rows: [], health: 'available' }) } });
     const { sessions } = await observer.get();
@@ -362,7 +362,7 @@ async function nestedHelperGrouping() {
     assert.equal(descendants.length, 9); assert.equal(descendants.filter(row => row.helperSlot !== null).length, 8);
     assert.equal(descendants.filter(row => row.helperSlot === null).length, 1);
     for (const row of [child, ...descendants]) {
-      for (const field of ['projectId', 'project', 'projectKind', 'repoId', 'repo', 'worktreeId', 'worktree'])
+      for (const field of ['projectId', 'project', 'projectKind', 'repoId', 'repo', 'worktreeId', 'worktree', 'checkoutId', 'checkoutKind', 'folder'])
         assert.equal(row[field], parent[field], field + ' inherits root grouping');
     }
   }

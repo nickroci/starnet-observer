@@ -283,6 +283,7 @@
   document.addEventListener('pointerdown', event => { if (helpOpen() && !helpPanel.contains(event.target) && !helpButton.contains(event.target)) setHelp(false); });
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape') return;
+    if (overseerChooser?.root.open) { event.preventDefault(); closeOverseerChooser(); return; }
     // The innermost layer closes first: help, then the top panel only, then the worker focus or platform zoom.
     if (helpOpen()) { event.preventDefault(); setHelp(false, true); return; }
     if (panels.length) { event.preventDefault(); closeTopPanel(); return; }
@@ -434,11 +435,11 @@
     box.textContent = message; box.classList.toggle('error', !!isError); box.hidden = false;
     clearTimeout(notice.timer); notice.timer = setTimeout(() => { box.hidden = true; }, isError ? 8000 : 4000);
   }
-  async function controlAction(button, action, paneId, pending) {
+  async function controlAction(button, action, paneId, pending, provider) {
     if (!CONTROL || !paneId || button.disabled) return;
     button.disabled = true; notice(pending);
     try {
-      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? {} : action === 'spawn-host' ? { host: paneId === 'local' ? null : paneId } : { paneId });
+      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? { provider } : action === 'spawn-host' ? { host: paneId === 'local' ? null : paneId } : { paneId });
       // Spawning never opens a terminal: the new agent is selected in the panel when it appears; ⇱ attaches.
       if (['spawn', 'spawn-host', 'overseer'].includes(action) && typeof result.paneId === 'string') pendingSpawn = { paneId: result.paneId, until: Date.now() + 90000 };
       notice(action === 'spawn-host' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.folder + ' · ' + result.paneId + ' · selecting it when it appears' : action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · selecting it when it appears' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
@@ -501,14 +502,55 @@
       }
     }
   }
+  let overseerChooser = null;
+  function closeOverseerChooser() {
+    if (!overseerChooser?.root.open) return;
+    overseerChooser.root.close();
+    get('world').focus();
+  }
+  function openOverseerChooser() {
+    if (get('world').disabled) return;
+    if (!overseerChooser) {
+      const root = text('dialog', 'overseer-chooser', ''); root.id = 'overseer-chooser';
+      const title = text('h2', '', 'Start an overseer'); title.id = 'overseer-chooser-title';
+      const label = text('label', '', 'Provider'); label.setAttribute('for', 'overseer-provider');
+      const provider = text('select', '', ''); provider.id = 'overseer-provider'; provider.setAttribute('aria-label', 'Overseer provider');
+      for (const value of ['claude', 'codex']) {
+        const option = text('option', '', PROVIDERS[value]); option.value = value; provider.append(option);
+      }
+      const confirmation = text('p', '', ''); confirmation.id = 'overseer-confirmation';
+      const describe = () => { confirmation.textContent = 'Start ' + PROVIDERS[provider.value] + ' in a new Herdr workspace with a brief on watching the other agents, unattended? Use ⇱ to attach.'; };
+      provider.addEventListener('change', describe);
+      const actions = text('div', 'overseer-actions', '');
+      const start = text('button', '', 'Start'); start.type = 'button'; start.id = 'overseer-start';
+      const cancel = text('button', '', 'Cancel'); cancel.type = 'button'; cancel.id = 'overseer-cancel';
+      cancel.addEventListener('click', closeOverseerChooser);
+      root.addEventListener('cancel', event => { event.preventDefault(); closeOverseerChooser(); });
+      start.addEventListener('click', () => {
+        const chosen = provider.value;
+        if (!['claude', 'codex'].includes(chosen)) return;
+        closeOverseerChooser();
+        // A poll may have found the singleton while the chooser was open.
+        const row = (latest?.data?.sessions || []).find(entry => entry.role === 'overseer' && entry.source === 'herdr' && !entry.host);
+        if (row) { select(row.id, true); return; }
+        controlAction(get('world'), 'overseer', 'overseer', 'Starting the ' + PROVIDERS[chosen] + ' overseer…', chosen);
+      });
+      actions.append(start, cancel); root.append(title, label, provider, confirmation, actions);
+      root.setAttribute('aria-labelledby', title.id); root.setAttribute('aria-describedby', confirmation.id);
+      document.body.append(root);
+      overseerChooser = { root, provider, describe };
+    }
+    setHelp(false);
+    overseerChooser.provider.value = 'claude'; overseerChooser.describe();
+    if (!overseerChooser.root.open) overseerChooser.root.showModal();
+    overseerChooser.provider.focus();
+  }
   /* Observatory click: select the seated overseer, or (with control on) offer to start one. */
   function observatoryClicked() {
     const row = (latest?.data?.sessions || []).find(entry => entry.role === 'overseer' && entry.source === 'herdr' && !entry.host);
     if (row) { select(row.id, true); return; }
     if (!CONTROL) { notice('No overseer. Start the observer with OBSERVER_CONTROL=1 to spawn one from here.', true); return; }
-    if (!window.confirm('Start an overseer agent in the observatory?\n\nThis opens a Herdr workspace named "overseer" in its own folder, starts Claude there with a brief on watching the other agents. No terminal opens; use ⇱ to attach.')) return;
-    const button = get('world');
-    controlAction(button, 'overseer', 'overseer', 'Starting the overseer…');
+    openOverseerChooser();
   }
   const groupNodes = new Map(), rowNodes = new Map();
   function groupNode(key) {
@@ -528,9 +570,9 @@
       heading.append(spawn);
     }
     const repos = text('div', 'repo-toggles', ''); repos.setAttribute('role', 'group');
-    const list = text('ul', 'session-list', '');
+    const list = text('div', 'checkout-groups', '');
     section.append(heading, repos, list);
-    entry = { section, label, kind, total, zoom, repos, list }; groupNodes.set(key, entry);
+    entry = { section, label, kind, total, zoom, repos, list, checkouts: new Map() }; groupNodes.set(key, entry);
     return entry;
   }
   // One toggle per exact repository id while it has a row; the listener reads the id, never the label.
@@ -647,7 +689,7 @@
   function renderSessions(rows, stale, messages, bus) {
     const query = get('search').value.trim().toLowerCase();
     const matching = rows.filter(row => (filter === 'all' || row.status === filter) &&
-      [row.project, row.repo, row.title, row.paneId, row.provider, row.worktree].some(value => String(value || '').toLowerCase().includes(query)));
+      [row.project, row.repo, row.title, row.paneId, row.provider, row.worktree, row.folder, ObserverModel.checkoutLabel(row)].some(value => String(value || '').toLowerCase().includes(query)));
     const groups = new Map(), labels = new Map(), unread = new Map();
     for (const message of messages) if (!message.acknowledgedAt) unread.set(message.to, (unread.get(message.to) || 0) + 1);
     // Repositories by exact id per project, from every row: a filter or search never hides a repository's toggle.
@@ -693,10 +735,46 @@
       });
       entry.repos.hidden = !toggles.length; entry.repos.setAttribute('aria-label', 'Repositories in ' + name);
       if (arrange(entry.repos, toggles)) moved = true;
-      const items = lineageOrder(group, rank).map(([row, depth]) => {
-        const node = rowNode(row.id); paintRow(node, row, depth, unread.get(row.id), bus?.window || 100); return node.item;
+      const checkouts = new Map();
+      for (const row of group) {
+        const checkout = ObserverModel.checkoutKey(row);
+        if (!checkouts.has(checkout)) checkouts.set(checkout, []);
+        checkouts.get(checkout).push(row);
+      }
+      for (const checkout of entry.checkouts.keys()) if (!checkouts.has(checkout)) entry.checkouts.delete(checkout);
+      const checkoutSections = [...checkouts].map(([checkout, crew]) => {
+        let node = entry.checkouts.get(checkout);
+        if (!node) {
+          const section = text('section', 'checkout-group', ''), heading = text('h4', 'checkout-heading', ''), folders = text('div', 'folder-groups', '');
+          section.append(heading, folders); node = { section, heading, folders, nodes: new Map() }; entry.checkouts.set(checkout, node);
+        }
+        const first = crew[0], label = ObserverModel.checkoutLabel(first);
+        const twins = [...checkouts.values()].filter(other => ObserverModel.repoKey(other[0]) === ObserverModel.repoKey(first) && ObserverModel.checkoutLabel(other[0]) === label);
+        setText(node.heading, (first.repo || first.project || 'Unassigned') + ' · ' + label + (twins.length > 1 && first.checkoutId ? ' · ' + ObserverModel.checkoutSuffix(first.checkoutId, [...checkouts.values()].map(rows => rows[0].checkoutId)) : ''));
+        const folders = new Map();
+        for (const row of crew) {
+          const folder = typeof row.folder === 'string' ? row.folder : '';
+          if (!folders.has(folder)) folders.set(folder, []);
+          folders.get(folder).push(row);
+        }
+        for (const folder of node.nodes.keys()) if (!folders.has(folder)) node.nodes.delete(folder);
+        const folderSections = [...folders].map(([folder, members]) => {
+          let part = node.nodes.get(folder);
+          if (!part) {
+            const section = text('section', 'folder-group', ''), heading = text('h5', 'folder-heading', ''), list = text('ul', 'session-list', '');
+            section.append(heading, list); part = { section, heading, list }; node.nodes.set(folder, part);
+          }
+          setText(part.heading, folder || 'Checkout root');
+          const items = lineageOrder(members, rank).map(([row, depth]) => {
+            const item = rowNode(row.id); paintRow(item, row, depth, unread.get(row.id), bus?.window || 100); return item.item;
+          });
+          if (arrange(part.list, items)) moved = true;
+          return part.section;
+        });
+        if (arrange(node.folders, folderSections)) moved = true;
+        return node.section;
       });
-      if (arrange(entry.list, items)) moved = true;
+      if (arrange(entry.list, checkoutSections)) moved = true;
       return entry.section;
     });
     if (arrange(get('sessions'), sections)) moved = true;
@@ -845,7 +923,7 @@
     if (!layout.onPage(page).length && rows.length) setPage(layout.pageFor(rows[0].id));
     const rooms = layout.onPage(page), onFloor = rooms.flatMap(room => room.rows.map(value => value.row)).filter(row => !row.shadow), floorRows = [...rows, ...ghosts];
     // Geometry and row fields consumed by floor paint or movement; titles and tools are read live by the hover callbacks.
-    const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider], ...(hosts.length ? [hosts.map(host => [host.id, host.health, host.agents, host.reason, host.health === 'available' ? null : Math.floor((clock() - (host.observedAt || 0)) / 60000)])] : [])], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
+    const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider], ...(hosts.length ? [hosts.map(host => [host.id, host.health, host.agents, host.reason, host.health === 'available' ? null : Math.floor((clock() - (host.observedAt || 0)) / 60000)])] : [])], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.checkoutId, value.checkoutKind, value.folder, value.lineageState, value.lifecycleEvidence?.state] : value);
     const bus = data?.bus || null, messages = Array.isArray(bus?.messages) ? bus.messages : [];
     // Hover text, plates and pending envelopes read rows and bus live; a frozen floor repaints only when they change.
     const hostBus = data?.hostBus || {};

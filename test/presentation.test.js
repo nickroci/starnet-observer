@@ -16,11 +16,16 @@ const { createServer } = require('../server.js');
   let inventory = { sessions: [helper, parent], aggregate: { agents: { observed: 2 }, usage: { inputTokens: { value: 12, state: 'available' } } },
     health: 'available', observedAt: 1000, error: null, sources: { herdr: { health: 'available', observedAt: 1000, reason: secret }, desktop: { health: 'unavailable', observedAt: null, reason: secret } },
     bus: { health: 'available', reason: null, observedAt: 1000, window: 100, messages: [{ id: 1, identity: secret, from: parent.id, to: helper.id, sentAt: '2026-01-01T00:00:00.000Z', acknowledgedAt: null, wake: 'requested', body: secret }] } };
+  parent.checkoutId = 'checkout_a'; parent.checkoutKind = 'worktree'; parent.folder = secret;
+  helper.checkoutId = 'checkout_b'; helper.checkoutKind = 'worktree'; helper.folder = secret;
   const original = structuredClone(inventory);
   const presentation = makePresentationObserver({ close: async () => { closes++; await closeGate; }, get: async () => inventory, inspect: () => { inspected++; }, inspectMessage: () => { inspected++; } }, () => 1000);
   const first = await presentation.get();
   assert.equal(JSON.stringify(first).includes(secret), false, 'mask names, task text, nicknames, identities, diagnostics, bodies, and unknown fields');
   assert.deepEqual(inventory, original, 'masking never mutates live identities or source snapshots');
+  assert.notEqual(first.sessions[0].worktree, first.sessions[1].worktree, 'equal real names alias by checkout identity');
+  assert.notEqual(first.sessions[0].folder, first.sessions[1].folder, 'equal folder names alias by checkout+folder');
+  assert.equal(first.sessions[1].checkoutId, parent.checkoutId); assert.equal(first.sessions[1].checkoutKind, 'worktree');
   assert.equal(first.sessions[1].paneId, 'w1:p2'); assert.equal(first.sessions[1].role, 'overseer');
   assert.deepEqual(first.aggregate, inventory.aggregate);
   assert.deepEqual(first.sessions.map(row => [row.id, row.parentId, row.status, row.observedAt]), inventory.sessions.map(row => [row.id, row.parentId, row.status, row.observedAt]));

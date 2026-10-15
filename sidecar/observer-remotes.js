@@ -63,6 +63,7 @@ function sanitizeRow(host, row, receivedAt) {
     title: text(row.title, 160) || row.provider,
     projectId: opaque(prefixOf(row.projectId, 'prj_'), host, row.projectId), project: text(row.project, 120) || 'Unassigned', projectKind: word(row.projectKind, 20),
     repoId: opaque(prefixOf(row.repoId, 'dir_'), host, row.repoId), repo: text(row.repo, 120) || 'Unassigned', repoKind: word(row.repoKind, 20),
+    checkoutId: opaque('checkout_', host, row.checkoutId), checkoutKind: typeof row.checkoutId === 'string' && row.checkoutId ? oneOf(row.checkoutKind, new Set(['main', 'worktree', 'folder'])) : null,
     worktree: text(row.worktree, 120), folder: text(row.folder, 160) || '',
     status: oneOf(row.status, STATUSES, 'unknown'), sessionId,
     identitySource: word(row.identitySource, 20), identityHealth: oneOf(row.identityHealth, HEALTH, 'unavailable'),

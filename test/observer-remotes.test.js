@@ -57,6 +57,14 @@ function fakeTimers() {
   for (const value of ['yes', 1, {}]) assert.equal('projectHome' in sanitizeRow('vm', row({ projectHome: value }), 1), false, 'only a literal true');
   assert.notEqual(sanitizeRow('vm2', row(), 1).projectId, safe.projectId);
   assert.notEqual(sanitizeRow('vm2', row(), 1).repoId, safe.repoId);
+  const checkout = { checkoutId: 'checkout_' + 'a'.repeat(20), checkoutKind: 'worktree' };
+  const remoteCheckout = sanitizeRow('vm', row(checkout), 1);
+  assert.match(remoteCheckout.checkoutId, /^checkout_[a-f0-9]{20}$/);
+  assert.notEqual(remoteCheckout.checkoutId, checkout.checkoutId);
+  assert.notEqual(remoteCheckout.checkoutId, sanitizeRow('vm2', row(checkout), 1).checkoutId);
+  assert.equal(remoteCheckout.checkoutKind, 'worktree');
+  assert.equal(sanitizeRow('vm', row({ ...checkout, checkoutKind: 'injected' }), 1).checkoutKind, null);
+  assert.equal(sanitizeRow('vm', row({ checkoutKind: 'main' }), 1).checkoutId, null);
   assert.equal(safe.inspectionIdentity, 'claude:' + UUID);
   assert.equal(sanitizeRow('vm', row({ inspectionIdentity: 'claude:' + UUID.replace('0', '1') }), 1).inspectionIdentity, null, 'a mismatched identity is dropped');
   for (const bad of [{ id: 'nope' }, { provider: 'chatgpt' }, { source: 'desktop' }]) assert.equal(sanitizeRow('vm', row(bad), 1), null);
