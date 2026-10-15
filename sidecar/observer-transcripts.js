@@ -300,7 +300,13 @@ function makeTranscriptObserver(options = {}) {
     const key = spawnIndexKey(file, sessionId, binding);
     let state = spawnIndices.get(key);
     if (!state) {
-      if (spawnIndices.size >= 64) spawnIndices.delete(spawnIndices.keys().next().value);
+      if (spawnIndices.size >= 64) {
+        // Pending scans must remain tracked for deduplication and shutdown. Never
+        // detach work merely to admit another cold parent while all slots are busy.
+        const settled = [...spawnIndices].find(([, value]) => !value.promise);
+        if (!settled) return null;
+        spawnIndices.delete(settled[0]);
+      }
       state = { projection: null, offset: 0, ready: false, promise: null };
       spawnIndices.set(key, state);
     }

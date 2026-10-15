@@ -260,6 +260,78 @@ const notification = (child, status) => line({ type: 'queue-operation', operatio
     result = await helpers.children([parent]);
     assert.equal(result.rows[0].status, 'unknown', 'full-index event absence withdraws stale cached terminal status');
 
+    // Saturating cold discovery must not detach pending scans from their cache
+    // entries or shutdown tracking. Delay each index while ordinary reads finish.
+    const capacityRoot = path.join(root, 'capacity');
+    await fs.mkdir(capacityRoot);
+    const capacityIds = Array.from({ length: 66 }, (_, i) => '10000000-0000-0000-0000-' + String(i).padStart(12, '0'));
+    const opens = new Map(), gates = new Map();
+    let startedCount = 0, closedCount = 0, allStarted, othersClosed, released = false;
+    const started64 = new Promise(resolve => { allStarted = resolve; });
+    const closed63 = new Promise(resolve => { othersClosed = resolve; });
+    const capacityFs = Object.create(fs);
+    capacityFs.open = async (file, ...args) => {
+      const count = (opens.get(file) || 0) + 1;
+      opens.set(file, count);
+      const handle = await fs.open(file, ...args);
+      if (count === 1) return handle;
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      gates.set(file, release);
+      if (released) release();
+      let startedScan = false;
+      return new Proxy(handle, { get(target, name) {
+        if (name === 'read') return async (...values) => {
+          if (!startedScan) { startedScan = true; if (++startedCount === 64) allStarted(); }
+          await gate;
+          return target.read(...values);
+        };
+        if (name === 'close') return async () => {
+          await target.close();
+          if (++closedCount === 63) othersClosed();
+        };
+        const value = target[name];
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+    };
+    const capacityTranscripts = makeTranscriptObserver({ now, fs: capacityFs, roots: { claude: capacityRoot, codex } });
+    let capacityDeadline;
+    const capacityTimeout = new Promise((_, reject) => { capacityDeadline = setTimeout(() => reject(new Error('Capacity scan tracking did not settle')), 3000); });
+    try {
+      await Promise.race([(async () => {
+        for (const id of capacityIds) await fs.writeFile(path.join(capacityRoot, id + '.jsonl'), line({ type: 'user', sessionId: id, message: { content: 'Identity' } }));
+        for (const id of capacityIds) {
+          assert.equal((await capacityTranscripts.read(id, 'claude', id)).available, true);
+          await capacityTranscripts.claudeCandidates(id, undefined, id);
+        }
+        await started64;
+        const firstFile = await fs.realpath(path.join(capacityRoot, capacityIds[0] + '.jsonl'));
+        await capacityTranscripts.claudeCandidates(capacityIds[0], undefined, capacityIds[0]);
+        assert.equal(startedCount, 64, 'only 64 full scans may remain pending');
+        for (const id of capacityIds.slice(64)) assert.equal(capacityTranscripts.claudeClaims(id).available, false, 'capacity refusal exposes unavailable proof');
+        let idle = false;
+        const settling = capacityTranscripts.spawnIndexIdle().then(() => { idle = true; });
+        for (const [file, release] of gates) if (file !== firstFile) release();
+        await closed63;
+        assert.equal(idle, false, 'idle still tracks the oldest pending scan after later roots arrive');
+        gates.get(firstFile)();
+        await settling;
+        assert.equal(startedCount, 64, 'repeated discovery does not start duplicate pending scans');
+        assert.equal(closedCount, 64, 'idle waits for every launched scan to close');
+        assert.equal(opens.get(firstFile), 2, 'oldest parent retains its one ordinary read and one shared scan');
+        released = true;
+        await capacityTranscripts.claudeCandidates(capacityIds[64], undefined, capacityIds[64]);
+        await capacityTranscripts.spawnIndexIdle();
+        assert.equal(startedCount, 65, 'a refused root can start after a settled slot becomes available');
+        assert.equal(closedCount, 65, 'the replacement scan remains tracked through closure');
+      })(), capacityTimeout]);
+    } finally {
+      clearTimeout(capacityDeadline);
+      released = true;
+      for (const release of gates.values()) release();
+      await capacityTranscripts.spawnIndexIdle();
+    }
+
     console.log('observer helpers index: spawns outside the tail, append, conflict, rewrite/replacement reset, sidecar corroboration and activity status PASS');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
