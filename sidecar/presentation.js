@@ -22,6 +22,7 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
   const relayOf = relay => relay ? { direction: relay.direction, machine: alias('machine', 'Machine', relay.machine), repo: alias('repo', 'Shared repo', relay.repo), provider: relay.provider,
     ...(relay.peer ? { peer: relay.peer } : {}), state: relay.state } : undefined;
   const remoteOf = remote => remote ? { relay: alias('relay', 'Relay', remote.relay), machine: alias('machine', 'Machine', remote.machine), lastActivityAt: remote.lastActivityAt,
+    onRelay: (remote.onRelay || []).map(entry => ({ id: entry.id, repo: alias('repo', 'Shared repo', entry.repo) })),
     peers: (remote.peers || []).map(peer => ({ machine: alias('machine', 'Machine', peer.machine), repos: (peer.repos || []).map(repo => alias('repo', 'Shared repo', repo)), agents: peer.agents, lastSeen: peer.lastSeen,
       list: (peer.list || []).map(agent => ({ id: agent.id, provider: agent.provider, repo: alias('repo', 'Shared repo', agent.repo), lastSeen: agent.lastSeen })) })) } : undefined;
   const mailOf = (message, extra = {}) => { const relay = relayOf(message.relay); return { id: message.id, ...extra, from: message.from, to: message.to, sentAt: message.sentAt, acknowledgedAt: message.acknowledgedAt, wake: message.wake, ...(relay ? { relay } : {}) }; };

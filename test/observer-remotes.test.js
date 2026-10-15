@@ -169,9 +169,12 @@ function fakeTimers() {
   assert.equal(relayed.bus.messages[1].relay, undefined, 'an invalid machine id drops the relay field');
   assert.deepEqual(relayed.bus.messages[2].relay, { direction: 'in', machine: 'whitenoise', repo: 'llm-bus', provider: null, state: 'unknown' });
   assert.deepEqual(relayed.bus.remote, { relay: 'llm-bus-relay.example.dev', machine: 'friend-1', lastActivityAt: 5, peers: [{ machine: 'whitenoise', repos: ['llm-bus'], agents: 5, lastSeen: 4,
-    list: [{ id: 'peer_' + 'a'.repeat(24), provider: 'codex', repo: 'llm-bus', lastSeen: 4 }] }] },
+    list: [{ id: 'peer_' + 'a'.repeat(24), provider: 'codex', repo: 'llm-bus', lastSeen: 4 }] }], onRelay: [] },
     'own machine and malformed peers dropped; no unknown fields cross');
   assert.equal(JSON.stringify(relayed).includes('PRIVATE'), false);
+  const onRelay = sanitizeSnapshot('vm', { sessions: [row()], bus: { health: 'available', messages: [], remote: { relay: 'relay.example.dev', machine: 'friend-1',
+    onRelay: [{ id: row().id, repo: 'llm-bus' }, { id: 'obs_' + 'f'.repeat(24), repo: 'llm-bus' }, { id: row().id, repo: '../x' }] } } }, 1);
+  assert.deepEqual(onRelay.bus.remote.onRelay, [{ id: onRelay.rows[0].id, repo: 'llm-bus' }], 'a host\'s relay members are re-identified like its rows; unknown rows and bad repos dropped');
   assert.equal(sanitizeSnapshot('vm', { sessions: [], bus: { health: 'available', messages: [], remote: { relay: 'https://x/y', machine: 'm' } } }, 1).bus.remote, undefined, 'a relay must be a bare host name');
 }
 

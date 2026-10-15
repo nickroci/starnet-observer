@@ -24,7 +24,7 @@
   const savedFilter = prefs.get('filter'), savedPage = Number(prefs.get('page'));
   let latest, selected = null, page = Number.isInteger(savedPage) && savedPage >= 0 && savedPage < 1000 ? savedPage : 0,
     filter = filters.some(button => button.dataset.filter === savedFilter) ? savedFilter : 'all', ingested = null, ingestedStale = false, mailSelected = null, inventoryStale = true;
-  let pendingSpots = [], scene = null, grounded = true, byId = new Map(), shadowById = new Map();
+  let pendingSpots = [], scene = null, grounded = true, byId = new Map(), shadowById = new Map(), relayMembers = new Map();
   // Visibility: a hidden page owns no subscription, deadline or frame; resume proves freshness before inspection.
   let active = false, unsubscribe = null, resumedAt = 0, awaitingProof = false, cachedAtResume = null;
   const rowFor = id => byId.get(id);
@@ -71,7 +71,7 @@
     onPlatform: () => { selected = null; if (latest) render(latest, true); },
     onMode: ({ mode, platform }) => showZoom(mode === 'platform' ? platform : null),
     // Read every frame, so a title Herdr publishes later replaces the fallback while still hovered.
-    hoverLabel: id => { const row = rowFor(id); if (row) return ObserverModel.hoverLabel(row, rowStale(row));
+    hoverLabel: id => { const row = rowFor(id), carried = relayMembers.get(id); if (row) return ObserverModel.hoverLabel(row, rowStale(row)) + (carried ? ' · on relay (' + carried.repo + ')' : '');
       const ghost = shadowById.get(id);   // a relay roster entry: what llm-bus lists, nothing observed
       return ghost ? (PROVIDERS[ghost.provider] || 'Agent') + ' on ' + ghost.machine + ' · ' + ghost.repo + (ghost.lastActivityAt ? ' · active ' + ObserverModel.age(ghost.lastActivityAt) : '') + ' · via relay, not observed' : null; },
     idleLevel: id => { const row = rowFor(id); return row ? ObserverModel.idleAge(row).level : 0; },
@@ -861,11 +861,14 @@
     const relayBuses = [[null, data?.bus || null], ...Object.entries(data?.hostBus || {}).filter(([id]) => hosts.some(host => host.id === id))];
     const relays = ObserverScene.relayNetworks(relayBuses, Date.now()), ghosts = ObserverScene.shadowRows(relays);
     shadowById = new Map(ghosts.map(row => [row.id, row]));
+    // Who the relay carries: each bus's own published panes (exact pane joins, by its host) and every shadow agent.
+    relayMembers = new Map([...relayBuses.flatMap(([host, bus]) => (bus?.remote?.onRelay || []).map(entry => [entry.id, { host, repo: entry.repo }])),
+      ...ghosts.map(row => [row.id, { host: row.host, repo: row.repo }])]);
     const shadowHosts = relays.flatMap(net => net.shadows.map(shadow => ({ id: shadow.host, shadow: true, health: 'shadow', machine: shadow.machine, relay: net.relay,
       member: net.members[0]?.host ?? null, agents: Math.max(shadow.agents, ghosts.filter(row => row.host === shadow.host).length), lastSeen: shadow.lastSeen })));
     // Each shadow ship docks beside the first observed ship on its relay (this machine first, when it is a member).
     const sceneHosts = [...hosts, ...shadowHosts.filter((host, index) => shadowHosts.findIndex(other => other.id === host.id) === index)];
-    const relayKey = JSON.stringify([sceneHosts.filter(host => host.shadow).map(host => [host.id, host.agents]), relays.map(net => [net.relay, net.members.map(member => [member.host, member.state,
+    const relayKey = JSON.stringify([[...relayMembers.keys()].sort(), sceneHosts.filter(host => host.shadow).map(host => [host.id, host.agents]), relays.map(net => [net.relay, net.members.map(member => [member.host, member.state,
       member.lastActivityAt && Math.floor((Date.now() - member.lastActivityAt) / 60000)])])]);
     layout.reconcile([...rows.filter(row => row !== overseerRow), ...ghosts]);
     if (selected && !byId.has(selected)) { overview(); }
@@ -879,7 +882,7 @@
     const hostBus = data?.hostBus || {};
     const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages], Object.entries(hostBus).map(([id, value]) => [id, value.health, value.messages])]);
     if (key + relayKey !== sceneKey || !scene) {
-      sceneKey = key + relayKey; scene = ObserverScene.build(rooms, page, { overseer: overseerRow, overseerAccent: pack.scene?.colors?.cyan, relays, ...(sceneHosts.length ? { hosts: sceneHosts, localHealth: hostSources?.local?.health } : {}) });
+      sceneKey = key + relayKey; scene = ObserverScene.build(rooms, page, { overseer: overseerRow, overseerAccent: pack.scene?.colors?.cyan, relays, relayMembers, ...(sceneHosts.length ? { hosts: sceneHosts, localHealth: hostSources?.local?.health } : {}) });
       // Row freshness is read from the current roster by id: the cached scene's row objects can be older.
       view.update(scene, { stale: () => isStale(latest), rowStale: worker => rowStale(rowFor(worker.id)), mailFrame, inspected: inspectedAgent,
         repositorySelection: () => selectedRepoId, onRepositoryToggle: toggleRepository });

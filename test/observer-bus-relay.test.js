@@ -19,7 +19,7 @@ CREATE TABLE remote_peers (address TEXT PRIMARY KEY, repo_id TEXT NOT NULL, payl
 CREATE TABLE remote_outbox (id TEXT PRIMARY KEY, local_id INTEGER NOT NULL REFERENCES messages(id), envelope TEXT NOT NULL, state TEXT NOT NULL);
 CREATE TABLE remote_imports (id TEXT PRIMARY KEY, local_id INTEGER NOT NULL REFERENCES messages(id), envelope TEXT NOT NULL, ack_synced INTEGER NOT NULL DEFAULT 0, wake_claimed INTEGER NOT NULL DEFAULT 0);`;
 
-const S1 = '11111111-1111-4111-8111-111111111111', S2 = '22222222-2222-4222-8222-222222222222', R1 = '01a13f77-ab47-74e3-91d4-e7c83c17ee97';
+const S4OK = '44444444-4444-4444-8444-444444444444', S1 = '11111111-1111-4111-8111-111111111111', S2 = '22222222-2222-4222-8222-222222222222', R1 = '01a13f77-ab47-74e3-91d4-e7c83c17ee97';
 const NOW = Date.parse('2026-10-15T18:00:00.000Z'), iso = ms => new Date(ms).toISOString();
 const LOCAL = 'claude:' + S1, OTHER = 'codex:' + S2, FAR = 'whitenoise/llm-bus/codex:' + R1, SECRET_BODY = 'PRIVATE-BODY-CANARY';
 
@@ -52,6 +52,9 @@ try {
   peer('whitenoise', 'd', NOW - 25 * 3600000); peer('whitenoise', 'e', NOW - 7200000, 0, 'docs');
   peer('friend-1', 'self', NOW - 1000);   // this machine's own sessions are never a peer
   peer('quiet-box', 'z', NOW - 48 * 3600000);
+  // This machine's published sessions (what the bridge put on the relay): one live, one ended, one malformed key.
+  const publish = (address, repo, lastSeen, ended = false, key = repo + '/' + address) => db.query('INSERT INTO remote_publications VALUES (?, ?)').run(key, JSON.stringify({ native_address: address, repo_id: repo, last_seen: iso(lastSeen), ended }));
+  publish(LOCAL, 'llm-bus', NOW - 60000); publish(OTHER, 'llm-bus', NOW - 60000, true); publish('codex:' + S4OK, 'llm-bus', NOW - 60000, false, 'wrong/key');
   db.close();
 
   const state = makeBusReader({ now: () => NOW, file, tempRoot: scratch }).read();
@@ -76,6 +79,9 @@ try {
   const view = publicBus(state, [{ id: 'obs_local', provider: 'claude', sessionId: S1 }]);
   const text = JSON.stringify(view);
   for (const secret of [SECRET_BODY, R1, S2, 'codex:' + R1, 'codex:a', '/codex:']) assert.equal(text.includes(secret), false, 'no body or native session id reaches the page: ' + secret);
+  assert.deepEqual(state.remote.published, [{ address: LOCAL, repo: 'llm-bus' }], 'only live, well-formed publications count');
+  assert.deepEqual(view.remote.onRelay, [{ id: 'obs_local', repo: 'llm-bus' }], 'joined to its pane; the native address never reaches the page');
+  assert.equal(Object.hasOwn(view.remote, 'published'), false);
   const outView = view.messages.find(message => message.id === Number(out));
   assert.equal(outView.from, 'obs_local'); assert.equal(outView.to, 'external', 'the far side is never an observed pane');
   assert.equal(outView.relay.state, 'accepted_remote');

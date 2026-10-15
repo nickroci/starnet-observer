@@ -238,7 +238,8 @@ const ObserverView = (() => {
     }
   }
   function paintWalkway(ctx, walkway) {
-    const r = walkway.rect;
+    // A relay lane (a room whose agents the relay carries, and its way to the mailroom) wears the relay's amber rails.
+    const r = walkway.rect, rail = walkway.relay ? C.amber : C.rail;
     prism(ctx, corners(r), 0, -0.35, { top: C.grate, left: C.hullLeft, right: C.hullRight });
     ctx.save(); ctx.globalAlpha = 0.5;
     for (let x = r.x + 0.5; x < r.x + r.w; x += 0.5) line(ctx, { x, y: r.y }, { x, y: r.y + r.h }, C.grateDark);
@@ -248,14 +249,14 @@ const ObserverView = (() => {
     for (let t = 0; t <= length; t += 2) {
       for (const side of [0, 1]) {
         const base = long ? { x: r.x + t, y: r.y + side * r.h } : { x: r.x + side * r.w, y: r.y + t };
-        line(ctx, { ...base, z: 0 }, { ...base, z: 0.3 }, C.rail, 1);
+        line(ctx, { ...base, z: 0 }, { ...base, z: 0.3 }, rail, 1);
         if (t % 8 === 0 && side) isoEllipse(ctx, { ...base, z: 0.34 }, 0.06, null, C.window);
       }
       if (t % 6 === 0) { const base = long ? { x: r.x + t, y: r.y + r.h } : { x: r.x + r.w, y: r.y + t }; line(ctx, { ...base, z: -0.35 }, { ...base, z: -2.5 }, C['walkway-support'], 2, 0.8); }
     }
     for (const side of [0, 1]) {
       const a = long ? { x: r.x, y: r.y + side * r.h } : { x: r.x + side * r.w, y: r.y }, b = long ? { x: r.x + r.w, y: r.y + side * r.h } : { x: r.x + side * r.w, y: r.y + r.h };
-      line(ctx, { ...a, z: 0.3 }, { ...b, z: 0.3 }, C.rail, 1);
+      line(ctx, { ...a, z: 0.3 }, { ...b, z: walkway.relay ? 0.3 : 0.3 }, rail, walkway.relay ? 2 : 1);
     }
   }
   function paintHub(ctx, mail) {
@@ -944,18 +945,24 @@ const ObserverView = (() => {
       if (live) glow(ctx, { ...link.to, z: 2.2 }, 14, C.cyan, animate ? 0.3 + 0.25 * Math.sin(now / 600) : 0.4);
       ctx.restore();
     }
-    /* llm-bus relay link: mailroom to mailroom, high above the decks, the path relayed couriers fly. It marches while
-       its observed end saw relay activity in the last 15 minutes, is still and dashed while quiet, and is grey while that
-       bus is unreadable. Each end gets a small relay lamp. */
-    function paintRelayLink(link, now, animate) {
-      const active = link.state === 'active', color = link.state === 'unknown' ? C.idle : C.amber, a = P(link.a), b = P(link.b);
-      ctx.save(); ctx.strokeStyle = color; ctx.lineCap = 'round';
-      if (active) { ctx.lineWidth = 3; ctx.globalAlpha = 0.9; ctx.setLineDash([10, 6]); ctx.lineDashOffset = animate ? -(now / 45) % 16 : 0; }
-      else { ctx.lineWidth = 2; ctx.globalAlpha = 0.65; ctx.setLineDash([4, 7]); }
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
-      for (const end of [a, b]) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(end.x, end.y, 3.5, 0, Math.PI * 2); ctx.fill(); }
+    /* llm-bus relay highway: a raised deck from mailroom to mailroom, the path relayed couriers fly (they fly at its deck
+       height). Pylons stand on the two mailrooms. Its centre chevrons march while its observed end saw relay activity
+       in the last 15 minutes, stand still while quiet, and turn grey while that bus is unreadable. Painted over the
+       decks it crosses, as an overpass. */
+    function paintHighway(link, now, animate) {
+      const unknown = link.state === 'unknown', active = link.state === 'active', edge = unknown ? C.idle : C.amber;
+      const dx = link.b.x - link.a.x, dy = link.b.y - link.a.y, length = Math.max(0.001, Math.hypot(dx, dy)), nx = -dy / length * 0.8, ny = dx / length * 0.8, z = 2.2;
+      const at = (t, side, height = z) => P({ x: link.a.x + dx * t + nx * side, y: link.a.y + dy * t + ny * side, z: height });
+      for (const t of [0, 1]) for (const side of [-1, 1]) { const top = at(t, side), foot = at(t, side, 0); ctx.save(); ctx.strokeStyle = C['walkway-support']; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(foot.x, foot.y); ctx.stroke(); ctx.restore(); }
+      const deck = [at(0, -1), at(1, -1), at(1, 1), at(0, 1)], under = [at(0, 1, z - 0.4), at(1, 1, z - 0.4)];
+      poly(ctx, [deck[3], deck[2], under[1], under[0]], C.hullRight);
+      poly(ctx, deck, C.grate, C.grateDark);
+      for (const side of [-1, 1]) line(ctx, { x: link.a.x + nx * side, y: link.a.y + ny * side, z: z + 0.35 }, { x: link.b.x + nx * side, y: link.b.y + ny * side, z: z + 0.35 }, edge, 2, 0.9);
+      // Centre chevrons: one per tile, offset by time while live.
+      const shift = active && animate ? (now / 900) % 1 : 0;
+      ctx.save(); ctx.globalAlpha = unknown ? 0.5 : active ? 0.95 : 0.6; ctx.fillStyle = edge;
+      for (let d = shift; d < length; d += 1.5) { const t = d / length, p = at(t, 0, z + 0.02), q = at(Math.min(1, t + 0.5 / length), 0, z + 0.02); ctx.beginPath(); ctx.arc((p.x + q.x) / 2, (p.y + q.y) / 2, 2.2, 0, Math.PI * 2); ctx.fill(); }
       ctx.restore();
-      if (active && decor) glow(ctx, link.b, 16, C.amber, animate ? 0.25 + 0.2 * Math.sin(now / 700) : 0.3);
     }
     // ---------- FX: glow and sparks on the station itself (world space, deterministic) ----------
     // A burst of rising pixel sparks around a screen point. Each spark loops on its own phase so there is no state.
@@ -1294,7 +1301,8 @@ const ObserverView = (() => {
       const tier = lodFor(camera.zoom), plates = [], screen = point => Scene.toScreen(point, camera), selectedRepo = repositorySelection();
       for (const platform of scene.platforms) {
         const at = screen(platform.sign), size = signSize(tier === 'overview' ? 30 : 22), listed = overflowByPlatform.get(platform.key);
-        const label = clipText((platform.name || 'Unassigned').toUpperCase() + (platform.annex ? ' +' + platform.annex : '') + ' · ' + (platformCounts.get(platform.key) || 0) + (listed ? ' · +' + listed + ' listed' : ''), viewport.width * 0.4, size);
+        const onRelay = !!platform.relay;
+        const label = clipText((platform.name || 'Unassigned').toUpperCase() + (platform.annex ? ' +' + platform.annex : '') + ' · ' + (platformCounts.get(platform.key) || 0) + (listed ? ' · +' + listed + ' listed' : '') + (onRelay ? ' · ⇄ relay' : ''), viewport.width * 0.4, size);
         plates.push(textPlate(label, at.x, at.y - 6, { accent: platform.accent, size, color: platform.accent, priority: 50 }));
         if (isStale || staleKeys.has(platform.key)) plates.push(textPlate('STALE', at.x, at.y - 6 - size * 1.5, { accent: C.stale, size: 13, color: C.stale, priority: 49, dash: [3, 3] }));
         if (tier !== 'overview') for (const section of platform.sections) {
@@ -1337,7 +1345,7 @@ const ObserverView = (() => {
         const t = Math.max(0.5, 1 - 7 / Math.max(1, Math.hypot(link.b.x - link.a.x, link.b.y - link.a.y))), live = link.state === 'active';
         const mid = screen({ x: link.a.x + (link.b.x - link.a.x) * t, y: link.a.y + (link.b.y - link.a.y) * t, z: 2.2 });
         const note = live ? 'live' : link.state === 'unknown' ? 'bus unreadable' : Number.isFinite(link.lastActivityAt) ? 'quiet · ' + Model.age(link.lastActivityAt) : 'quiet';
-        plates.push(textPlate(clipText('relay · ' + relay.relay + ' · ' + note, viewport.width * 0.4, 12), mid.x, mid.y - 4,
+        plates.push(textPlate(clipText('RELAY ' + relay.relay + ' · ' + note + ' · ' + link.carried + ' on it here', viewport.width * 0.6, 12), mid.x, mid.y - 14,
           { accent: link.state === 'unknown' ? C.idle : C.amber, size: 12, color: live ? C.amber : C.dim, priority: 46, dash: live ? null : [3, 3] }));
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
@@ -1427,7 +1435,6 @@ const ObserverView = (() => {
         ctx.fillStyle = C['radar-sweep']; ctx.beginPath(); ctx.ellipse(at.x, at.y - 16, 14 * Math.abs(Math.cos(sweep)) + 3, 6, 0, 0, Math.PI * 2); ctx.fill();
         if (decor) glow(ctx, { ...top, z: 3.9 }, 22, C.amber, animate ? 0.35 + 0.3 * Math.max(0, Math.sin(now / 4000 * Math.PI * 2)) : 0.35);
       }
-      for (const relay of scene.relays || []) for (const link of relay.links) paintRelayLink(link, now, animate);
       for (const link of scene.links || []) paintObservation(link, now, animate);
       // Depth-sorted solid furniture, apron posts and crew. Wholly offscreen furniture is never submitted; every crew
       // body is submitted so its sprite state advances, and the shared sprite seam skips its pixels when off stage.
@@ -1472,6 +1479,7 @@ const ObserverView = (() => {
         items.push({ depth: region.rect.x + region.rect.y + 1, draw: () => A.apron(ctx, region) });
       items.sort((a, b) => a.depth - b.depth || String(a.tie || '').localeCompare(String(b.tie || '')));
       for (const item of items) item.draw();
+      for (const relay of scene.relays || []) for (const link of relay.links) paintHighway(link, now, animate);
       /* The selected repository's crew, roots and helpers alike, each get a ring; a worker whose own fresh status is
          working gets a thicker double ring and a glow. Read from the controller per paint; nothing accumulates. */
       const selectedRepo = repositorySelection();

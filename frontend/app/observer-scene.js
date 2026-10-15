@@ -100,6 +100,7 @@ const ObserverScene = (() => {
   function build(rooms, page, extras = {}) {
     // Ships appear only when remote hosts are configured; a single-host station is laid out exactly as before.
     const remoteHosts = Array.isArray(extras.hosts) ? extras.hosts.map(host => ({ ...host })) : [];
+    const relayMembers = extras.relayMembers instanceof Map ? extras.relayMembers : new Map();
     const shipIndex = host => { let index = remoteHosts.findIndex(value => value.id === host); if (index < 0) { remoteHosts.push({ id: host, health: 'unavailable' }); index = remoteHosts.length - 1; } return index; };
     for (const room of rooms) if (room.host) shipIndex(room.host);
     // Ship tops: below the flagship hull's bottom edge (its lowest connector), then below each remote hull in turn.
@@ -130,8 +131,13 @@ const ObserverScene = (() => {
       const rect = room.host ? remoteRoomRect(tops.get(room.host), slot, dxs.get(room.host) || 0) : { x: bank ? 24 : -30, y: ROOM_Y(bank, index), w: 20, h: 26 };
       const spineX = room.host ? 7 + (dxs.get(room.host) || 0) : bank ? 19 : -5, entry = pointAt(rect, 10, 25), elbow = pointAt(rect, 10, 28), join = { x: spineX, y: elbow.y, z: 0 };
       const bankKey = room.host ? room.host : bank;
-      if (!banks.has(bankKey)) banks.set(bankKey, { x: spineX, host: room.host || null, dock, ys: [] }); banks.get(bankKey).ys.push(join.y);
-      walkways.push(onHost(strip(entry, elbow, 'connector'), room.host), onHost(strip(elbow, join, 'connector'), room.host));
+      if (!banks.has(bankKey)) banks.set(bankKey, { x: spineX, host: room.host || null, dock, ys: [], relay: false }); banks.get(bankKey).ys.push(join.y);
+      if (room.rows.some(value => relayMembers.has(value.row.id))) banks.get(bankKey).relay = true;
+      // A room holding any agent the relay carries (published by its bus, or a shadow ship's roster) lays its walkways in
+      // the relay's colour all the way to its mailroom: those agents' mail can continue onto the relay highway.
+      const relayRoom = room.rows.some(value => relayMembers.has(value.row.id));
+      const lane = walkway => relayRoom ? { ...walkway, relay: true } : walkway;
+      walkways.push(lane(onHost(strip(entry, elbow, 'connector'), room.host)), lane(onHost(strip(elbow, join, 'connector'), room.host)));
       const sections = [];
       for (let block = 0; block < room.blocks.length; block++) {
         const value = room.blocks[block], previous = sections.at(-1);
@@ -145,7 +151,7 @@ const ObserverScene = (() => {
         { kind: 'apron', rect: { x: rect.x + 1, y: rect.y + 24, w: 2, h: 1 } },
         { kind: 'apron', rect: { x: rect.x + 17, y: rect.y + 24, w: 2, h: 1 } }
       ];
-      platforms.push({ key: room.key, projectId: room.projectId, name: room.name, annex: room.annex, accent: room.accent, rect, sections, ...(room.host ? { host: room.host } : {}),
+      platforms.push({ key: room.key, projectId: room.projectId, name: room.name, annex: room.annex, accent: room.accent, rect, sections, ...(room.host ? { host: room.host } : {}), ...(relayRoom ? { relay: true } : {}),
         decorationRegions, entry: { point: entry, edge: 'front-y' }, sign: pointAt(rect, 10, 0, 1.25) });
       for (const { row, block, seat, kind } of room.rows) {
         if (kind === 'helper') continue;
@@ -177,10 +183,11 @@ const ObserverScene = (() => {
       }
       platform.helperStations = stations;
     }
-    for (const { x, host, dock, ys } of banks.values()) {
+    for (const { x, host, dock, ys, relay } of banks.values()) {
+      const lane = walkway => relay ? { ...walkway, relay: true } : walkway;
       // A remote spine leaves its mailroom's front edge and runs down the ship's centre line.
-      if (host) walkways.push(onHost(strip({ x, y: dock.y + 6 }, { x, y: Math.max(...ys) }, 'spine'), host));
-      else walkways.push(strip({ x, y: Math.min(dock.y, ...ys) }, { x, y: Math.max(dock.y, ...ys) }, 'spine'), strip({ x, y: 6 }, mail.hub, 'hub-link'));
+      if (host) walkways.push(lane(onHost(strip({ x, y: dock.y + 6 }, { x, y: Math.max(...ys) }, 'spine'), host)));
+      else walkways.push(lane(strip({ x, y: Math.min(dock.y, ...ys) }, { x, y: Math.max(dock.y, ...ys) }, 'spine')), lane(strip({ x, y: 6 }, mail.hub, 'hub-link')));
     }
     for (const worker of workers.filter(worker => worker.kind === 'helper')) {
       const parent = workers.find(parent => parent.id === worker.parentId);
@@ -232,6 +239,8 @@ const ObserverScene = (() => {
           links.push({ from: member.host, to: other.host, machine: other.machine, shadow: !!other.shadow, state: member.state, lastActivityAt: member.lastActivityAt, a: { ...a, z: 2.2 }, b: { ...b, z: 2.2 } });
         }
       });
+      // Each link is a raised highway deck between the two mailrooms; it counts the agents on the relay at its observed end.
+      for (const link of links) link.carried = [...relayMembers.values()].filter(member => (member.host ?? null) === link.from).length;
       relays.push({ key: 'relay:' + net.relay, relay: net.relay, members: members.map(member => ({ host: member.host, machine: member.machine, state: member.state, lastActivityAt: member.lastActivityAt })), links });
     }
     const extents = [mail.rect, ...platforms.map(p => p.rect), ...walkways.map(w => w.rect), ...ships.map(ship => ship.rect),
@@ -241,6 +250,7 @@ const ObserverScene = (() => {
     const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.section || b.repo)]).sort(),
       ...(ships.length ? [ships.map(ship => [ship.id, ship.health, ship.rect])] : []),
       ...(relays.length ? [relays.map(relay => [relay.key, relay.links.map(link => [link.from, link.to])])] : []),
+      walkways.filter(walkway => walkway.relay).map(walkway => [walkway.kind, walkway.rect.x, walkway.rect.y]),
       workers.map(w => [w.id, w.kind, w.parentId, w.chair.x, w.chair.y]).sort()]);
     return { page, revision, platforms, walkways, workers, helperOverflow, observatory, mail, bounds, ...(ships.length ? { ships, links } : {}), ...(relays.length ? { relays } : {}) };
   }
