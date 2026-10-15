@@ -209,6 +209,7 @@ const call = (id, name = 'exec_command') => ({ type: 'response_item', timestamp:
     await metadataReadBudget(root);
     await childDiscoveryWindows(root);
     await nativeHelperProjection(root);
+    await idleEntryEvidence(root);
     await openedPathRaces(root);
     await sharedDiscovery(root);
     observer.retain(new Set());
@@ -539,4 +540,31 @@ async function observerWarmReuse(temp) {
     assert.equal((await observer.inspect(row.id, 'codex:' + ID)).health, 'unavailable', 'warm projection cannot outlive deleted source');
     console.log('observer warm projection: cached click performs 2 validation reads; replacement and deletion revoke old content');
   } finally { release(); await observer.close(); }
+}
+
+// Idle age comes from the last timestamped conversation row: a touched file, untimestamped bookkeeping rows and
+// timestamped non-conversation rows are not activity. A rewrite resets it; an unchanged re-read keeps it.
+async function idleEntryEvidence(temp) {
+  const claude = path.join(temp, 'idle-claude'), codex = path.join(temp, 'idle-codex'); await fs.mkdir(claude); await fs.mkdir(codex);
+  const observer = makeTranscriptObserver({ now: () => Date.parse('2026-10-15T12:00:00Z'), roots: { claude, codex } });
+  const cf = path.join(claude, ID + '.jsonl'), at = iso => Date.parse(iso);
+  const user = timestamp => ({ type: 'user', sessionId: ID, timestamp, message: { content: 'PRIVATE' } });
+  const assistant = timestamp => ({ type: 'assistant', sessionId: ID, timestamp, message: { content: [{ type: 'text', text: 'PRIVATE' }] } });
+  await fs.writeFile(cf, line(user('2026-10-14T17:40:00Z')) + line(assistant('2026-10-14T17:44:00Z')));
+  assert.equal((await observer.read('idle', 'claude', ID)).lastEntryAt, at('2026-10-14T17:44:00Z'));
+  await fs.appendFile(cf, line({ type: 'atis-latch', sessionId: ID }) + line({ type: 'summary', summary: 'PRIVATE' }) +
+    line({ type: 'system', sessionId: ID, timestamp: '2026-10-15T11:05:01Z', content: 'PRIVATE' }) + line({ type: 'user', sessionId: ID, message: { content: 'no time' } }));
+  await fs.utimes(cf, new Date('2026-10-15T11:05:01Z'), new Date('2026-10-15T11:05:01Z'));
+  let data = await observer.read('idle', 'claude', ID);
+  assert.equal(data.lastEntryAt, at('2026-10-14T17:44:00Z'), 'touched file and bookkeeping rows keep the last real entry');
+  assert.equal((await observer.read('idle', 'claude', ID)).lastEntryAt, data.lastEntryAt, 'unchanged re-read keeps it');
+  assert(!JSON.stringify(data).includes('PRIVATE'));
+  await fs.writeFile(cf, line(user('2026-10-13T09:00:00Z')) + ' '.repeat(64) + '\n');
+  assert.equal((await observer.read('idle', 'claude', ID)).lastEntryAt, at('2026-10-13T09:00:00Z'), 'a rewrite resets to its own entries');
+  await fs.writeFile(cf, line({ type: 'atis-latch', sessionId: ID }));
+  assert.equal((await observer.read('idle', 'claude', ID)).lastEntryAt ?? null, null, 'no conversation rows, no entry time');
+  const xf = path.join(codex, 'rollout-' + ID + '.jsonl');
+  await fs.writeFile(xf, line(meta(ID)) + line({ type: 'event_msg', timestamp: '2026-10-15T10:00:00Z', payload: { type: 'token_count' } }) +
+    line({ type: 'turn_context', timestamp: '2026-10-15T11:00:00Z', payload: {} }));
+  assert.equal((await observer.read('idle-x', 'codex', ID)).lastEntryAt, at('2026-10-15T10:00:00Z'), 'Codex counts response and event rows, not turn context');
 }

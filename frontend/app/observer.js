@@ -57,6 +57,8 @@
     onMode: ({ mode, platform }) => showZoom(mode === 'platform' ? platform : null),
     // Read every frame, so a title Herdr publishes later replaces the fallback while still hovered.
     hoverLabel: id => { const row = rowFor(id); return row ? ObserverModel.hoverLabel(row, rowStale(row)) : null; },
+    idleLevel: id => { const row = rowFor(id); return row ? ObserverModel.idleAge(row).level : 0; },
+    idleVigour: id => { const row = rowFor(id); return row ? ObserverModel.idleAge(row).vigour : 1; },
     nameFor: id => { const row = rowFor(id); return row ? workerName(row) : ''; },
     onCamera: ({ canZoomIn, canZoomOut }) => { get('zoom-in').disabled = !canZoomIn; get('zoom-out').disabled = !canZoomOut; } });
   /* One courier, stepped by the view's frame. A transition into stale or reduced grounds flights at once; the

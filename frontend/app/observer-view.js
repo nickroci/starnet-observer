@@ -22,6 +22,12 @@ const ObserverView = (() => {
   const P = Scene.project;
 
   // ---------- pure helpers (exported for tests) ----------
+  /* Idle age tint for a crew body: level 0 is untouched; full age is mostly greyscale and 55% darker, still readable
+     against the deck. Quantised levels come from the model, so the filter string changes only a handful of times. */
+  function idleFilter(level) {
+    const t = Math.max(0, Math.min(1, Number(level) || 0));
+    return t ? 'grayscale(' + (0.85 * t).toFixed(2) + ') brightness(' + (1 - 0.55 * t).toFixed(2) + ')' : 'none';
+  }
   const lodFor = zoom => zoom < LOD.overview ? 'overview' : zoom < LOD.detail ? 'sections' : 'detail';
   // One static-layer resolution per zoom bucket, capped by the pixel budget so huge decks never allocate unbounded canvases.
   function cacheResolution(bounds, zoom, dpr) {
@@ -380,7 +386,7 @@ const ObserverView = (() => {
   }
 
   // ---------- the view ----------
-  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onObservatory = () => {}, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, onCamera = () => {}, env = {} }) {
+  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onObservatory = () => {}, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, idleVigour = () => 1, onCamera = () => {}, env = {} }) {
     const win = env.window || (typeof window !== 'undefined' ? window : {});
     const raf = env.raf || (fn => win.requestAnimationFrame(fn)), caf = env.caf || (id => win.cancelAnimationFrame(id));
     const dprOf = env.dpr || (() => win.devicePixelRatio || 1);
@@ -882,11 +888,13 @@ const ObserverView = (() => {
     function paintAgentAura(worker, foot, extent, now, live, before) {
       const status = worker.row.status, size = worker.scale || 1, working = status === 'working', blocked = status === 'blocked';
       const color = working ? STATUS.working : blocked ? STATUS.blocked : worker.accent;
+      // Vigour (1 fresh … 0 after days idle) thins the aura, motes and sparks of a resting agent; working is always 1.
+      let vigour = 1; if (!working) { try { vigour = Math.max(0, Math.min(1, Number(idleVigour(worker.id)))); if (!Number.isFinite(vigour)) vigour = 1; } catch (_) { vigour = 1; } }
       const chestY = extent ? extent.top + extent.h * 0.45 : foot.y - CREW_HEIGHT * size * 0.5;
       const pulse = live ? 0.7 + 0.3 * Math.sin(now / (working ? 900 : 2600) * Math.PI * 2 + (hash(worker.id) % 10)) : 0.8;
       if (before) {
         const radius = (working ? 54 : blocked ? 44 : 30) * size;
-        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (working ? 0.95 : blocked ? 0.65 : 0.32) * pulse;
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (working ? 0.95 : blocked ? 0.65 : 0.32 * (0.25 + 0.75 * vigour)) * pulse;
         const g = ctx.createRadialGradient(foot.x, chestY, 0, foot.x, chestY, radius);
         g.addColorStop(0, color); g.addColorStop(0.5, color); g.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(foot.x, chestY, radius, radius * 1.25, 0, 0, Math.PI * 2); ctx.fill();
@@ -898,7 +906,7 @@ const ObserverView = (() => {
         return;
       }
       // Orbiting motes: six when working, two otherwise; blocked agents get slow amber embers instead.
-      const count = working ? 10 : 4, rx = 17 * size, ry = 22 * size * 0.45, speed = working ? 1600 : 5200, seed = hash(worker.id) % 360;
+      const count = working ? 10 : blocked ? 4 : Math.round(8 * vigour), rx = 17 * size, ry = 22 * size * 0.45, speed = working ? 1600 : 5200, seed = hash(worker.id) % 360;
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
       for (let i = 0; i < count; i++) {
         const ang = (live ? now / speed : 0.3) * Math.PI * 2 + i * (Math.PI * 2 / count) + seed;
@@ -913,6 +921,9 @@ const ObserverView = (() => {
       ctx.restore();
       if (live && working) sparks(foot.x, chestY - 10 * size, 'head' + worker.id, now, { count: 8, color: '#ffffff', alt: color, rise: 28 * size, spread: 22 * size, life: 1200, size: 2 });
       if (live && blocked) sparks(foot.x, chestY, 'ember' + worker.id, now, { count: 3, color, rise: 26 * size, spread: 12 * size, life: 2600, size: 2 });
+      // Resting agents keep a crackle that dies away with idle age: plenty after a fresh turn, none after days.
+      const rest = Math.round(7 * vigour);
+      if (live && !working && !blocked && rest) sparks(foot.x, chestY - 8 * size, 'rest' + worker.id, now, { count: rest, color: worker.accent, alt: '#ffffff', rise: (14 + 14 * vigour) * size, spread: 18 * size, life: 1500, size: 2 });
     }
 
     // ---------- crew ----------
@@ -941,13 +952,16 @@ const ObserverView = (() => {
         const top = toScreen(bounds.y, foot.y, camera.ty), bottom = toScreen(bounds.y + bounds.h, foot.y, camera.ty);
         return right >= -1 && left <= viewport.width + 1 && bottom >= -1 && top <= viewport.height + 1;
       };
+      // Long-idle agents fade toward grey (canvas filter where supported; elsewhere the hover text still says so).
+      let tint = 'none'; try { tint = idleFilter(idleLevel(worker.id)); } catch (_) {}
+      if (tint !== 'none' && 'filter' in ctx) ctx.filter = tint;
       try { extent = sprites && sprites.drawBody ? sprites.drawBody(ctx, body, now, { reducedMotion: reduced, skipGroundShadow: true, shouldPaint }) : null; } catch (_) { extent = null; }
       ctx.restore();
       if (!extent) {
         watchSkin(body.skin);
         // Visible upright fallback silhouette while sprites load or are unavailable.
         const h = CREW_HEIGHT * size, w = 16 * size;
-        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = worker.accent; ctx.strokeStyle = '#05080a';
+        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = worker.accent; ctx.strokeStyle = '#05080a'; if (tint !== 'none' && 'filter' in ctx) ctx.filter = tint;
         ctx.beginPath(); ctx.roundRect ? ctx.roundRect(foot.x - w / 2, foot.y - h * 0.72, w, h * 0.72, 6 * size) : ctx.rect(foot.x - w / 2, foot.y - h * 0.72, w, h * 0.72); ctx.fill(); ctx.stroke();
         ctx.beginPath(); ctx.arc(foot.x, foot.y - h * 0.84, 6 * size, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore();
         extent = { top: foot.y - h, w, h, fallback: true };
@@ -1296,6 +1310,6 @@ const ObserverView = (() => {
       cacheBuilds: () => (staticLayer ? staticLayer.builds : 0), running: () => running, titleRegions: () => titleRegions.map(region => ({ ...region })),
       signRegions: () => signRegions.map(region => ({ ...region })) };
   }
-  return { create, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
+  return { create, idleFilter, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverView;
