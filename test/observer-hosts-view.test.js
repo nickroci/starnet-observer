@@ -72,11 +72,17 @@ assert.ok(drawn('ssh · stale'), 'a stale host\'s link shows its real state');
   assert.ok(view.focusPlatform(shadowRoom.key)); node.ctx.texts.length = 0; now += 16; view.paint(now);
   assert.ok(node.ctx.texts.some(text => /^◌ WHITENOISE · 2 agents · via relay · not observed/.test(text)), 'a shadow ship names its machine and says it is not observed');
   assert.ok(node.ctx.texts.includes('LLM-BUS · 2 · ⇄ relay'), 'a relay room says so on its sign');
-  assert.ok(node.ctx.texts.some(text => /^RELAY relay\.example\.dev · live · 0 on it here/.test(text)), 'the relay link, labelled in the gap before the shadow ship, names its relay and live state');
+  assert.ok(node.ctx.texts.some(text => /^RELAY relay\.example\.dev · live · unverified · roster only, no mail yet · 0 agents here on it/.test(text)), 'the highway names its relay and live state, says no mail has crossed yet, and counts the agents here on it');
   const vmShip = scene.ships.find(ship => ship.id === 'vm'), shadowShip = scene.ships.find(ship => ship.shadow);
   assert.ok(shadowShip.rect.x > vmShip.rect.x + vmShip.rect.w, 'the shadow ship docks beside the ship it links to');
   assert.equal(shadowShip.mail.hub.y, vmShip.mail.hub.y, 'level with its mailroom');
   assert.deepEqual(scene.links.map(link => link.host), ['vm', 'empty'], 'the column and its ssh links are unchanged by a shadow');
+  // The highway is a ground walkway routed around the floors: no strip of it overlaps any room.
+  const highway = scene.walkways.filter(walkway => walkway.kind === 'relay-highway');
+  assert.ok(highway.length >= 3, 'climb, cross, descend');
+  const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  for (const segment of highway) for (const platform of scene.platforms) assert.ok(!overlap(segment.rect, platform.rect), 'the highway never crosses a room floor');
+  assert.ok(highway.every(segment => segment.relay === 'unverified'), 'until mail crosses, the highway is unverified');
   view.overview(); now += 16; view.paint(now);
 }
 const vmRoom = scene.platforms.find(platform => platform.host === 'vm');

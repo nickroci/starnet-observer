@@ -65,7 +65,10 @@ const ObserverScene = (() => {
       if (!remote || typeof remote.relay !== 'string' || typeof remote.machine !== 'string') continue;
       if (!nets.has(remote.relay)) { if (nets.size >= MAX_RELAYS) continue; nets.set(remote.relay, { relay: remote.relay, members: [], peers: new Map() }); }
       const net = nets.get(remote.relay), last = Number.isFinite(remote.lastActivityAt) ? remote.lastActivityAt : null;
-      net.members.push({ host, machine: remote.machine, lastActivityAt: last,
+      // Machines a relayed message demonstrably crossed with: received from, or delivered to (llm-bus synced states).
+      const crossed = [...new Set((Array.isArray(bus.messages) ? bus.messages : []).filter(message => message.relay && typeof message.relay.machine === 'string' &&
+        (message.relay.direction === 'in' || ['delivered_local', 'acknowledged'].includes(message.relay.state))).map(message => message.relay.machine))];
+      net.members.push({ host, machine: remote.machine, lastActivityAt: last, crossed,
         state: bus.health !== 'available' ? 'unknown' : last !== null && now - last < RELAY_ACTIVE_MS ? 'active' : 'quiet' });
       for (const peer of Array.isArray(remote.peers) ? remote.peers : []) {
         if (!peer || typeof peer.machine !== 'string') continue;
@@ -225,21 +228,42 @@ const ObserverScene = (() => {
         if (!host.shadow) { links.push({ host: host.id, health, from: { x: 12, y: above.y + above.h }, to: { x: 12, y: rect.y } }); above = rect; }
       }
     }
-    /* Relay links: llm-bus relays mail mailroom to mailroom, so each network joins its members' mailrooms to each other
-       and to every shadow ship's mailroom. Couriers for relayed mail fly along these, high above the decks; crew never
-       walk them. A link's state is its observed member's (active, quiet or unknown). */
+    /* Relay highways: llm-bus relays mail mailroom to mailroom, so each network joins its members' mailrooms to each
+       other and to every shadow ship's mailroom with a ground walkway routed around the floors. A member-to-member highway
+       runs down the column's centre line (between the room banks); a highway to a shadow ship climbs to a lane just
+       north of both ships' top rows, crosses, and comes down into the shadow mailroom. Couriers for relayed mail follow
+       it. A highway's state is its observed member's (active, quiet or unknown); it is 'verified' only once a relayed
+       message actually crossed it (delivered to, or received from, that machine), otherwise only the roster is seen. */
     const relays = [], hubOf = host => host === null ? mail : mailrooms.get(host) || null;
+    const topsOf = host => host === null ? [mail.rect.y, observatory.rect.y, ...platforms.filter(p => !p.host).map(p => p.rect.y)]
+      : [hubOf(host).rect.y, ...platforms.filter(p => p.host === host).map(p => p.rect.y)];
+    function highwayPath(from, to, shadow) {
+      const A = hubOf(from), B = hubOf(to), up = A.rect.y <= B.rect.y;
+      if (!shadow) {
+        // Down the centre line between the room banks: front edge of the upper mailroom to the back edge of the lower one.
+        const [top, bottom] = up ? [A, B] : [B, A], path = [top.hub, { x: top.hub.x, y: top.rect.y + top.rect.h, z: 0 }, { x: bottom.hub.x, y: bottom.rect.y, z: 0 }, bottom.hub];
+        return { path: up ? path : path.slice().reverse(), strips: [[path[1], path[2]]] };
+      }
+      const lane = Math.min(...topsOf(from), ...topsOf(to)) - 3;
+      // This machine's mailroom is boxed in by the observatory to its north, so its highway leaves east to the gap
+      // before the right-hand room bank and climbs there; a remote mailroom leaves straight off its back edge.
+      const exit = from === null ? [{ x: A.rect.x + A.rect.w, y: A.hub.y, z: 0 }, { x: A.rect.x + A.rect.w + 5, y: A.hub.y, z: 0 }] : [{ x: A.hub.x, y: A.rect.y, z: 0 }];
+      const climb = exit.at(-1), path = [A.hub, ...exit, { x: climb.x, y: lane, z: 0 }, { x: B.hub.x, y: lane, z: 0 }, { x: B.hub.x, y: B.rect.y, z: 0 }, B.hub];
+      return { path, strips: path.slice(1, -2).map((point, index) => [point, path[index + 2]]) };
+    }
     for (const net of Array.isArray(extras.relays) ? extras.relays : []) {
       const members = net.members.filter(member => hubOf(member.host)), shadows = (net.shadows || []).filter(shadow => hubOf(shadow.host));
       if (!members.length) continue;
       const links = [];
       members.forEach((member, index) => {
         for (const other of [...members.slice(index + 1).map(value => ({ host: value.host, machine: value.machine })), ...shadows.map(value => ({ host: value.host, machine: value.machine, shadow: true }))]) {
-          const a = hubOf(member.host).hub, b = hubOf(other.host).hub;
-          links.push({ from: member.host, to: other.host, machine: other.machine, shadow: !!other.shadow, state: member.state, lastActivityAt: member.lastActivityAt, a: { ...a, z: 2.2 }, b: { ...b, z: 2.2 } });
+          const { path, strips } = highwayPath(member.host, other.host, !!other.shadow);
+          const verified = (member.crossed || []).includes(other.machine);
+          for (const [p, q] of strips) walkways.push({ ...strip(p, q, 'relay-highway'), host: 'relay', relay: verified ? 'verified' : 'unverified' });
+          links.push({ from: member.host, to: other.host, machine: other.machine, shadow: !!other.shadow, state: member.state, lastActivityAt: member.lastActivityAt, verified, path });
         }
       });
-      // Each link is a raised highway deck between the two mailrooms; it counts the agents on the relay at its observed end.
+      // Each highway counts the agents on the relay at its observed end.
       for (const link of links) link.carried = [...relayMembers.values()].filter(member => (member.host ?? null) === link.from).length;
       relays.push({ key: 'relay:' + net.relay, relay: net.relay, members: members.map(member => ({ host: member.host, machine: member.machine, state: member.state, lastActivityAt: member.lastActivityAt })), links });
     }
@@ -249,7 +273,7 @@ const ObserverScene = (() => {
     const bounds = projectedBounds(extents);
     const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.section || b.repo)]).sort(),
       ...(ships.length ? [ships.map(ship => [ship.id, ship.health, ship.rect])] : []),
-      ...(relays.length ? [relays.map(relay => [relay.key, relay.links.map(link => [link.from, link.to])])] : []),
+      ...(relays.length ? [relays.map(relay => [relay.key, relay.links.map(link => [link.from, link.to, link.verified])])] : []),
       walkways.filter(walkway => walkway.relay).map(walkway => [walkway.kind, walkway.rect.x, walkway.rect.y]),
       workers.map(w => [w.id, w.kind, w.parentId, w.chair.x, w.chair.y]).sort()]);
     return { page, revision, platforms, walkways, workers, helperOverflow, observatory, mail, bounds, ...(ships.length ? { ships, links } : {}), ...(relays.length ? { relays } : {}) };
@@ -324,7 +348,19 @@ const ObserverScene = (() => {
     const farHost = link.from === host ? link.to : link.from, far = mailOf(scene, farHost);
     if (!far) return null;
     const ghost = link.shadow && relay.peer ? scene.workers.find(worker => worker.id === relay.peer && worker.row.host === farHost) : null;
-    return ghost ? { key: ghost.id, points: [...ghost.route, own.hub], desk: true, link } : { key: 'ship:' + farHost, points: [far.hub, own.hub], desk: false, link, observed: !link.shadow };
+    // The highway from the far mailroom to this one (its path runs from the link's observed end).
+    const across = (link.from === host ? link.path.slice().reverse() : link.path).map(point => ({ ...point, z: 0 }));
+    return ghost ? { key: ghost.id, points: [...ghost.route.slice(0, -1), ...across], desk: true, link, across } : { key: 'ship:' + farHost, points: across, desk: false, link, across, observed: !link.shadow };
+  }
+  // The point halfway along a polyline (by length): where mail the relay holds is drawn on its highway.
+  function halfway(points) {
+    const lengths = points.slice(1).map((point, index) => Math.hypot(point.x - points[index].x, point.y - points[index].y));
+    let left = lengths.reduce((sum, value) => sum + value, 0) / 2;
+    for (let index = 0; index < lengths.length; index++) {
+      if (left <= lengths[index] && lengths[index] > 0) { const t = left / lengths[index], a = points[index], b = points[index + 1]; return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: 0 }; }
+      left -= lengths[index];
+    }
+    return { ...points[points.length - 1], z: 0 };
   }
   function route(scene, layout, message, rows, host = null) {
     const far = message.relay ? relayEnd(scene, message, host) : null, out = message.relay?.direction === 'out';
@@ -343,7 +379,7 @@ const ObserverScene = (() => {
       const own = mailOf(scene, host) || scene.mail;
       const end = !far ? endpoint(scene, layout, message.to, host)
         : state === 'queued_local' ? { key: 'queued', points: [own.chute[0]] }
-        : state === 'accepted_remote' ? { key: 'relay:' + far.key, points: [{ x: (far.link.a.x + far.link.b.x) / 2, y: (far.link.a.y + far.link.b.y) / 2, z: 0 }] }
+        : state === 'accepted_remote' ? { key: 'relay:' + far.key, points: [halfway(far.across)] }
         : { key: far.key, points: far.points }, key = end.key + ':' + (end.deck || '');
       if (!spots.has(key)) spots.set(key, { point: { ...end.points[0], z: 1.2 }, count: 0, mark: false, label: end.deck ? 'D' + end.deck : '' });
       const spot = spots.get(key); spot.count++; if (['failed', 'unsupported', 'unknown'].includes(message.wake)) spot.mark = true;
