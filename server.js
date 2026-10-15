@@ -9,11 +9,14 @@ const { makePresentationObserver } = require('./sidecar/presentation.js');
 const { redact, setKnownSecretSource } = require('./sidecar/redaction.js');
 const { setClock } = require('./sidecar/failopen.js');
 const { loadConfig, HELP } = require('./sidecar/config.js');
+const { loadThemePack } = require('./sidecar/theme-packs.js');
+const canonicalTheme = require('./frontend/assets/themes/starnet/theme.json');
 const ROOT = path.join(__dirname, 'frontend');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.woff2': 'font/woff2' };
 const SESSION_IDENTITY = /^(?:(?:codex|claude):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|(?:helper:)?obs_[a-f0-9]{24})(?:\|obs_[a-f0-9]{24})?$/i;
 
 function createServer({ observer = makeObserver({ now: Date.now }), token = crypto.randomBytes(32).toString('hex'), theme = {} } = {}) {
+  const themePack = loadThemePack(theme, ROOT);
   const server = http.createServer(async (req, res) => {
     const port = server.address()?.port;
     const hosts = new Set(['127.0.0.1:' + port, 'localhost:' + port]);
@@ -55,8 +58,10 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       if (!canonical.startsWith(ROOT + path.sep)) return json(403, { error: 'Forbidden path' });
       let data = await fs.readFile(canonical);
       if (canonical === path.join(ROOT, 'observer.html')) {
-        const boot = '<script nonce="' + nonce + '">window.__OBSERVER_TOKEN__=' + JSON.stringify(token) + ';window.__OBSERVER_THEME__=' + JSON.stringify(theme).replace(/</g, '\\u003c') + ';</script>';
-        data = Buffer.from(data.toString().replace('</head>', boot + '</head>'));
+        const boot = '<script nonce="' + nonce + '">window.__OBSERVER_TOKEN__=' + JSON.stringify(token) + ';window.__OBSERVER_THEME__=' + JSON.stringify(theme).replace(/</g, '\\u003c') + ';window.__OBSERVER_THEME_DEFAULT__=' + JSON.stringify(canonicalTheme).replace(/</g, '\\u003c') + ';window.__OBSERVER_THEME_PACK__=' + JSON.stringify(themePack).replace(/</g, '\\u003c') + ';</script>';
+        const html = data.toString();
+        // The old template remains runnable until the frontend handoff adds its fixed head marker.
+        data = Buffer.from(html.includes('<!--observer-boot-->') ? html.replace('<!--observer-boot-->', boot) : html.replace('</head>', boot + '</head>'));
       }
       res.writeHead(200, { 'Content-Type': MIME[path.extname(canonical)] || 'application/octet-stream' });
       res.end(data);
@@ -82,7 +87,9 @@ if (require.main === module) {
   setKnownSecretSource(heldSecrets);
   setClock(Date.now);
   const observer = makeObserver({ now: Date.now });
-  const server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme });
+  let server;
+  try { server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme }); }
+  catch (error) { console.error('[observer theme]', error.themeReason || redact(String(error.message))); process.exit(1); }
   server.on('error', error => { console.error('[observer]', redact(String(error.message))); process.exitCode = 1; });
   server.listen(port, '127.0.0.1', () => console.log('Local Observer: http://127.0.0.1:' + port + '\nPrivate labels: ' + (config.presentation ? 'on (' + config.labels.company + ')' : 'off') + '\nRead only. Stop with Ctrl+C.'));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { server.close(); server.closeAllConnections(); });

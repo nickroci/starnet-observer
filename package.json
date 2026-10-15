@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node server.js",
     "test": "node scripts/test.js",
-    "presentation": "node server.js --presentation"
+    "presentation": "node server.js --presentation",
+    "validate:themes": "node scripts/validate-theme-packs.mjs"
   },
   "bin": {
     "starnet-observer": "server.js"

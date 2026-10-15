@@ -49,3 +49,9 @@ Last session: 2026-10-14
 Stopped at: Current app baseline initialization
 Resume file: None
 Next action: Ask what work to track next before creating a milestone or phase.
+
+### Registered Work
+
+| Work | Status | Directory |
+| --- | --- | --- |
+| Standalone theme framework and local appearance comparisons | Task 1 infrastructure reviewed; frontend handoff pending | .planning/quick/261014-wv3-standalone-theme-framework-and-local-app |
