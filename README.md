@@ -308,7 +308,7 @@ native session ids or message bodies for this.
   them in `remote_publications`. The observer joins those records to panes exactly (live, under a day old). Rooms holding
   a relay-carried agent, and every shadow room, get amber walkways to their mailroom and "⇄ relay" on their sign. Their
   agents read "on relay (repo)" on hover. Every other room is local to its own bus.
-- Relayed mail uses the normal courier paths: the sender's desk, its mailroom, across the relay link, the far mailroom,
+- Relayed mail uses the normal courier paths: the sender's desk, its mailroom, along the relay highway, the far mailroom,
   then the far agent's desk, along the highway. The far agent is matched by an opaque hash of its relay address, never its session id.
   Unacknowledged outgoing mail waits where llm-bus last proved it is: in the mailroom while `queued_local`, halfway along
   the highway once `accepted_remote`, and at the far agent's desk once `delivered_local`. When both ends are
