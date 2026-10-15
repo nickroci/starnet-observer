@@ -892,10 +892,12 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     help.handlers.click(); help.handlers.click(); assert.equal(popover.hidden, true, 'the trigger toggles');
     console.log('observer UI: aggregate totals (null unavailable, partial, coverage, Herdr deadline), exact repository toggles, helper task/lifecycle evidence and controls help OK');
   }
-  // Optional evidence expires while a fresh inventory request remains pending.
+  // Projected optional evidence expires while a fresh inventory request remains pending.
   {
     timers.clear();
-    let now = 7000, live, floor;
+    let now = 7000, live, floor, inventory;
+    const { makePresentationObserver } = require('../sidecar/presentation.js');
+    const presentation = makePresentationObserver({ get: async () => inventory });
     class EvidenceDate extends Date { static now() { return now; } }
     const ids = ['world', 'health', 'observed', 'sessions', 'empty', 'filters', 'overview', 'previous-page', 'next-page', 'search', 'page-label', 'room-count', 'counts',
       'zoom-in', 'zoom-out', 'mail-health', 'mail-counts', 'mail-ledger', 'mail-empty', 'mail-detail', 'zoom-chip', 'source-health', 'panels', 'station-totals', 'station-stats', 'station-stats-summary', 'controls-help', 'controls-help-popover'];
@@ -907,17 +909,20 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
       ObserverView: { create: () => ({ update(scene, options) { floor = options; }, start() {}, stop() {}, invalidate() {} }) },
       QuerySpine: { define() {}, invalidate: () => Promise.resolve(), subscribe(key, fn) { if (key === 'observer.sessions') live = fn; return () => {}; } } });
     await new Promise(resolve => setImmediate(resolve));
-    const snapshot = at => ({ hasData: true, pending: false, error: null, updatedAt: now, data: {
-      health: 'available', observedAt: now, sources: { herdr: { health: 'available', observedAt: now } },
-      sessions: [{ id: 'obs_evidence', source: 'herdr', projectId: 'repo', project: 'Repo', provider: 'codex', status: 'working', title: 'Task',
-        inventoryHealth: 'available', observedAt: now, tool: { available: true, observedAt: at, last: { name: 'Read', phase: 'started', at: 900 } } }],
-      aggregate: { agents: { observed: 1, verifiedSessions: 1, presenceOnly: 0, statuses: { working: 1 }, stale: 0 }, usageObservedAt: at,
-        usage: { inputTokens: { value: 42, state: 'available' } }, coverage: {} } } });
+    const snapshot = async at => {
+      inventory = {
+        health: 'available', observedAt: now, sources: { herdr: { health: 'available', observedAt: now }, desktop: { health: 'unavailable', observedAt: null } },
+        sessions: [{ id: 'obs_evidence', source: 'herdr', projectId: 'repo', repoId: 'repo', project: 'Repo', provider: 'codex', status: 'working', title: 'Task',
+          inventoryHealth: 'available', observedAt: now, tool: { available: true, observedAt: at, last: { name: 'Read', phase: 'started', at: 900 } } }],
+        aggregate: { agents: { observed: 1, verifiedSessions: 1, presenceOnly: 0, statuses: { working: 1 }, stale: 0 }, usageObservedAt: at,
+          usage: { inputTokens: { value: 42, state: 'available' } }, coverage: {} } };
+      return { hasData: true, pending: false, error: null, updatedAt: now, data: await presentation.get() };
+    };
     const findClass = (node, name) => node.className?.split(' ').includes(name) ? node : node.children.map(child => findClass(child, name)).find(Boolean);
     const summary = () => findClass(own.sessions, 'row-summary');
     const status = () => findClass(own.sessions, 'status');
     const tokens = () => own['station-totals'].children[5].children[0];
-    const current = snapshot(1000);
+    const current = await snapshot(1000);
     live(current);
     assert.match(summary().textContent, /reading files/);
     assert.equal(tokens().className, 'total-counter total-available');
@@ -932,11 +937,11 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     assert.equal(own['station-totals'].dataset.freshness, 'live', 'optional usage cannot dim current crew/status as stale');
     assert.equal(floor.stale(), false, 'current inventory stays live');
     assert.match(own['station-totals'].children[3].textContent, /^1 working/, 'current aggregate status stays live');
-    live(snapshot(now));
+    live(await snapshot(now));
     assert.match(summary().textContent, /reading files/);
     assert.equal(tokens().className, 'total-counter total-available');
     assert.doesNotMatch(tokens().textContent, /last known/);
-    console.log('observer UI: optional activity and authoritative usage expire during pending poll while inventory stays live, then recover');
+    console.log('observer UI: presentation-projected activity and authoritative usage expire during pending poll while inventory stays live, then recover');
   }
 
 })().catch(error => { console.error(error); process.exitCode = 1; });

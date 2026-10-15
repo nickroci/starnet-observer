@@ -53,6 +53,7 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
       presence: row.presence, helperOverflow: row.helperOverflow, usage: row.usage,
       tool: { available: row.tool?.available === true }
     };
+    if (Number.isFinite(row.tool?.observedAt)) safe.tool.observedAt = row.tool.observedAt;
     if (row.tool?.last) safe.tool.last = { name: TOOL_NAMES.has(row.tool.last.name) ? row.tool.last.name : 'Tool', phase: row.tool.last.phase, outcome: row.tool.last.outcome, at: row.tool.last.at };
     if (helper) {
       safe.parentId = row.parentId; safe.lineageState = row.lineageState;

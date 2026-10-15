@@ -9,7 +9,7 @@ const { createServer } = require('../server.js');
   const secret = 'PRIVATE-COMPANY-CANARY';
   const parent = { id: 'obs_' + 'a'.repeat(24), provider: 'codex', source: 'herdr', status: 'working', projectId: 'prj_1', project: secret,
     repoId: 'repo_1', repo: secret, worktree: secret, paneId: secret, title: secret, sessionId: secret, inspectionIdentity: secret,
-    inventoryHealth: 'available', observedAt: 1000, presence: 'pane', tool: { available: true, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: 1000, text: secret }, raw: secret }, unexpected: secret };
+    inventoryHealth: 'available', observedAt: 1000, presence: 'pane', tool: { available: true, observedAt: 1000, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: 1000, text: secret }, raw: secret }, unexpected: secret };
   const helper = { ...parent, id: 'obs_' + 'b'.repeat(24), source: 'helper', parentId: parent.id, status: 'idle', lineageState: 'open',
     taskEvidence: { state: 'available', summary: secret, source: secret }, taskStatusEvidence: { status: 'completed', source: secret },
     lifecycleEvidence: { state: 'closed', reason: 'killed' }, tool: { available: true, last: { name: secret, phase: 'started', outcome: 'unknown', at: 1000 } } };
@@ -26,6 +26,16 @@ const { createServer } = require('../server.js');
   assert.equal(first.sessions[1].project, 'Product'); assert.equal(first.sessions[1].repo, 'helio-web');
   assert.equal(first.sessions[0].title, 'Helper'); assert.equal(first.sessions[0].tool.last.name, 'Tool');
   assert.equal(first.sessions[1].tool.last.name, 'exec_command');
+  assert.equal(first.sessions[1].tool.observedAt, 1000, 'forward original tool source time independently of inventory time');
+  assert.equal(Object.hasOwn(first.sessions[0].tool, 'observedAt'), false, 'legacy input keeps its missing tool timestamp');
+  for (const observedAt of [0, secret, { private: secret }, NaN, Infinity, -Infinity, null]) {
+    const projected = await makePresentationObserver({ get: async () => ({ ...inventory,
+      sessions: [{ ...parent, tool: { ...parent.tool, observedAt } }] }) }).get();
+    const tool = projected.sessions[0].tool;
+    assert.equal(Object.hasOwn(tool, 'observedAt'), observedAt === 0, 'only finite numeric tool timestamps cross the allowlist');
+    if (observedAt === 0) assert.equal(tool.observedAt, 0, 'zero is a valid numeric timestamp');
+    assert.equal(JSON.stringify(projected).includes(secret), false, 'malformed timestamps cannot expose private strings or objects');
+  }
   assert.equal(first.sessions[1].inspectionIdentity, null);
   assert.deepEqual(first.bus.messages[0], { id: 1, from: parent.id, to: helper.id, sentAt: '2026-01-01T00:00:00.000Z', acknowledgedAt: null, wake: 'requested' });
   const byId = new Map(first.sessions.map(row => [row.id, row]));
