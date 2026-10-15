@@ -11,7 +11,9 @@ const ObserverModel = (() => {
   // Agents in different sub-folders of one repository sit in different sections (low walls between them).
   const folderOf = row => typeof row.folder === 'string' ? row.folder : '';
   const sectionKey = row => repoKey(row) + (folderOf(row) ? '#' + folderOf(row) : '');
-  const sectionLabel = row => (row.repo || row.project || 'Unassigned') + (folderOf(row) ? ' / ' + folderOf(row) : '');
+  // A room for the user's home folder reads "~ home" rather than the bare user name (display only).
+  const projectName = row => row.projectHome ? '~ home' : (row.project || 'Unassigned');
+  const sectionLabel = row => (row.projectHome && row.repoKind !== 'repository' ? '~ home' : row.repo || row.project || 'Unassigned') + (folderOf(row) ? ' / ' + folderOf(row) : '');
   // Gaps between reserved root desks; a section shares eight safe stations.
   const helperStations = [6, 9].flatMap(y => [4.25, 8.25, 14.25, 18].map(x => ({ x, y, w: 1, h: 0.72 })));
   const isHelper = row => row.source === 'helper' || Object.hasOwn(row, 'parentId');
@@ -139,7 +141,7 @@ const ObserverModel = (() => {
       for (const id of panes.keys()) if (!live.has(id)) { panes.delete(id); removed.push(id); changed = true; }
       for (const row of roots) {
         const project = projectKey(row), repo = repoKey(row), section = sectionKey(row), previous = panes.get(row.id);
-        names.set(project, row.project || 'Unassigned'); owners.set(project, hostOf(row));
+        names.set(project, projectName(row)); owners.set(project, hostOf(row));
         if (previous && previous.project === project && previous.repo === repo && (previous.section || previous.repo) === section) continue;
         if (previous) { panes.delete(row.id); moved.push(row.id); }
         panes.set(row.id, { project, repo, section, ...allocate(project, repo, sectionLabel(row), section) }); changed = true;
@@ -207,6 +209,6 @@ const ObserverModel = (() => {
     return { reconcile, pages, onPage, pageFor, colorFor,
       seatFor: id => { const pane = panes.get(id); return pane ? pane.block * BLOCK_SEATS + pane.seat : undefined; } };
   }
-  return { projectKey, hostOf, repoKey, helperStations, hash, palette, activity, age, idleAge, taskTitle, hoverLabel, createLayout };
+  return { projectName, projectKey, hostOf, repoKey, helperStations, hash, palette, activity, age, idleAge, taskTitle, hoverLabel, createLayout };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverModel;

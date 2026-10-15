@@ -71,6 +71,7 @@ function sanitizeRow(host, row, receivedAt) {
     inspectionIdentity, presence: word(row.presence, 30), helperOverflow: count(row.helperOverflow) || 0
   };
   if (Number.isFinite(row.lastActivityAt)) safe.lastActivityAt = row.lastActivityAt;
+  if (row.projectHome === true) safe.projectHome = true;
   if (helper) {
     safe.parentId = ID.test(row.parentId) ? remap(host, row.parentId) : null;
     safe.lineageState = word(row.lineageState, 30);

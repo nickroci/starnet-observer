@@ -59,4 +59,16 @@ const plain = View.create({ canvas: canvas(), nameFor: id => id, env: { raf: () 
 plain.start(); plain.update(Scene.build(layout.onPage(0).filter(room => !room.host), 0), { mailFrame: () => ({ drones: [], envelopes: [] }) }); plain.paint(16);
 assert.equal(Scene.build(layout.onPage(0).filter(room => !room.host), 0).bridges, undefined, 'no remotes, no bridges');
 view.stop(); assert.deepEqual(view.attentionRegions(), [], 'stop clears badges');
-console.log('observer hosts view: blocked "!" badge (fresh only, overview too), ship floor/label selection, bridges only with remotes OK');
+// "~ home": a home-folder room and its own section read "~ home"; a repository room in home keeps its repo section name.
+assert.equal(Model.projectName({ project: 'nick', projectHome: true }), '~ home');
+assert.equal(Model.projectName({ project: 'web' }), 'web');
+{
+  const homeLayout = Model.createLayout();
+  homeLayout.reconcile([row('obs_home', { project: 'nick', projectId: 'p_home', repo: 'nick', repoId: 'd_home', repoKind: 'folder', projectHome: true }),
+    row('obs_repo', { project: 'nick', projectId: 'p_home', repo: 'tools', repoId: 'r_tools', repoKind: 'repository', projectHome: true })]);
+  const [room] = homeLayout.onPage(0);
+  assert.equal(room.name, '~ home', 'the room sign');
+  const homeScene = Scene.build(homeLayout.onPage(0), 0);
+  assert.deepEqual(homeScene.platforms[0].sections.map(section => section.label).sort(), ['tools', '~ home'], 'section labels');
+}
+console.log('observer hosts view: "~ home" labels, blocked "!" badge (fresh only, overview too), ship floor/label selection, bridges only with remotes OK');

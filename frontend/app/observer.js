@@ -656,7 +656,7 @@
       lastGroups = groups;
       const first = group[0], entry = groupNode(key);
       entry.section.style.setProperty('--room', layout.colorFor(key).accent);
-      setText(entry.label, (first.project || 'Unassigned') + (labels.get(first.project)?.size > 1 ? ' · ' + key.slice(-4) : ''));
+      setText(entry.label, ObserverModel.projectName(first) + (labels.get(first.project)?.size > 1 ? ' · ' + key.slice(-4) : ''));
       setText(entry.kind, key === 'desktop' ? 'APPS' : first.projectKind === 'group' ? 'PROJECT' : first.projectKind === 'repository' ? 'REPO' : 'FOLDER');
       // Helpers are counted apart: a parent's own totals never include its helpers.
       const helpers = group.filter(isHelper).length;
@@ -835,6 +835,8 @@
     setText(get('counts'), (stale ? 'Last known: ' : '') + working + ' working · ' + blocked + ' waiting · ' + panelRows.length + ' total' + (behind ? ' · ' + behind + ' last known' : ''));
     renderHosts(hosts, hostSources, rows, panelRows);
     renderMail(bus);
+    // Mail is read from this machine's bus only (remote mail is later work): say so while a remote host is listed.
+    if (hosts.length) setText(get('mail-title'), 'Mailroom · recent ' + (Number.isInteger(bus?.window) ? bus.window : 100) + (selectedHost ? ' · this machine' : ''));
     renderSessions(panelRows, stale, messages, bus);
     if (hosts.length && !panelRows.length && !stale) setText(get('empty'), 'No sessions on ' + (selectedHost || 'this machine') + '.');
     for (const entry of panels) if (entry.target.kind === 'agent') entry.view.roster();

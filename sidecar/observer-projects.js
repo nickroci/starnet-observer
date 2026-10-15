@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const crypto = require('node:crypto');
 const { stationChildEnv } = require('./child-env.js');
 
@@ -11,9 +12,12 @@ const unassigned = () => ({ projectId: 'unassigned', project: 'Unassigned', proj
 
 /* Git owns repository/worktree discovery. Only opaque identities and short labels cross the API.
    Canonical main-repository parents own rooms; direct folder agents use that same folder identity. */
-function makeProjectResolver({ execute, now }) {
+function makeProjectResolver({ execute, now, home = os.homedir() }) {
   if (typeof now !== 'function') throw new TypeError('Project resolver requires an injected now clock');
   const cache = new Map();
+  // The user's home folder as a room gets a display-only flag (the page labels it "~ home"); ids are unchanged.
+  let homeReal = null;
+  const homeFolder = async () => homeReal ?? (homeReal = await fs.realpath(home).catch(() => home));
   const gitSettings = () => ({ timeout: 1000, maxBuffer: 16384,
     env: Object.fromEntries(Object.entries(stationChildEnv()).filter(([name]) => !name.startsWith('GIT_'))) });
   async function gitIdentity(folder) {
@@ -56,13 +60,13 @@ function makeProjectResolver({ execute, now }) {
       identity = common; kind = 'repository'; root = main; mainRoot = gitDir === common ? main : null;
       if (checkout !== root) worktree = path.basename(checkout);
     }
-    const projectFolder = kind === 'repository' ? path.dirname(root) : root;
+    const projectFolder = kind === 'repository' ? path.dirname(root) : root, atHome = projectFolder === await homeFolder();
     // Sub-folder inside the checkout the pane is working in ('' at the root): a display label only.
     let folder = '';
     try { const here = await fs.realpath(cwd), rel = path.relative(root, here); if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) folder = rel.split(path.sep).map(clean).filter(Boolean).join('/'); } catch (_) { folder = ''; }
     const value = { projectId: opaque('prj_', 'folder\0' + projectFolder), project: clean(path.basename(projectFolder)) || 'Local folder', projectKind: 'group',
       repoId: opaque(kind === 'repository' ? 'repo_' : 'dir_', identity), repo: clean(path.basename(root)) || 'Local folder', repoKind: kind,
-      worktree: worktree ? clean(worktree) : null, folder: folder.slice(0, 120) };
+      worktree: worktree ? clean(worktree) : null, folder: folder.slice(0, 120), ...(atHome ? { projectHome: true } : {}) };
     cache.set(cwd, { at: now(), value, mainRoot, repositoryIdentity: kind === 'repository' ? identity : null });
     if (cache.size > 256) cache.delete(cache.keys().next().value);
     return value;

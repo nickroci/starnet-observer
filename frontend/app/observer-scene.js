@@ -33,12 +33,14 @@ const ObserverScene = (() => {
       link: [{ x: 12, y: -4, z: 0 }, { x: 12, y: 0, z: 0 }, { x: 12, y: 5, z: 0 }, { x: 7, y: 5, z: 0 }, { x: 7, y: 6, z: 0 }],
       extents: [{ rect, height: 3.2 }, { rect: desk, height: 1.5 }, ...screens, ...telescopes, plant, light] };
   }
-  /* Remote ships dock in a line below the flagship (this machine), along the mailroom's open corridor (x 6–8, between
-     the room banks): each ship has the same internal layout around its own dock, offset in +y just far enough to clear
-     the ship above, and a bridge runs dock to dock up to the mailroom. Ships never sit beside room banks, so a bridge
-     crosses no room. */
-  const SHIP_GAP_Y = 10, HULL_MARGIN = 3, ROOM_Y = (bank, index) => (bank ? -42 : -48) + 32 * index;
-  const hullAround = rects => {
+  /* Remote ships dock in a line below the flagship (this machine), on the mailroom's open corridor (x 6–8, between the
+     flagship's room banks), with a clear gap between hulls. A remote ship is compact: its dock sits on the hull's top
+     edge, the end nearest the mailroom; its rooms flank a short spine that runs straight down from the dock (bank 0 to
+     the left, bank 1 to the right, rows going down); its hull wraps them tightly. A bridge spans the gap from the
+     mailroom (or the ship above) straight to the dock, so mail and crew go mailroom → bridge → dock → spine → room. */
+  const SHIP_GAP_Y = 8, HULL_MARGIN = 3, REMOTE_MARGIN = 2, ROOM_Y = (bank, index) => (bank ? -42 : -48) + 32 * index;
+  const remoteRoomRect = (dockY, slot) => ({ x: slot % 2 ? 11 : -17, y: dockY + 32 * Math.floor(slot / 2), w: 20, h: 26 });
+  const hullAround = (rects, HULL_MARGIN = 3) => {
     const minX = Math.min(...rects.map(r => r.x)), minY = Math.min(...rects.map(r => r.y));
     const maxX = Math.max(...rects.map(r => r.x + r.w)), maxY = Math.max(...rects.map(r => r.y + r.h));
     return { x: minX - HULL_MARGIN, y: minY - HULL_MARGIN, w: maxX - minX + 2 * HULL_MARGIN, h: maxY - minY + 2 * HULL_MARGIN };
@@ -48,14 +50,14 @@ const ObserverScene = (() => {
     const remoteHosts = Array.isArray(extras.hosts) ? extras.hosts.map(host => ({ ...host })) : [];
     const shipIndex = host => { let index = remoteHosts.findIndex(value => value.id === host); if (index < 0) { remoteHosts.push({ id: host, health: 'unavailable' }); index = remoteHosts.length - 1; } return index; };
     for (const room of rooms) if (room.host) shipIndex(room.host);
-    // Vertical offsets: the local station's lowest connector, then each remote ship's own extent (dock area at least).
+    // Dock rows: below the flagship hull's bottom edge (its lowest connector), then below each remote hull in turn.
     const roomY = room => { const slot = room.slot % 8; return ROOM_Y(slot % 2, Math.floor(slot / 2)); };
-    let cursor = Math.max(12, ...rooms.filter(room => !room.host).map(room => roomY(room) + 28));
-    const offsets = new Map();
+    let cursor = Math.max(12, ...rooms.filter(room => !room.host).map(room => roomY(room) + 29)) + HULL_MARGIN;
+    const docks = new Map();
     for (const host of remoteHosts) {
-      const own = rooms.filter(room => room.host === host.id);
-      const relMin = Math.min(-8, ...own.map(roomY)), relMax = Math.max(12, ...own.map(room => roomY(room) + 28));
-      const oy = cursor + SHIP_GAP_Y - relMin; offsets.set(host.id, oy); cursor = oy + relMax;
+      const dockY = cursor + SHIP_GAP_Y + REMOTE_MARGIN, own = rooms.filter(room => room.host === host.id);
+      docks.set(host.id, dockY);
+      cursor = Math.max(dockY + 4, ...own.map(room => remoteRoomRect(dockY, room.slot % 8).y + 29)) + REMOTE_MARGIN;
     }
     const mail = { rect: { x: 0, y: 0, w: 14, h: 12 }, hub: { x: 7, y: 6, z: 0 },
       tower: { x: 5, y: 1, w: 4, h: 3 }, pads: [4, 7, 10].map(x => ({ x, y: 9, z: 0 })),
@@ -64,10 +66,10 @@ const ObserverScene = (() => {
     const observatory = observatoryFor(), platforms = [], walkways = [{ kind: 'observatory-link', rect: { x: 11, y: -4, w: 2, h: 4 } }], workers = [], helperOverflow = [], banks = new Map();
     for (const room of rooms) {
       const slot = room.slot % 8, bank = slot % 2, index = Math.floor(slot / 2);
-      const dy = room.host ? offsets.get(room.host) : 0, dock = { x: 7, y: 6 + dy, z: 0 };
-      const rect = { x: bank ? 24 : -30, y: ROOM_Y(bank, index) + dy, w: 20, h: 26 };
-      const spineX = bank ? 19 : -5, entry = pointAt(rect, 10, 25), elbow = pointAt(rect, 10, 28), join = { x: spineX, y: elbow.y, z: 0 };
-      const bankKey = room.host ? room.host + '|' + bank : bank;
+      const dockY = room.host ? docks.get(room.host) : null, dock = room.host ? { x: 7, y: dockY + 2, z: 0 } : { x: 7, y: 6, z: 0 };
+      const rect = room.host ? remoteRoomRect(dockY, slot) : { x: bank ? 24 : -30, y: ROOM_Y(bank, index), w: 20, h: 26 };
+      const spineX = room.host ? 7 : bank ? 19 : -5, entry = pointAt(rect, 10, 25), elbow = pointAt(rect, 10, 28), join = { x: spineX, y: elbow.y, z: 0 };
+      const bankKey = room.host ? room.host : bank;
       if (!banks.has(bankKey)) banks.set(bankKey, { x: spineX, host: room.host || null, dock, ys: [] }); banks.get(bankKey).ys.push(join.y);
       walkways.push(onHost(strip(entry, elbow, 'connector'), room.host), onHost(strip(elbow, join, 'connector'), room.host));
       const sections = [];
@@ -92,7 +94,7 @@ const ObserverScene = (() => {
         const home = sections.find(section => contains(section.rect, { x: desk.x + 1, y: desk.y + 0.5 })) || null;
         workers.push({ id: row.id, row, kind: 'session', parentId: null, scale: 1, platformKey: room.key, accent: room.accent, desk, chair, home: home ? { ...home.rect } : null, section: home ? home.section : null,
           // Remote crew reach the mailroom over their ship's dock and the bridge chain (straight up the x = 7 corridor).
-          route: [chair, { x: chair.x, y: laneY, z: 0 }, { x: rect.x + 10, y: laneY, z: 0 }, entry, elbow, join, { x: spineX, y: 6 + dy, z: 0 }, ...(room.host ? [dock] : []), mail.hub] });
+          route: [chair, { x: chair.x, y: laneY, z: 0 }, { x: rect.x + 10, y: laneY, z: 0 }, entry, elbow, join, ...(room.host ? [dock] : [{ x: spineX, y: 6, z: 0 }]), mail.hub] });
       }
       const platform = platforms.at(-1), stations = [];
       const lanes = [0, 1, 2].flatMap(block => [4.75, 7.75].map(y => ({ x: rect.x + 1, y: rect.y + block * 7 + y - 0.25, w: 18, h: 0.5 })))
@@ -116,8 +118,9 @@ const ObserverScene = (() => {
       platform.helperStations = stations;
     }
     for (const { x, host, dock, ys } of banks.values()) {
-      walkways.push(onHost(strip({ x, y: Math.min(dock.y, ...ys) }, { x, y: Math.max(dock.y, ...ys) }, 'spine'), host),
-        host ? onHost(strip({ x, y: dock.y }, dock, 'dock-link'), host) : strip({ x, y: 6 }, mail.hub, 'hub-link'));
+      // A remote spine leaves the dock's bottom edge and runs down the ship's centre line; it needs no dock link.
+      if (host) walkways.push(onHost(strip({ x, y: dock.y + 2 }, { x, y: Math.max(...ys) }, 'spine'), host));
+      else walkways.push(strip({ x, y: Math.min(dock.y, ...ys) }, { x, y: Math.max(dock.y, ...ys) }, 'spine'), strip({ x, y: 6 }, mail.hub, 'hub-link'));
     }
     for (const worker of workers.filter(worker => worker.kind === 'helper')) {
       const parent = workers.find(parent => parent.id === worker.parentId);
@@ -143,17 +146,16 @@ const ObserverScene = (() => {
     if (remoteHosts.length) {
       ships = [{ id: null, local: true, health: extras.localHealth || 'available', rect: hullAround([mail.rect, observatory.rect,
         ...platforms.filter(p => !p.host).map(p => p.rect), ...walkways.filter(w => !w.host).map(w => w.rect)]) }];
-      // Bridge chain: mailroom's front edge → first dock → next dock …; each segment belongs to the ship it reaches.
+      // Bridge chain: mailroom's front edge → first dock; the next ship's bridge leaves the bottom of the ship above.
       let from = { x: 7, y: mail.rect.y + mail.rect.h };
       for (const host of remoteHosts) {
-        const oy = offsets.get(host.id), dock = { x: 5, y: 4 + oy, w: 4, h: 4 };
+        const dock = { x: 5, y: docks.get(host.id), w: 4, h: 4 };
         const own = [...platforms.filter(p => p.host === host.id).map(p => p.rect), ...walkways.filter(w => w.host === host.id).map(w => w.rect)];
-        const health = host.health || 'unavailable';
-        ships.push({ id: host.id, local: false, health, observedAt: host.observedAt ?? null, reason: host.reason || null,
-          agents: host.agents ?? 0, dock, rect: hullAround([dock, { x: dock.x - 10, y: dock.y - 12, w: 24, h: 20 }, ...own]) });
+        const health = host.health || 'unavailable', rect = hullAround([dock, ...own], REMOTE_MARGIN);
+        ships.push({ id: host.id, local: false, health, observedAt: host.observedAt ?? null, reason: host.reason || null, agents: host.agents ?? 0, dock, rect });
         const to = { x: 7, y: dock.y };
         bridges.push({ host: host.id, health, from, to, rect: { x: 6, y: from.y, w: 2, h: Math.max(0, to.y - from.y) } });
-        from = { x: 7, y: dock.y + dock.h };
+        from = { x: 7, y: rect.y + rect.h };
       }
     }
     const extents = [mail.rect, ...platforms.map(p => p.rect), ...walkways.map(w => w.rect), ...ships.map(ship => ship.rect), ...bridges.map(b => b.rect)].map(rect => ({ rect }))

@@ -53,6 +53,8 @@ function fakeTimers() {
   assert.match(safe.projectId, /^prj_[a-f0-9]{20}$/); assert.notEqual(safe.projectId, 'prj_' + '1'.repeat(20));
   assert.match(safe.repoId, /^dir_[a-f0-9]{20}$/);
   // The same remote folder on two hosts never merges into one room, and never matches the local id.
+  assert.equal(sanitizeRow('vm', row({ projectHome: true }), 1).projectHome, true, 'the home-folder display flag survives');
+  for (const value of ['yes', 1, {}]) assert.equal('projectHome' in sanitizeRow('vm', row({ projectHome: value }), 1), false, 'only a literal true');
   assert.notEqual(sanitizeRow('vm2', row(), 1).projectId, safe.projectId);
   assert.notEqual(sanitizeRow('vm2', row(), 1).repoId, safe.repoId);
   assert.equal(safe.inspectionIdentity, 'claude:' + UUID);
@@ -171,7 +173,14 @@ function fakeTimers() {
   for (const platform of multi.platforms.filter(p => !p.host)) assert.ok(inside(platform.rect, multi.ships[0].rect), 'local rooms sit inside the flagship');
   assert.ok(!overlaps(vmShip.rect, multi.ships[0].rect) && !overlaps(emptyShip.rect, vmShip.rect) && !overlaps(emptyShip.rect, multi.ships[0].rect), 'ships do not overlap');
   assert.ok(vmShip.rect.y >= multi.ships[0].rect.y + multi.ships[0].rect.h && emptyShip.rect.y >= vmShip.rect.y + vmShip.rect.h, 'remote ships dock in a line below the flagship');
-  assert.ok(emptyShip.rect.w > 0, 'an empty host still gets a hull');
+  assert.ok(emptyShip.rect.w > 0 && emptyShip.rect.w <= 10 && emptyShip.rect.h <= 10, 'an empty host gets a compact hull just around its dock');
+  const flag = multi.ships[0].rect;
+  assert.ok(vmShip.rect.y - (flag.y + flag.h) >= 8 && emptyShip.rect.y - (vmShip.rect.y + vmShip.rect.h) >= 8, 'a clear gap between hulls');
+  for (const ship of [vmShip, emptyShip]) assert.equal(ship.dock.y, ship.rect.y + 2, 'the dock sits on the hull edge nearest the mailroom');
+  const vmRooms = multi.platforms.filter(p => p.host === 'vm');
+  assert.ok(vmRooms.some(p => p.rect.y === vmShip.dock.y), 'rooms start right beside the dock');
+  const extent = [vmShip.dock, ...vmRooms.map(p => p.rect)], bottom = Math.max(...extent.map(r => r.y + r.h));
+  assert.ok(vmShip.rect.y + vmShip.rect.h - bottom <= 6, 'the hull wraps its rooms tightly');
   // Bridges: one per remote ship, a chain up the mailroom corridor, crossing no room.
   assert.equal(single.bridges, undefined, 'no remotes → no bridges');
   assert.equal(multi.bridges.length, 2);
@@ -179,7 +188,8 @@ function fakeTimers() {
   assert.deepEqual([toVm.host, toVm.health, toEmpty.host, toEmpty.health], ['vm', 'stale', 'empty', 'unavailable']);
   assert.deepEqual(toVm.from, { x: 7, y: multi.mail.rect.y + multi.mail.rect.h }, 'the first bridge leaves the mailroom');
   assert.deepEqual(toVm.to, { x: 7, y: vmShip.dock.y }, 'and reaches the first dock');
-  assert.deepEqual(toEmpty.from, { x: 7, y: vmShip.dock.y + vmShip.dock.h }, 'the next continues from that dock');
+  assert.deepEqual(toEmpty.from, { x: 7, y: vmShip.rect.y + vmShip.rect.h }, 'the next leaves the bottom of the ship above');
+  assert.ok(toVm.to.y - flag.y - flag.h <= 14, 'the bridge spans the gap directly, not across an empty hull');
   assert.deepEqual(toEmpty.to, { x: 7, y: emptyShip.dock.y });
   for (const bridge of multi.bridges) for (const platform of multi.platforms) assert.ok(!overlaps(bridge.rect, platform.rect), 'a bridge crosses no room');
   const remoteWorker = multi.workers.find(worker => worker.row.host === 'vm');

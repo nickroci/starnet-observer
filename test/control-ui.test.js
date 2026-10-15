@@ -79,12 +79,14 @@ function element() {
   const listed = () => elements.sessions.children.flatMap(section => section.children[2].children).map(item => item.children[0].dataset.sessionId);
   assert.deepEqual(listed(), [sessions[0].id], 'this machine lists only local rows');
   assert.equal(elements['host-spawn'].hidden, true, 'no "New agent in ~" row for a local host that has agents');
+  assert.doesNotMatch(elements['mail-title'].textContent, /this machine/, 'no hint while this machine is listed');
   const confirmsBefore = confirms.length, postsBefore = posts.length;
   viewOptions.onShip('herdr-dev-2');
   assert.equal(posts.length, postsBefore, 'a ship click starts nothing'); assert.equal(confirms.length, confirmsBefore, 'and asks nothing');
   assert.equal(elements['crew-title'].textContent, 'herdr-dev-2 crew'); assert.equal(viewOptions.hostSelection(), 'herdr-dev-2');
   assert.deepEqual(listed(), [remote.id], 'the panel switches to that host');
   assert.match(elements['host-health'].textContent, /^Live · 1 agent$/);
+  assert.match(elements['mail-title'].textContent, /· this machine$/, 'a remote host view says the mail shown is this machine’s');
   // Blocked: the row reads "waiting for input", carries the attach hint and a prominent attach button.
   const blockedItem = elements.sessions.children.flatMap(section => section.children[2].children)[0];
   assert.equal(blockedItem.title, 'Waiting for input — press ⇱ to attach'); assert.match(blockedItem.className, /needs-input/);
