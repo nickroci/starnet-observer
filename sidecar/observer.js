@@ -38,8 +38,9 @@ function aggregateRows(rows, now) {
       /^helper:obs_[a-f0-9]{24}$/.test(row.inspectionIdentity || '');
     const verified = helper || row.source !== 'desktop' && ['codex', 'claude'].includes(row.provider) &&
       UUID.test(row.sessionId || '') && !!row.inspectionIdentity;
-    const key = helper ? row.provider + ':' + row.inspectionIdentity : verified ?
+    const identity = helper ? row.provider + ':' + row.inspectionIdentity : verified ?
       row.provider + ':' + row.sessionId.toLowerCase() : 'presence:' + row.id;
+    const key = JSON.stringify([row.host || null, identity]);
     if (!groups.has(key)) groups.set(key, { verified, rows: [] });
     groups.get(key).rows.push(row);
   }
