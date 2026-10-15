@@ -283,25 +283,44 @@ function makeObserver(options = {}) {
     if (closed || enrichment || !enrichmentTarget) return;
     const target = enrichmentTarget; enrichmentTarget = null;
     transcripts.beginDiscovery?.();
+    // Helper root eligibility consumes this sweep's bounded reads, including
+    // failures, instead of starting distinct reads in its own identity order.
+    const summaryResults = new Map(target.parents.map(row => {
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      return [row.id, { promise, resolve }];
+    }));
     const summaryWork = (async () => {
       let next = 0;
       async function readNext() {
         while (!closed && next < target.parents.length) {
           const row = target.parents[next++];
-          if (row.inspectionIdentity && !currentOwner(target.owners.get(row.id))) continue;
+          if (row.inspectionIdentity && !currentOwner(target.owners.get(row.id))) {
+            summaryResults.get(row.id).resolve({ available: false });
+            continue;
+          }
           let tool;
           try { tool = await transcripts.read(row.id, row.provider, row.sessionId); } catch (_) { tool = { available: false }; }
+          summaryResults.get(row.id).resolve(tool);
           if (!closed && currentOwner(target.owners.get(row.id))) {
             summaries.set(row.id, { owners: target.owners.get(row.id), tool });
             publish(); scheduleWarmup(target);
           }
         }
       }
-      await Promise.all(Array.from({ length: Math.min(4, target.parents.length) }, readNext));
+      try {
+        await Promise.all(Array.from({ length: Math.min(4, target.parents.length) }, readNext));
+      } finally {
+        // Closed sweeps may leave queued rows unread. Never strand helper work.
+        for (const result of summaryResults.values()) result.resolve({ available: false });
+      }
     })();
     const helperWork = (async () => {
       try {
-        const result = await (helpers.prepareChildren ? helpers.prepareChildren(target.parents) : helpers.children(target.parents));
+        const result = await (helpers.prepareChildren ? helpers.prepareChildren(target.parents, async row => {
+          const tool = await summaryResults.get(row.id).promise;
+          return !closed && currentOwner(target.owners.get(row.id)) ? tool : { available: false };
+        }) : helpers.children(target.parents));
         if (closed) return;
         if (result.health === 'unavailable' && result.reason !== 'unsupported') {
           result.commitBindings?.(new Set());

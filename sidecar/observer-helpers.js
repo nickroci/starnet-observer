@@ -45,7 +45,7 @@ function makeHelperObserver(options = {}) {
   const readEdges = options.readEdges || (() => readHelperEdges(options));
   let bindings = new Map();
 
-  async function prepareChildren(parents) {
+  async function prepareChildren(parents, readSummary = row => transcripts.read(row.id, row.provider, row.sessionId)) {
     const rows = [], annotations = new Map(), overflow = new Map(), nextBindings = new Map(), groupOwners = new Map();
     function commitBindings(acceptedIds) {
       bindings = new Map([...nextBindings].filter(([id]) => acceptedIds.has(id)));
@@ -62,7 +62,7 @@ function makeHelperObserver(options = {}) {
     }
     const roots = [];
     for (const row of [...exact.values()].filter(Boolean).sort((a, b) => identity(a).localeCompare(identity(b)))) {
-      if (['codex', 'claude'].includes(row.provider) && (row.tool?.available === true || (await transcripts.read(row.id, row.provider, row.sessionId)).available)) roots.push(row);
+      if (['codex', 'claude'].includes(row.provider) && (row.tool?.available === true || (await readSummary(row)).available)) roots.push(row);
     }
     let source = { rows: [] };
     if (roots.some(row => row.provider === 'codex')) {

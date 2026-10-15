@@ -25,6 +25,7 @@ function makeObserver(options) {
   }).finally(() => { pending = null; }));
   return { ...observer, get, inspect: async (...args) => { await get(); return observer.inspect(...args); } };
 }
+const { makeHelperObserver } = require('../sidecar/observer-helpers.js');
 const { makeDesktopObserver } = require('../sidecar/observer-desktop.js');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -116,6 +117,7 @@ const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status:
   await cappedHelperOwnership();
   await nestedHelperGrouping();
   await boundedDiscovery();
+  await composedSummaryBound();
   console.log('observer: shared refresh, stable panes, cache freshness, stale retention and authoritative removal OK');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 
@@ -156,6 +158,75 @@ async function boundedDiscovery() {
     assert.deepEqual(snapshot.sessions.map(row => row.projectId), agents.map(row => row.cwd));
     if (!batchProjects) assert.equal(projectCalls.length, agents.length);
     await observer.close();
+  }
+}
+
+async function composedSummaryBound() {
+  for (const closeEarly of [false, true]) {
+    // Helper identity order differs from roster order: its first root is outside
+    // the four summaries admitted initially. Identical pending keys cannot hide it.
+    const agents = Array.from({ length: 9 }, (_, index) => pane('composed-' + index,
+      '00000000-0000-0000-0000-' + String(9 - index).padStart(12, '0')));
+    agents.push(pane('composed-presence', null));
+    const gates = new Map(), calls = [], helperGate = deferred();
+    let active = 0, maximum = 0, edgeReads = 0, cleaning = false;
+    const transcripts = { retain() {}, bindChild: async () => null, claudeCandidates: async () => [],
+      read: async (id, provider, sessionId) => {
+        if (cleaning) return { available: false };
+        calls.push(sessionId); maximum = Math.max(maximum, ++active);
+        try {
+          await new Promise((resolve, reject) => gates.set(sessionId, { resolve, reject }));
+          return { available: true };
+        } finally { active--; }
+      } };
+    const helpers = makeHelperObserver({ transcripts, now: () => 1000,
+      readEdges: async () => { edgeReads++; await helperGate.promise; return { rows: [] }; } });
+    const observer = makeCoreObserver({ now: () => 1000, warmDetails: false, transcripts, helpers,
+      identities: { resolveMany: async rows => rows.map(row => ({ sessionId: row.agent_session.value, source: 'native' })) },
+      projects: { resolveMany: async rows => rows.map(() => ({ projectId: 'fixture' })) },
+      execute: async () => ({ stdout: JSON.stringify({ result: { agents } }) }),
+      desktop: { inventory: async () => ({ health: 'available', windows: [] }) },
+      bus: { read: async () => ({ rows: [] }) } });
+    try {
+      const core = await observer.get();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(core.sessions.length, agents.length, 'core publishes while summaries wait');
+      assert.equal(maximum, 4, 'actual helper composition shares the four-summary bound');
+      if (closeEarly) {
+        const closing = observer.close();
+        for (const gate of gates.values()) gate.resolve();
+        await closing;
+        assert.equal(calls.length, 4, 'close settles queued helper roots without admitting more reads');
+        assert.equal(edgeReads, 0, 'close cannot discover helpers from abandoned summaries');
+        assert(core.sessions.every(row => !row.tool.available), 'late results cannot mutate published core');
+      } else {
+        gates.get(agents[0].agent_session.value).resolve();
+        const partial = await inventoryWhen(observer, data => data.sessions[0].tool.available);
+        assert.equal(partial.sessions[1].tool.available, false, 'one summary publishes while other roots wait');
+        const failedSession = agents[4].agent_session.value;
+        // Reject an admitted summary: helper eligibility must reuse the unavailable
+        // result rather than retrying it through a separate admission path.
+        for (let attempt = 0; attempt < 1000 && edgeReads === 0; attempt++) {
+          for (const [sessionId, gate] of gates) {
+            if (sessionId === null) continue; // Presence-only summary cannot gate helper roots.
+            if (sessionId === failedSession) gate.reject(Error('fixture failure'));
+            else gate.resolve();
+          }
+          await new Promise(resolve => setImmediate(resolve));
+        }
+        assert.equal(edgeReads, 1, 'helper discovery starts before the unrelated presence summary settles');
+        assert.equal(active, 1, 'presence-only summary remains held when helper work starts');
+        const complete = await inventoryWhen(observer, data => data.sessions.filter(row => row.tool.available).length === 8);
+        assert.equal(complete.sessions[4].tool.available, false, 'failed summary remains unavailable');
+        assert.equal(calls.length, agents.length, 'helper roots reuse every completed summary including failures');
+        assert.equal(new Set(calls).size, agents.length);
+        assert.equal(maximum, 4);
+      }
+    } finally {
+      cleaning = true; helperGate.resolve();
+      for (const gate of gates.values()) gate.resolve();
+      await observer.close();
+    }
   }
 }
 
