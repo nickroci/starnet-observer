@@ -49,7 +49,7 @@
     selectedRepoId = selectedRepoId === repoId ? null : repoId;
     if (latest) render(latest, true);
   }
-  const view = ObserverView.create({ canvas: get('world'), reducedMotion, onSelect: id => select(id, true), onObservatory: () => observatoryClicked(),
+  const view = ObserverView.create({ canvas: get('world'), reducedMotion, onSelect: id => select(id, true), onObservatory: () => observatoryClicked(), onShip: window.__OBSERVER_CONTROL__ ? host => shipClicked(host) : null,
     // A worker's canvas title toggles the same exact panel as its list title and magnifier; focus returns to the station.
     onTitleToggle: id => { const row = rowFor(id); if (row) togglePanel(agentTarget(row), get('world')); },
     // Platform zoom never selects a worker; it only clears a previous worker selection.
@@ -412,10 +412,17 @@
     if (!CONTROL || !paneId || button.disabled) return;
     button.disabled = true; notice(pending);
     try {
-      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? {} : { paneId });
-      notice(action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · terminal opening · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · terminal opening' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
-    } catch (error) { notice((action === 'overseer' ? 'Could not start the overseer: ' : action === 'spawn' ? 'Could not start an agent: ' : action === 'attach' ? 'Could not open a terminal: ' : 'Could not close the agent: ') + error.message, true); }
+      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? {} : action === 'spawn-host' ? { host: paneId === 'local' ? null : paneId } : { paneId });
+      notice(action === 'spawn-host' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.folder + ' · ' + result.paneId + ' · terminal opening' : action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · terminal opening · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · terminal opening' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
+    } catch (error) { notice((action === 'spawn-host' ? 'Could not start an agent on that host: ' : action === 'overseer' ? 'Could not start the overseer: ' : action === 'spawn' ? 'Could not start an agent: ' : action === 'attach' ? 'Could not open a terminal: ' : 'Could not close the agent: ') + error.message, true); }
     finally { button.disabled = false; }
+  }
+  /* Ship hull click (control on): start Claude in that host's home folder, even on a host with no agents yet. */
+  function shipClicked(host) {
+    if (!CONTROL) return;
+    const name = host || 'this machine';
+    if (!window.confirm('Start a new Claude agent on ' + name + '?\n\nThis opens a Herdr workspace in the home folder there, starts Claude in it, and opens a terminal attached to it.')) return;
+    controlAction(get('world'), 'spawn-host', host || 'local', 'Starting an agent on ' + name + '…');
   }
   /* Observatory click: select the seated overseer, or (with control on) offer to start one. */
   function observatoryClicked() {
@@ -433,11 +440,11 @@
     const section = text('section', 'project-group', ''), heading = text('h3', 'project-heading', ''), label = text('span', '', ''), kind = text('span', 'project-kind', ''), total = text('span', 'project-total', '');
     const zoom = text('button', 'project-zoom', '⤢'); zoom.type = 'button'; zoom.addEventListener('click', () => zoomProject(key));
     heading.append(text('span', 'project-swatch', ''), label, kind, total, zoom);
-    if (CONTROL && !String(key).startsWith('host:')) {   // remote hosts are view-only
+    if (CONTROL) {
       const spawn = text('button', 'project-spawn', '+'); spawn.type = 'button'; spawn.title = 'Start a new Claude agent in this project (new Herdr tab, terminal opens)';
       spawn.setAttribute('aria-label', 'Start a new Claude agent in this project');
       spawn.addEventListener('click', () => {
-        const seed = (lastGroups.get(key) || []).find(row => row.source === 'herdr' && row.paneId && !row.host);
+        const seed = (lastGroups.get(key) || []).find(row => row.source === 'herdr' && row.paneId);
         if (!seed) { notice('No Herdr pane in this project to start from', true); return; }
         controlAction(spawn, 'spawn', seed.paneId, 'Starting a new agent next to ' + seed.paneId + '…');
       });
@@ -483,10 +490,10 @@
     let attach = null, close = null;
     if (CONTROL) {
       attach = text('button', 'row-attach', '⇱'); attach.type = 'button'; attach.title = 'Open a terminal attached to this agent'; attach.setAttribute('aria-label', 'Open a terminal attached to this agent');
-      attach.addEventListener('click', () => { const row = byId.get(id); if (row && row.source === 'herdr' && row.paneId && !row.host) controlAction(attach, 'attach', row.paneId, 'Opening a terminal for ' + row.paneId + '…'); });
+      attach.addEventListener('click', () => { const row = byId.get(id); if (row && row.source === 'herdr' && row.paneId) controlAction(attach, 'attach', row.paneId, 'Opening a terminal for ' + row.paneId + '…'); });
       close = text('button', 'row-close', '✕'); close.type = 'button'; close.title = 'Stop this agent (closes its Herdr pane)'; close.setAttribute('aria-label', 'Stop this agent');
       close.addEventListener('click', () => {
-        const row = byId.get(id); if (!row || row.source !== 'herdr' || !row.paneId || row.host) return;
+        const row = byId.get(id); if (!row || row.source !== 'herdr' || !row.paneId) return;
         const what = (workerName(row) || 'this agent') + (row.title ? ' · ' + row.title : '');
         if (!window.confirm('Stop ' + what + ' in pane ' + row.paneId + '?\n\nThis closes the Herdr pane and ends the Claude session. Unsaved conversation state is kept in its transcript; you can resume it later with claude --resume.')) return;
         controlAction(close, 'close', row.paneId, 'Closing ' + row.paneId + '…');
@@ -509,7 +516,7 @@
     entry.provider.className = 'provider ' + row.provider; setText(entry.provider, workerName(row)); if (entry.provider.title !== workerName(row)) entry.provider.title = workerName(row);
     entry.status.className = 'status ' + row.status; setText(entry.status, (stale ? 'was ' : '') + (row.status === 'blocked' ? 'waiting' : row.status));
     entry.source.hidden = !chip; setText(entry.source, chip);
-    if (entry.attach) { const can = row.source === 'herdr' && !!row.paneId && !stale && !row.host; entry.attach.hidden = !can; entry.close.hidden = !can; }
+    if (entry.attach) { const can = row.source === 'herdr' && !!row.paneId && !stale; entry.attach.hidden = !can; entry.close.hidden = !can; }
     setText(entry.title, composedTask(row) ? taskText(row) : row.title);
     const toolLive = !Number.isFinite(row.tool?.observedAt) || fresh(row.tool.observedAt);
     const last = toolLive && row.tool?.available && row.tool.last;

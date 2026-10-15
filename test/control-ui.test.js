@@ -7,7 +7,7 @@ const ObserverMail = require('../frontend/app/observer-mail.js');
 const ObserverInspector = require('../frontend/app/observer-inspector.js');
 const ObserverMailInspector = require('../frontend/app/observer-mail-inspector.js');
 const ObserverScene = require('../frontend/app/observer-scene.js');
-let document;
+let document, viewOptions;
 function element() {
   return { textContent: '', children: [], hidden: false, dataset: {}, value: '', scrollTop: 0, handlers: {}, attributes: {}, style: { setProperty() {} }, parent: null, disabled: false,
     classList: { toggle() {}, add() {} },
@@ -27,7 +27,7 @@ function element() {
   elements.filters = element(); elements.filters.children = filters;
   const posts = [], confirms = []; const lastPost = () => JSON.stringify(posts.at(-1)); let confirmAnswer = false, listener;
   const context = { console, Date, Set, Map, document, setTimeout: () => 1, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, encodeURIComponent,
-    ObserverView: { create: () => ({ setFx() {}, fx() { return true; }, update() {}, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate() {} }) },
+    ObserverView: { create: options => (viewOptions = options, { setFx() {}, fx() { return true; }, update() {}, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate() {} }) },
     window: { __OBSERVER_CONTROL__: true, __OBSERVER_THEME__: {}, localStorage: { getItem() { return 'on'; }, setItem() {} }, addEventListener() {}, confirm: message => { confirms.push(message); return confirmAnswer; } },
     SPRITES: { init: async () => ({}) },
     Harness: { api: { get: () => new Promise(() => {}), post: async (path, body) => { posts.push([path, body]); return { ok: true, paneId: 'w1:pX', name: 'spawned' }; } } },
@@ -60,5 +60,20 @@ function element() {
   assert.equal(elements['control-notice'] ? 1 : document.body.children.length, 1, 'a notice is shown');
   // A stale row hides both actions again.
   listener({ data: { sessions: [{ ...sessions[0], observedAt: Date.now() - 10 * 60 * 1000 }], health: 'available', observedAt: Date.now() } });
-  console.log('control UI: buttons only on live Herdr panes, close confirms first, attach/close/spawn post the shown pane id OK');
+  // Remote rows (multi-host hub) get the same actions, posting their host-namespaced pane id.
+  const remote = { ...sessions[0], id: 'obs_' + 'c'.repeat(24), paneId: 'herdr-dev-2/w1:p2', host: 'herdr-dev-2', projectId: 'prj_remote', title: 'Remote', observedAt: Date.now() };
+  listener({ data: { sessions: [sessions[0], remote], health: 'available', observedAt: Date.now() } });
+  const remoteItem = elements.sessions.children.flatMap(section => section.children[2].children).find(item => item.children[0].dataset.sessionId === remote.id);
+  assert.equal(remoteItem.children[3].hidden, false, 'a live remote pane gets attach');
+  remoteItem.children[3].handlers.click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(lastPost(), JSON.stringify(['/api/control/attach', { paneId: 'herdr-dev-2/w1:p2' }]));
+  // A ship hull click confirms, then asks the host to start an agent in its home folder; "no" sends nothing.
+  assert.equal(typeof viewOptions.onShip, 'function', 'ship hulls are spawn targets with control on');
+  const before = posts.length; confirmAnswer = false; viewOptions.onShip('herdr-dev-2'); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(posts.length, before); assert.match(confirms.at(-1), /Start a new Claude agent on herdr-dev-2\?/);
+  confirmAnswer = true; viewOptions.onShip('herdr-dev-2'); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(lastPost(), JSON.stringify(['/api/control/spawn-host', { host: 'herdr-dev-2' }]));
+  viewOptions.onShip(null); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(lastPost(), JSON.stringify(['/api/control/spawn-host', { host: null }]), 'the local ship spawns on this machine');
+  console.log('control UI: buttons only on live Herdr panes, close confirms first, attach/close/spawn post the shown pane id, remote rows and ship spawn OK');
 })().catch(error => { console.error(error); process.exit(1); });

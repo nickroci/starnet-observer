@@ -9,7 +9,7 @@ const { makePresentationObserver } = require('./sidecar/presentation.js');
 const { redact, setKnownSecretSource } = require('./sidecar/redaction.js');
 const { setClock } = require('./sidecar/failopen.js');
 const { loadConfig, HELP } = require('./sidecar/config.js');
-const { makeControl, PANE } = require('./sidecar/control.js');
+const { makeControl, TARGET } = require('./sidecar/control.js');
 const { makeRemoteHosts, makeFederatedObserver } = require('./sidecar/observer-remotes.js');
 const ROOT = path.join(__dirname, 'frontend');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.woff2': 'font/woff2' };
@@ -29,7 +29,7 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
     if (!hosts.has(req.headers.host) || req.headers.origin && ![...hosts].some(host => req.headers.origin === 'http://' + host) || req.headers['sec-fetch-site'] === 'cross-site') return json(403, { error: 'Local origin required' });
     const authorized = () => { const supplied = req.headers['x-observer-token']; return typeof supplied === 'string' && Buffer.byteLength(supplied) === Buffer.byteLength(token) && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(token)); };
     // Control actions are the one mutating surface, present only when the operator opted in at launch.
-    const action = control && req.method === 'POST' ? /^\/api\/control\/(attach|spawn|close|overseer)$/.exec(req.url) : null;
+    const action = control && req.method === 'POST' ? /^\/api\/control\/(attach|spawn|close|overseer|spawn-host)$/.exec(req.url) : null;
     if (req.method !== 'GET' && !action) return json(405, { error: 'Read-only server: GET required' });
     if (action) {
       if (!authorized()) return json(403, { error: 'Observer token required; reload the page' });
@@ -37,8 +37,11 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       let raw = '';
       try { for await (const chunk of req) { raw += chunk; if (raw.length > 4096) return json(413, { error: 'Body too large' }); } } catch (_) { return json(400, { error: 'Body unreadable' }); }
       let body; try { body = JSON.parse(raw || '{}'); } catch (_) { return json(400, { error: 'Invalid JSON' }); }
-      if (action[1] !== 'overseer' && (!body || typeof body.paneId !== 'string' || !PANE.test(body.paneId))) return json(400, { error: 'paneId required' });
-      try { return json(200, action[1] === 'overseer' ? await control.overseer() : await control[action[1]](body.paneId)); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json(400, { error: 'JSON object required' });
+      // Pane ids may be host-namespaced (`herdr-dev-2/w1:p1`); control refuses hosts that are not configured remotes.
+      if (!['overseer', 'spawn-host'].includes(action[1]) && (typeof body.paneId !== 'string' || !TARGET.test(body.paneId))) return json(400, { error: 'paneId required' });
+      if (action[1] === 'spawn-host' && (body.host !== null && typeof body.host !== 'string' || body.folder !== undefined && body.folder !== null && typeof body.folder !== 'string')) return json(400, { error: 'host and folder must be strings' });
+      try { return json(200, action[1] === 'overseer' ? await control.overseer() : action[1] === 'spawn-host' ? await control.spawnHost(body.host ?? null, body.folder ?? null) : await control[action[1]](body.paneId)); }
       catch (error) { const status = Number.isInteger(error.status) ? error.status : 500; if (status >= 500) console.warn('[observer control]', redact(String(error.message))); return json(status, { error: redact(String(error.message)), paneId: typeof error.paneId === 'string' ? error.paneId : undefined }); }
     }
     try {
@@ -125,7 +128,7 @@ if (require.main === module) {
   const local = makeObserver({ now: Date.now, warmDetails: !config.presentation });
   const remoteHosts = config.remotes.length ? makeRemoteHosts({ remotes: config.remotes, now: Date.now }) : null;
   const observer = remoteHosts ? makeFederatedObserver(local, remoteHosts, Date.now) : local;
-  const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean) }) : null;
+  const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean), remotes: config.remotes }) : null;
   const server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme, control });
   server.on('error', error => { console.error('[observer]', redact(String(error.message))); process.exitCode = 1; });
   server.listen(port, '127.0.0.1', () => console.log('Local Observer: http://127.0.0.1:' + port + '\nPrivate labels: ' + (config.presentation ? 'on (' + config.labels.company + ')' : 'off') + (control ? '\nControl actions: on (OBSERVER_CONTROL=1): attach, spawn and close Herdr agents from the page.' : '\nRead only.') +

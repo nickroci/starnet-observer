@@ -386,7 +386,7 @@ const ObserverView = (() => {
   }
 
   // ---------- the view ----------
-  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onObservatory = () => {}, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, idleVigour = () => 1, onCamera = () => {}, env = {} }) {
+  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onObservatory = () => {}, onShip = null, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, idleVigour = () => 1, onCamera = () => {}, env = {} }) {
     const win = env.window || (typeof window !== 'undefined' ? window : {});
     const raf = env.raf || (fn => win.requestAnimationFrame(fn)), caf = env.caf || (id => win.cancelAnimationFrame(id));
     const dprOf = env.dpr || (() => win.devicePixelRatio || 1);
@@ -416,7 +416,9 @@ const ObserverView = (() => {
        screen boxes for the scene and camera they were drawn with; after any change to either they hit nothing until
        the next paint, so a stale box can never toggle whichever repository the moved view now shows there. */
     let signRegions = [], plateFrame = null, repositories = new Set(), repositorySelection = () => null, onRepositoryToggle = () => {};
-    let observatoryRegion = null;
+    let observatoryRegion = null, shipRegions = [];
+    // Ship hull labels are spawn targets only when the page passes onShip (control actions on).
+    const shipAt = point => paintedFrameCurrent() && shipRegions.find(r => point.x >= r.left && point.x <= r.left + r.width && point.y >= r.top && point.y <= r.top + r.height) || null;
     const observatoryAt = point => paintedFrameCurrent() && observatoryRegion && point.x >= observatoryRegion.left && point.x <= observatoryRegion.left + observatoryRegion.width && point.y >= observatoryRegion.top && point.y <= observatoryRegion.top + observatoryRegion.height;
     const paintedFrameCurrent = () => !!plateFrame && plateFrame.scene === scene && plateFrame.zoom === camera.zoom && plateFrame.tx === camera.tx && plateFrame.ty === camera.ty;
     const signAt = point => {
@@ -1048,9 +1050,10 @@ const ObserverView = (() => {
         const r = ship.rect, at = screen({ x: r.x + r.w / 2, y: r.y, z: 4 }), live = shipLive(ship);
         const seen = !live && ship.observedAt ? ' · last seen ' + Model.age(ship.observedAt) : '';
         const label = ship.local ? '● THIS MACHINE' : (live ? '● ' : '○ ') + String(ship.id).toUpperCase() + ' · ' + (ship.agents || 0) + ' agent' + (ship.agents === 1 ? '' : 's') +
-          (live ? '' : ship.health === 'stale' ? ' · STALE' + seen : ' · ' + (ship.reason || 'unreachable')) ;
+          (live ? '' : ship.health === 'stale' ? ' · STALE' + seen : ' · ' + (ship.reason || 'unreachable')) + (onShip && (ship.local || live) ? '  ＋ agent' : '');
         const color = ship.local ? PALETTE.cyan : live ? PALETTE.amber : STATUS.unknown;
-        plates.push(textPlate(clipText(label, viewport.width * 0.5, signSize(20)), at.x, at.y, { accent: color, size: signSize(20), color, priority: 48, dash: live ? null : [3, 3] }));
+        plates.push({ ...textPlate(clipText(label, viewport.width * 0.5, signSize(20)), at.x, at.y, { accent: color, size: signSize(20), color, priority: 48, dash: live ? null : [3, 3] }),
+          ...(onShip && (ship.local || live) ? { ship: { host: ship.local ? null : ship.id } } : {}) });
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
       plates.push(textPlate('MAILROOM · llm-bus', hubAt.x, hubAt.y, { accent: PALETTE.amber, size: signSize(18), color: PALETTE.window, priority: 45 }));
@@ -1081,6 +1084,7 @@ const ObserverView = (() => {
       titleRegions = accepted.filter(plate => plate.target).map(plate => ({ id: plate.target, left: plate.x, top: plate.y, width: plate.w, height: plate.h }));
       // Repository hits are likewise only accepted, drawn section signs; platform headings and dropped signs have none.
       signRegions = accepted.filter(plate => plate.repo).map(plate => ({ repo: plate.repo, left: plate.x, top: plate.y, width: plate.w, height: plate.h }));
+      shipRegions = accepted.filter(plate => plate.ship).map(plate => ({ host: plate.ship.host, left: plate.x, top: plate.y, width: plate.w, height: plate.h }));
       const obsPlate = accepted.find(plate => plate.observatory); observatoryRegion = obsPlate ? { left: obsPlate.x, top: obsPlate.y, width: obsPlate.w, height: obsPlate.h } : null;
       plateFrame = { scene, zoom: camera.zoom, tx: camera.tx, ty: camera.ty };
       // Hover brackets around the real painted extent.
@@ -1238,10 +1242,12 @@ const ObserverView = (() => {
         // A repository sign is the lowest-precedence target: a worker title or body under the point always wins.
         const sign = title || target ? null : repeat ? tap.sign : signAt(point);
         const obs = title || target || sign ? false : repeat ? tap.obs : observatoryAt(point);
+        const ship = title || target || sign || obs ? null : repeat ? tap.ship : shipAt(point);
+        if (ship && !repeat && onShip) onShip(ship.host);
         if (title && !repeat && workerIndex.has(title)) onTitleToggle(title);
         if (sign && !repeat) onRepositoryToggle(sign);
         if (obs && !repeat) onObservatory();
-        tap = { id: target, title, sign, obs, point, at: clock() };
+        tap = { id: target, title, sign, obs, ship, point, at: clock() };
         if (target && workerIndex.has(target)) onSelect(target);
       } else tap = null;   // a drag, pinch or slow touch ends any remembered gesture
       drag = null;
@@ -1302,7 +1308,7 @@ const ObserverView = (() => {
       if (observer) { observer.disconnect(); observer = null; }
       while (watchers.length) watchers.pop()();
       readiness.clear();
-      pointers.clear(); drag = null; pinch = null; pointer = null; hovered = null; tap = null; titleRegions = []; signRegions = []; plateFrame = null;
+      pointers.clear(); drag = null; pinch = null; pointer = null; hovered = null; tap = null; titleRegions = []; signRegions = []; shipRegions = []; plateFrame = null;
     }
     function setFx(on) { on = !!on; if (on === fx) return fx; fx = on; invalidate(); return fx; }
     return { update, focus, focusPlatform, overview, zoomBy, start, stop, paint, limits, invalidate, setFx, fx: () => fx,

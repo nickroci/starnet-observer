@@ -209,11 +209,17 @@ station. Install the observer on each remote as usual, then list the remotes in 
 The hub keeps one `ssh -o BatchMode=yes` stream per remote running `bun --no-env-file scripts/stream.js`, which prints
 one snapshot per line and opens no port. Key authentication must already work non-interactively. Remote rows are
 sanitised and re-identified per host, remote ships dim with "last seen" when their stream goes quiet, transcript
-inspection and control actions never reach a remote, and llm-bus mail is shown for this machine only.
+inspection never reaches a remote, and llm-bus mail is shown for this machine only.
+
+With `OBSERVER_CONTROL=1`, control actions also work on remote agents: `⇱`, `✕` and the project `+` run `herdr` on
+that host over the same non-interactive ssh (every argument validated and single-quoted; hosts not listed in
+`remotes` are refused), and attaching opens a Terminal running `ssh -t <host> 'herdr agent attach <pane> --takeover'`.
+Clicking a ship's hull label (`＋ agent`) starts Claude in that host's home folder, even on a host with no agents yet,
+reusing the Herdr workspace named after the folder or creating it.
 
 ## Privacy and limits
 
-- Observation is read-only unless you opt in with `OBSERVER_CONTROL=1`: no agent launching, provider setup, message sending, acknowledgments, or session edits. With control on, the page can start, attach to and close Herdr agent panes, and nothing else.
+- Observation is read-only unless you opt in with `OBSERVER_CONTROL=1`: no agent launching, provider setup, message sending, acknowledgments, or session edits. With control on, the page can start, attach to and close Herdr agent panes, on this machine and on configured remotes, and nothing else.
 - The server may prepare bounded, redacted transcript projections locally in memory before you open an inspector: at most 32 identities per enrichment sweep, with two background detail jobs at once. Opening an inspector still checks current session ownership and source contents. Message bodies and desktop text remain on demand; presentation mode disables transcript preparation. Recognized credential patterns are redacted; private prose and file paths may still be visible. Share the code, not your session data.
 - The local API requires a per-launch token delivered to the local page. Foreign origins and hostnames are rejected. Do not expose the server through a public proxy.
 - Missing sources appear unavailable. Old data is marked stale; absence of a source is not treated as a fresh empty roster.
