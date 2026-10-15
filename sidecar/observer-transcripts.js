@@ -406,19 +406,15 @@ function makeTranscriptObserver(options = {}) {
       handle = await io.open(full, require('node:fs').constants.O_RDONLY | require('node:fs').constants.O_NOFOLLOW);
       const stat = await handle.stat();
       await verifyPath(resource, stat);
-      let first, firstRead;
-      if (binding) {
-        first = Buffer.alloc(Math.min(stat.size, READ_BYTES));
-        firstRead = await handle.read(first, 0, first.length, 0);
-      }
-      if (binding && !childMetadata(first.subarray(0, firstRead.bytesRead), provider, sessionId, binding.parentSessionId))
+      const first = Buffer.alloc(Math.min(stat.size, READ_BYTES));
+      const firstRead = await handle.read(first, 0, first.length, 0);
+      const prefixData = first.subarray(0, firstRead.bytesRead);
+      if (binding && !childMetadata(prefixData, provider, sessionId, binding.parentSessionId))
         throw new Error('Child identity unavailable');
       // Validate the complete previously projected window, not two sampled sentinels.
-      // Rebuild from a bounded tail on change: no retained turn can outlive its raw evidence.
-      const prefixLength = state.prefixLength || Math.min(stat.size, READ_BYTES);
-      const prefix = Buffer.alloc(prefixLength);
-      const prefixRead = await handle.read(prefix, 0, prefix.length, 0);
-      const prefixHash = crypto.createHash('sha256').update(prefix.subarray(0, prefixRead.bytesRead)).digest('hex');
+      // Reuse this header for identity, old-prefix proof and any projection rebuild.
+      const prefixLength = state.prefixLength || prefixData.length;
+      const prefixHash = crypto.createHash('sha256').update(prefixData.subarray(0, prefixLength)).digest('hex');
       let windowChanged = false;
       if (state.anchor) {
         const previous = Buffer.alloc(state.anchor.length);
@@ -437,12 +433,7 @@ function makeTranscriptObserver(options = {}) {
       state.calls.clear(); state.tool = null; state.verified = false;
       state.projection = inspector.createProjection();
       if (generation) state.projection.generation = generation;
-      if (!first) {
-        first = Buffer.alloc(Math.min(stat.size, READ_BYTES));
-        firstRead = await handle.read(first, 0, first.length, 0);
-      }
       let identityConflict = false, beginningConsumed = false;
-      const prefixData = first.subarray(0, firstRead.bytesRead);
       const completePrefix = prefixData.subarray(0, Math.max(0, prefixData.lastIndexOf(10)));
       for (const line of completePrefix.toString('utf8').split('\n')) {
         try {
