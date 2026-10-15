@@ -7,6 +7,7 @@ const ObserverMail = require('../frontend/app/observer-mail.js');
 const ObserverInspector = require('../frontend/app/observer-inspector.js');
 const ObserverMailInspector = require('../frontend/app/observer-mail-inspector.js');
 const ObserverScene = require('../frontend/app/observer-scene.js');
+const ThemePack = require('../frontend/app/theme-pack.js');
 let document, viewOptions;
 function element() {
   return { textContent: '', children: [], hidden: false, dataset: {}, value: '', scrollTop: 0, handlers: {}, attributes: {}, style: { setProperty() {} }, parent: null, disabled: false,
@@ -26,7 +27,7 @@ function element() {
   document = { documentElement: element(), body: element(), activeElement: null, hidden: false, getElementById: id => elements[id] || (elements[id] = element()), createElement: element, addEventListener() {} };
   elements.filters = element(); elements.filters.children = filters;
   const posts = [], confirms = [], stored = new Map(); const lastPost = () => JSON.stringify(posts.at(-1)); let confirmAnswer = false, listener;
-  const context = { console, Date, Set, Map, document, setTimeout: () => 1, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, encodeURIComponent,
+  const context = { console, Date, Set, Map, document, setTimeout: () => 1, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ThemePack, encodeURIComponent,
     ObserverView: { create: options => (viewOptions = options, { setFx() {}, fx() { return true; }, update() {}, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate() {} }) },
     window: { __OBSERVER_CONTROL__: true, __OBSERVER_THEME__: {}, localStorage: { getItem(key) { return stored.has(key) ? stored.get(key) : key === 'observer.host' ? null : 'on'; }, setItem(key, value) { stored.set(key, String(value)); }, removeItem(key) { stored.delete(key); } }, addEventListener() {}, confirm: message => { confirms.push(message); return confirmAnswer; } },
     SPRITES: { init: async () => ({}) },

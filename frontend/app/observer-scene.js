@@ -141,7 +141,7 @@ const ObserverScene = (() => {
     const overseerRow = extras.overseer || null;
     if (overseerRow) {
       observatory.viewer = null; observatory.overseer = overseerRow.id;
-      workers.push({ id: overseerRow.id, row: overseerRow, kind: 'session', role: 'overseer', parentId: null, scale: 1, platformKey: 'observatory', accent: '#3fd8e8',
+      workers.push({ id: overseerRow.id, row: overseerRow, kind: 'session', role: 'overseer', parentId: null, scale: 1, platformKey: 'observatory', accent: extras.overseerAccent || '#3fd8e8',
         desk: observatory.desk, chair: observatory.chair, route: [observatory.chair, { x: observatory.chair.x, y: -11, z: 0 }, { x: 12, y: -11, z: 0 }, ...observatory.link, mail.hub] });
     }
     // Hulls: one per host when remotes exist. The flagship wraps this machine's whole station; a remote ship wraps its
@@ -234,7 +234,7 @@ const ObserverScene = (() => {
   }
   function route(scene, layout, message, rows, host = null) {
     const from = endpoint(scene, layout, message.from, host), to = endpoint(scene, layout, message.to, host), recipient = rows.find(r => r.id === message.to);
-    return { key: from.key + '>' + to.key, from: from.points, to: to.points, color: recipient ? layout.colorFor(Model.projectKey(recipient)).accent : '#c9d3da' };
+    return { key: from.key + '>' + to.key, from: from.points, to: to.points, color: recipient ? layout.colorFor(Model.projectKey(recipient)).accent : null };   // the courier colours unassigned recipients
   }
   function pending(scene, layout, messages, host = null) {
     const spots = new Map();

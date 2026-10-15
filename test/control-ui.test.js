@@ -7,6 +7,7 @@ const ObserverMail = require('../frontend/app/observer-mail.js');
 const ObserverInspector = require('../frontend/app/observer-inspector.js');
 const ObserverMailInspector = require('../frontend/app/observer-mail-inspector.js');
 const ObserverScene = require('../frontend/app/observer-scene.js');
+const ThemePack = require('../frontend/app/theme-pack.js');
 let document;
 function element() {
   return { textContent: '', children: [], hidden: false, dataset: {}, value: '', scrollTop: 0, handlers: {}, attributes: {}, style: { setProperty() {} }, parent: null, disabled: false,
@@ -34,7 +35,7 @@ async function controls(enabled, presentation) {
   elements.filters = element(); elements.filters.children = filters;
   const posts = [], confirms = []; const lastPost = () => JSON.stringify(posts.at(-1));
   let confirmAnswer = false, listener, viewOptions, failing = false;
-  const context = { console, Date, Set, Map, document, setTimeout: () => 1, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, encodeURIComponent,
+  const context = { console, Date, Set, Map, document, setTimeout: () => 1, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ThemePack, encodeURIComponent,
     ObserverView: { create: options => { viewOptions = options; return { setFx() {}, fx() { return true; }, update() {}, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate() {} }; } },
     window: { __OBSERVER_CONTROL__: enabled, __OBSERVER_THEME__: {}, localStorage: { getItem() { return 'on'; }, setItem() {} }, addEventListener() {}, confirm: message => { confirms.push(message); return confirmAnswer; } },
     SPRITES: { init: async () => ({}) },

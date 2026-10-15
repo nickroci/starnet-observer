@@ -6,13 +6,36 @@
 const ObserverView = (() => {
   const Scene = typeof module !== 'undefined' && module.exports ? require('./observer-scene.js') : ObserverScene;
   const Model = typeof module !== 'undefined' && module.exports ? require('./observer-model.js') : ObserverModel;
-  const PALETTE = Object.freeze({
-    space: '#020406', hullTop: '#1b2026', hullSeam: '#12161a', hullLeft: '#0c0f12', hullRight: '#13171c', wall: '#151a1f',
-    wallCap: '#2a3138', grate: '#161a1f', grateDark: '#0f1215', window: '#ff9d3a', amber: '#c8781c', cyan: '#3fd8e8', rail: '#3a424c',
-    console: '#232a31', consoleTop: '#2e363e', chair: '#1a1f25', glass: 'rgba(6,9,8,0.92)', ink: '#dcf3e3', dim: '#8fb59c', focus: '#fff27a',
-    repo: '#7ef2d8'
-  });
-  const STATUS = Object.freeze({ working: '#6ff7a0', blocked: '#ffbd5c', idle: '#7c8a83', done: '#7c8a83', unknown: '#4a524e' });
+  const Themes = typeof module !== 'undefined' && module.exports ? require('./theme-pack.js') : ThemePack;
+  const OfficeArt = typeof module !== 'undefined' && module.exports ? require('./observer-office-art.js') : ObserverOfficeArt;
+  const ROLES = typeof module !== 'undefined' && module.exports ? require('./scene-art-roles.js').SCENE_ART_ROLES : SCENE_ART_ROLES;
+  /* Every scene colour comes from the canonical default pack, overlaid per view by a resolved snapshot. PALETTE and
+     STATUS are read-only views of that default for helpers and tests; no view ever mutates them. */
+  const DEFAULT_SCENE = Themes.getDefault().scene;
+  const pick = (colors, keys) => Object.freeze(Object.fromEntries(keys.map(key => [key, colors[key]])));
+  const PALETTE = pick(DEFAULT_SCENE.colors, ['space', 'hullTop', 'hullSeam', 'hullLeft', 'hullRight', 'wall', 'wallCap', 'grate', 'grateDark', 'window',
+    'amber', 'cyan', 'rail', 'console', 'consoleTop', 'chair', 'glass', 'ink', 'dim', 'focus', 'repo']);
+  // Observed row statuses only: a status string never reaches any other colour key.
+  const STATUS = pick(DEFAULT_SCENE.colors, ['working', 'blocked', 'idle', 'done', 'unknown']);
+  const BACKGROUND_FX = ['rain', 'none'], AMBIENT_FX = ['station', 'none'];
+  // Instance look: known keys only, each from the snapshot when present, else the canonical default.
+  function resolveLook(theme) {
+    const scene = (theme && theme.scene) || {}, given = scene.colors || {};
+    const colors = Object.freeze(Object.fromEntries(Object.keys(DEFAULT_SCENE.colors).map(key => [key, Object.hasOwn(given, key) ? given[key] : DEFAULT_SCENE.colors[key]])));
+    return Object.freeze({ colors, status: pick(colors, Object.keys(STATUS)),
+      backgroundFx: BACKGROUND_FX.includes(scene.backgroundFx) ? scene.backgroundFx : DEFAULT_SCENE.backgroundFx,
+      ambientFx: AMBIENT_FX.includes(scene.ambientFx) ? scene.ambientFx : DEFAULT_SCENE.ambientFx,
+      // The declared art enum only; never a pack ID.
+      art: scene.art && scene.art.style === 'home-office' ? 'home-office' : 'station' });
+  }
+  // Six-digit hex or numeric rgba (the validated forms) as channels; dynamic opacity multiplies the colour's own alpha.
+  function channels(color) {
+    const hex = /^#([0-9a-f]{6})$/i.exec(color), rgba = /^rgba\((\d+),(\d+),(\d+),([\d.]+)\)$/.exec(String(color).replace(/\s+/g, ''));
+    if (hex) { const value = parseInt(hex[1], 16); return [(value >> 16) & 255, (value >> 8) & 255, value & 255, 1]; }
+    return rgba ? [+rgba[1], +rgba[2], +rgba[3], +rgba[4]] : [0, 0, 0, 1];
+  }
+  const withAlpha = (color, alpha) => { const [r, g, b, a] = channels(color); return 'rgba(' + r + ',' + g + ',' + b + ',' + (alpha * a) + ')'; };
+  const opaque = color => { const [r, g, b, a] = channels(color); return a === 1 ? 'rgb(' + r + ',' + g + ',' + b + ')' : withAlpha(color, 1); };
   const LOD = Object.freeze({ overview: 0.45, detail: 1.1 });
   const CACHE = Object.freeze({ pixels: 4e6, axis: 4096, buckets: [0.25, 0.5, 1, 2] });
   /* Approved skins draw about 19 design px tall natively (76 source px at 0.25). Crew stand ~40 px: just under
@@ -24,16 +47,17 @@ const ObserverView = (() => {
   // ---------- pure helpers (exported for tests) ----------
   // An agent needs attention when its own fresh status is blocked: Herdr's state for a prompt or dialog awaiting input.
   const needsAttention = (worker, stale) => !stale && !!worker && !!worker.row && worker.row.status === 'blocked';
-  /* Pixel-art attention badge centred on (x, bottom): an amber plate with a dark rim and a white "!" built from
-     rectangles, with a small pointer toward the head. Screen space; returns its box for hit/test bookkeeping. */
-  function paintAttention(ctx, x, bottom) {
-    const w = 14, h = 18, left = Math.round(x - w / 2), top = Math.round(bottom - h - 4);
+  /* Pixel-art attention badge centred on (x, bottom): a warning-sign plate in the theme's blocked colour, a dark rim inside
+     a bright focus ring and a dark "!" built from rectangles, with a small pointer toward the head. Every colour is a
+     theme key, so a custom palette restyles it. Screen space; returns its box for hit/test bookkeeping. */
+  function paintAttention(ctx, x, bottom, colors = DEFAULT_SCENE.colors) {
+    const w = 14, h = 18, left = Math.round(x - w / 2), top = Math.round(bottom - h - 4), dark = colors['body-outline'];
     ctx.save();
-    ctx.fillStyle = '#1a0e04'; ctx.fillRect(left - 2, top - 2, w + 4, h + 4);
-    ctx.fillStyle = '#ff5a3a'; ctx.fillRect(left - 1, top - 1, w + 2, h + 2);
-    ctx.fillStyle = STATUS.blocked; ctx.fillRect(left, top, w, h);
-    ctx.fillStyle = '#ffffff'; ctx.fillRect(left + 5, top + 3, 4, 8); ctx.fillRect(left + 5, top + 13, 4, 3);
-    ctx.fillStyle = '#ff5a3a'; ctx.fillRect(left + 5, top + h + 1, 4, 2); ctx.fillRect(left + 6, top + h + 3, 2, 2);
+    ctx.fillStyle = dark; ctx.fillRect(left - 2, top - 2, w + 4, h + 4);
+    ctx.fillStyle = colors.focus; ctx.fillRect(left - 1, top - 1, w + 2, h + 2);
+    ctx.fillStyle = colors.blocked; ctx.fillRect(left, top, w, h);
+    ctx.fillStyle = dark; ctx.fillRect(left + 5, top + 3, 4, 8); ctx.fillRect(left + 5, top + 13, 4, 3);
+    ctx.fillStyle = colors.focus; ctx.fillRect(left + 5, top + h + 1, 4, 2); ctx.fillRect(left + 6, top + h + 3, 2, 2);
     ctx.restore();
     return { left: left - 2, top: top - 2, width: w + 4, height: h + 7 };
   }
@@ -111,12 +135,6 @@ const ObserverView = (() => {
     if (fill) { ctx.fillStyle = fill; ctx.fill(); }
     if (stroke) { ctx.lineWidth = width; ctx.strokeStyle = stroke; ctx.stroke(); ctx.lineWidth = 1; }
   }
-  function glow(ctx, point, radius, color, alpha) {
-    const at = P(point), gradient = ctx.createRadialGradient(at.x, at.y, 0, at.x, at.y, radius);
-    gradient.addColorStop(0, color); gradient.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.save(); ctx.globalAlpha = alpha; ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = gradient;
-    ctx.beginPath(); ctx.ellipse(at.x, at.y, radius, radius / 2, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-  }
   function line(ctx, a, b, color, width = 1, alpha = 1) {
     const from = P(a), to = P(b); ctx.save(); ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width;
     ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); ctx.restore();
@@ -127,33 +145,6 @@ const ObserverView = (() => {
     return '#' + [16, 8, 0].map(shift => channel(shift).toString(16).padStart(2, '0')).join('');
   };
 
-  // ---------- static world art: decks, skirts, walls, walkways, hub, wall props, status light pools ----------
-  function paintDeck(ctx, rect, accent, sectionRects) {
-    const deck = { top: PALETTE.hullTop, left: PALETTE.hullLeft, right: PALETTE.hullRight };
-    prism(ctx, corners(rect), 0, -1, deck);
-    sectionRects.forEach((section, index) => { if (index % 2) poly(ctx, rectPoly(section), 'rgba(255,255,255,0.025)'); });
-    ctx.save(); ctx.globalAlpha = 0.55;
-    for (let x = rect.x + 2; x < rect.x + rect.w; x += 2) line(ctx, { x, y: rect.y }, { x, y: rect.y + rect.h }, PALETTE.hullSeam);
-    for (let y = rect.y + 2; y < rect.y + rect.h; y += 2) line(ctx, { x: rect.x, y }, { x: rect.x + rect.w, y }, PALETTE.hullSeam);
-    ctx.restore();
-    // Warm window strips along both visible skirt faces, rivets at the corners.
-    for (let x = rect.x + 0.75; x < rect.x + rect.w - 0.5; x += 1.5) poly(ctx, [P({ x, y: rect.y + rect.h, z: -0.38 }), P({ x: x + 0.6, y: rect.y + rect.h, z: -0.38 }), P({ x: x + 0.6, y: rect.y + rect.h, z: -0.55 }), P({ x, y: rect.y + rect.h, z: -0.55 })], 'rgba(255,157,58,0.72)');
-    for (let y = rect.y + 0.75; y < rect.y + rect.h - 0.5; y += 1.5) poly(ctx, [P({ x: rect.x + rect.w, y, z: -0.38 }), P({ x: rect.x + rect.w, y: y + 0.6, z: -0.38 }), P({ x: rect.x + rect.w, y: y + 0.6, z: -0.55 }), P({ x: rect.x + rect.w, y, z: -0.55 })], 'rgba(255,157,58,0.6)');
-    // Project hue: front-top edge lamp strip.
-    line(ctx, { x: rect.x, y: rect.y + rect.h }, { x: rect.x + rect.w, y: rect.y + rect.h }, accent, 2, 0.9);
-    line(ctx, { x: rect.x + rect.w, y: rect.y }, { x: rect.x + rect.w, y: rect.y + rect.h }, accent, 2, 0.9);
-  }
-  function paintRearWalls(ctx, rect) {
-    const height = 1.25, wall = { x: [P({ x: rect.x, y: rect.y }), P({ x: rect.x, y: rect.y + rect.h }), P({ x: rect.x, y: rect.y + rect.h, z: height }), P({ x: rect.x, y: rect.y, z: height })],
-      y: [P({ x: rect.x, y: rect.y }), P({ x: rect.x + rect.w, y: rect.y }), P({ x: rect.x + rect.w, y: rect.y, z: height }), P({ x: rect.x, y: rect.y, z: height })] };
-    poly(ctx, wall.x, PALETTE.hullRight); poly(ctx, wall.y, PALETTE.wall);
-    ctx.save(); ctx.globalAlpha = 0.6;
-    for (let y = rect.y + 2; y < rect.y + rect.h; y += 2) line(ctx, { x: rect.x, y, z: 0 }, { x: rect.x, y, z: height }, PALETTE.hullSeam);
-    for (let x = rect.x + 2; x < rect.x + rect.w; x += 2) line(ctx, { x, y: rect.y, z: 0 }, { x, y: rect.y, z: height }, PALETTE.hullSeam);
-    ctx.restore();
-    line(ctx, { x: rect.x, y: rect.y + rect.h, z: height }, { x: rect.x, y: rect.y, z: height }, PALETTE.wallCap, 2);
-    line(ctx, { x: rect.x, y: rect.y, z: height }, { x: rect.x + rect.w, y: rect.y, z: height }, PALETTE.wallCap, 2);
-  }
   // Wall and corner furnishings never reshuffle between polls: the kind is a hash of platform key and region.
   const WALL_KINDS = ['rack', 'screen', 'vent', 'rack', 'board'], CORNER_KINDS = ['tank', 'planter', 'crates', 'mast'];
   const wallUnits = (region) => {
@@ -163,6 +154,45 @@ const ObserverView = (() => {
       ? Array.from({ length: Math.floor(r.h / 3) }, (_, i) => ({ x: r.x, y: r.y + i * 3 + 0.5, w: r.w, h: 2 }))
       : Array.from({ length: Math.floor(r.w / 3) }, (_, i) => ({ x: r.x + i * 3 + 0.5, y: r.y, w: 2, h: r.h }));
   };
+  const middle = rect => rect.x + rect.w / 2 + rect.y + rect.h / 2;
+
+  /* Painters bound to one resolved look. `decor` false (ambientFx none) drops decorative halos only: contact shadows,
+     status lamps, selection rings and helper tethers always paint. */
+  function paintersFor({ colors: C, status: S, ambientFx }) {
+  const decor = ambientFx === 'station';
+  function glow(ctx, point, radius, color, alpha) {
+    const at = P(point), gradient = ctx.createRadialGradient(at.x, at.y, 0, at.x, at.y, radius);
+    gradient.addColorStop(0, color); gradient.addColorStop(1, C['glow-transparent']);
+    ctx.save(); ctx.globalAlpha = alpha; ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = gradient;
+    ctx.beginPath(); ctx.ellipse(at.x, at.y, radius, radius / 2, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  }
+  // ---------- static world art: decks, skirts, walls, walkways, hub, wall props, status light pools ----------
+  function paintDeck(ctx, rect, accent, sectionRects) {
+    const deck = { top: C.hullTop, left: C.hullLeft, right: C.hullRight };
+    prism(ctx, corners(rect), 0, -1, deck);
+    sectionRects.forEach((section, index) => { if (index % 2) poly(ctx, rectPoly(section), C['deck-section-overlay']); });
+    ctx.save(); ctx.globalAlpha = 0.55;
+    for (let x = rect.x + 2; x < rect.x + rect.w; x += 2) line(ctx, { x, y: rect.y }, { x, y: rect.y + rect.h }, C.hullSeam);
+    for (let y = rect.y + 2; y < rect.y + rect.h; y += 2) line(ctx, { x: rect.x, y }, { x: rect.x + rect.w, y }, C.hullSeam);
+    ctx.restore();
+    // Warm window strips along both visible skirt faces, rivets at the corners.
+    for (let x = rect.x + 0.75; x < rect.x + rect.w - 0.5; x += 1.5) poly(ctx, [P({ x, y: rect.y + rect.h, z: -0.38 }), P({ x: x + 0.6, y: rect.y + rect.h, z: -0.38 }), P({ x: x + 0.6, y: rect.y + rect.h, z: -0.55 }), P({ x, y: rect.y + rect.h, z: -0.55 })], C['deck-window-front']);
+    for (let y = rect.y + 0.75; y < rect.y + rect.h - 0.5; y += 1.5) poly(ctx, [P({ x: rect.x + rect.w, y, z: -0.38 }), P({ x: rect.x + rect.w, y: y + 0.6, z: -0.38 }), P({ x: rect.x + rect.w, y: y + 0.6, z: -0.55 }), P({ x: rect.x + rect.w, y, z: -0.55 })], C['deck-window-side']);
+    // Project hue: front-top edge lamp strip.
+    line(ctx, { x: rect.x, y: rect.y + rect.h }, { x: rect.x + rect.w, y: rect.y + rect.h }, accent, 2, 0.9);
+    line(ctx, { x: rect.x + rect.w, y: rect.y }, { x: rect.x + rect.w, y: rect.y + rect.h }, accent, 2, 0.9);
+  }
+  function paintRearWalls(ctx, rect) {
+    const height = 1.25, wall = { x: [P({ x: rect.x, y: rect.y }), P({ x: rect.x, y: rect.y + rect.h }), P({ x: rect.x, y: rect.y + rect.h, z: height }), P({ x: rect.x, y: rect.y, z: height })],
+      y: [P({ x: rect.x, y: rect.y }), P({ x: rect.x + rect.w, y: rect.y }), P({ x: rect.x + rect.w, y: rect.y, z: height }), P({ x: rect.x, y: rect.y, z: height })] };
+    poly(ctx, wall.x, C.hullRight); poly(ctx, wall.y, C.wall);
+    ctx.save(); ctx.globalAlpha = 0.6;
+    for (let y = rect.y + 2; y < rect.y + rect.h; y += 2) line(ctx, { x: rect.x, y, z: 0 }, { x: rect.x, y, z: height }, C.hullSeam);
+    for (let x = rect.x + 2; x < rect.x + rect.w; x += 2) line(ctx, { x, y: rect.y, z: 0 }, { x, y: rect.y, z: height }, C.hullSeam);
+    ctx.restore();
+    line(ctx, { x: rect.x, y: rect.y + rect.h, z: height }, { x: rect.x, y: rect.y, z: height }, C.wallCap, 2);
+    line(ctx, { x: rect.x, y: rect.y, z: height }, { x: rect.x + rect.w, y: rect.y, z: height }, C.wallCap, 2);
+  }
   /* Pure geometry, so every footprint is testable against the scene's reserved region (the walk obstacle).
      Wall units are laid out in (along, depth) terms: a rear-x unit is only 0.6 deep, so depth is fitted, never assumed. */
   function furnishing(kind, unit, edge) {
@@ -172,28 +202,28 @@ const ObserverView = (() => {
     const fit = (inset, want) => { const deep = Math.min(want, depth - 0.2); return [Math.min(inset, depth - deep - 0.1), deep]; };
     const box = (rect, height, colors, base = 0) => ({ box: rect, height, colors, base });
     const stroke = (a, b, color, width = 1, alpha = 1) => ({ line: [a, b], color, width, alpha });
-    const dark = { top: '#262d34', left: '#101418', right: '#171c21' };
+    const dark = { top: C['furnishing-top'], left: C['furnishing-left'], right: C['furnishing-right'] };
     if (kind === 'rack') {
       const [d, deep] = fit(0.1, 1), front = d + deep, out = [box(foot(0.1, d, 1.4, deep), 1.1, dark)];
-      for (let z = 0.25; z < 1; z += 0.22) out.push(stroke(at(0.3, front, z), at(1.1, front, z), '#2b343c'));
+      for (let z = 0.25; z < 1; z += 0.22) out.push(stroke(at(0.3, front, z), at(1.1, front, z), C['rack-shelf']));
       return out;
     }
     if (kind === 'screen') {
       const [d, deep] = fit(0.05, 0.12), front = d + deep, face = [at(0.2, front, 0.45), at(1.8, front, 0.45), at(1.8, front, 1.05), at(0.2, front, 1.05)];
-      return [box(foot(0.1, d, 1.8, deep), 1.1, dark), { quad: face, fill: '#0b2a30', stroke: PALETTE.cyan },
-        stroke({ ...face[0], z: 0.62 }, { ...face[1], z: 0.85 }, PALETTE.cyan, 1, 0.7)];
+      return [box(foot(0.1, d, 1.8, deep), 1.1, dark), { quad: face, fill: C['wall-screen-face'], stroke: C.cyan },
+        stroke({ ...face[0], z: 0.62 }, { ...face[1], z: 0.85 }, C.cyan, 1, 0.7)];
     }
     if (kind === 'vent') {
       const [d, deep] = fit(0.2, 0.6), front = d + deep;
-      return [box(foot(0.3, d, 1.2, deep), 0.5, { top: '#2a2219', left: '#140f0a', right: '#1d160e' }), stroke(at(0.4, front, 0.3), at(1.4, front, 0.3), PALETTE.amber, 1, 0.8)];
+      return [box(foot(0.3, d, 1.2, deep), 0.5, { top: C['vent-top'], left: C['vent-left'], right: C['vent-right'] }), stroke(at(0.4, front, 0.3), at(1.4, front, 0.3), C.amber, 1, 0.8)];
     }
-    if (kind === 'board') { const [d, deep] = fit(0.2, 0.3); return [box(foot(0.2, d, 1.4, deep), 0.9, { top: '#3a3024', left: '#1e1810', right: '#2a2116' })]; }
-    if (kind === 'tank') return [box(foot(0.1, 0.2, 0.8, 0.8), 1.0, { top: '#2b3a40', left: '#122026', right: '#1a2a30' }), stroke(at(0.1, 1, 0.6), at(0.9, 1, 0.6), PALETTE.cyan, 1, 0.6)];
-    if (kind === 'planter') return [box(foot(0.1, 0.3, 0.8, 1.2), 0.35, { top: '#1f3a24', left: '#0f1a12', right: '#16261a' }),
-      ...[[0.3, 0.6], [0.6, 1.1], [0.45, 0.9]].map(([a, d]) => ({ ellipse: at(a, d, 0.55), radius: 0.16, fill: '#3f8a46' }))];
-    if (kind === 'crates') return [box(foot(0.1, 0.3, 0.8, 0.8), 0.5, { top: '#5a4428', left: '#2a1f12', right: '#3d2d1a' }),
-      box(foot(0.2, 0.4, 0.5, 0.5), 0.4, { top: '#6a5230', left: '#2f2214', right: '#45331d' }, 0.5)];
-    return [stroke(at(0.5, 1, 0), at(0.5, 1, 2.2), PALETTE.rail, 2), { ellipse: at(0.5, 1, 2.2), radius: 0.12, fill: '#ff5a3a' }];
+    if (kind === 'board') { const [d, deep] = fit(0.2, 0.3); return [box(foot(0.2, d, 1.4, deep), 0.9, { top: C['board-top'], left: C['board-left'], right: C['board-right'] })]; }
+    if (kind === 'tank') return [box(foot(0.1, 0.2, 0.8, 0.8), 1.0, { top: C['tank-top'], left: C['tank-left'], right: C['tank-right'] }), stroke(at(0.1, 1, 0.6), at(0.9, 1, 0.6), C.cyan, 1, 0.6)];
+    if (kind === 'planter') return [box(foot(0.1, 0.3, 0.8, 1.2), 0.35, { top: C['planter-top'], left: C['planter-left'], right: C['planter-right'] }),
+      ...[[0.3, 0.6], [0.6, 1.1], [0.45, 0.9]].map(([a, d]) => ({ ellipse: at(a, d, 0.55), radius: 0.16, fill: C['plant-leaf'] }))];
+    if (kind === 'crates') return [box(foot(0.1, 0.3, 0.8, 0.8), 0.5, { top: C['crate-top'], left: C['crate-left'], right: C['crate-right'] }),
+      box(foot(0.2, 0.4, 0.5, 0.5), 0.4, { top: C['crate-stack-top'], left: C['crate-stack-left'], right: C['crate-stack-right'] }, 0.5)];
+    return [stroke(at(0.5, 1, 0), at(0.5, 1, 2.2), C.rail, 2), { ellipse: at(0.5, 1, 2.2), radius: 0.12, fill: C['mast-beacon'] }];
   }
   function furnishings(platform, region, index) {
     const kinds = region.kind === 'corner' ? CORNER_KINDS : WALL_KINDS;
@@ -209,143 +239,105 @@ const ObserverView = (() => {
   }
   function paintWalkway(ctx, walkway) {
     const r = walkway.rect;
-    prism(ctx, corners(r), 0, -0.35, { top: PALETTE.grate, left: PALETTE.hullLeft, right: PALETTE.hullRight });
+    prism(ctx, corners(r), 0, -0.35, { top: C.grate, left: C.hullLeft, right: C.hullRight });
     ctx.save(); ctx.globalAlpha = 0.5;
-    for (let x = r.x + 0.5; x < r.x + r.w; x += 0.5) line(ctx, { x, y: r.y }, { x, y: r.y + r.h }, PALETTE.grateDark);
-    for (let y = r.y + 0.5; y < r.y + r.h; y += 0.5) line(ctx, { x: r.x, y }, { x: r.x + r.w, y }, PALETTE.grateDark);
+    for (let x = r.x + 0.5; x < r.x + r.w; x += 0.5) line(ctx, { x, y: r.y }, { x, y: r.y + r.h }, C.grateDark);
+    for (let y = r.y + 0.5; y < r.y + r.h; y += 0.5) line(ctx, { x: r.x, y }, { x: r.x + r.w, y }, C.grateDark);
     ctx.restore();
     const long = r.w >= r.h, length = long ? r.w : r.h;
     for (let t = 0; t <= length; t += 2) {
       for (const side of [0, 1]) {
         const base = long ? { x: r.x + t, y: r.y + side * r.h } : { x: r.x + side * r.w, y: r.y + t };
-        line(ctx, { ...base, z: 0 }, { ...base, z: 0.3 }, PALETTE.rail, 1);
-        if (t % 8 === 0 && side) isoEllipse(ctx, { ...base, z: 0.34 }, 0.06, null, PALETTE.window);
+        line(ctx, { ...base, z: 0 }, { ...base, z: 0.3 }, C.rail, 1);
+        if (t % 8 === 0 && side) isoEllipse(ctx, { ...base, z: 0.34 }, 0.06, null, C.window);
       }
-      if (t % 6 === 0) { const base = long ? { x: r.x + t, y: r.y + r.h } : { x: r.x + r.w, y: r.y + t }; line(ctx, { ...base, z: -0.35 }, { ...base, z: -2.5 }, '#0b0e11', 2, 0.8); }
+      if (t % 6 === 0) { const base = long ? { x: r.x + t, y: r.y + r.h } : { x: r.x + r.w, y: r.y + t }; line(ctx, { ...base, z: -0.35 }, { ...base, z: -2.5 }, C['walkway-support'], 2, 0.8); }
     }
     for (const side of [0, 1]) {
       const a = long ? { x: r.x, y: r.y + side * r.h } : { x: r.x + side * r.w, y: r.y }, b = long ? { x: r.x + r.w, y: r.y + side * r.h } : { x: r.x + side * r.w, y: r.y + r.h };
-      line(ctx, { ...a, z: 0.3 }, { ...b, z: 0.3 }, PALETTE.rail, 1);
+      line(ctx, { ...a, z: 0.3 }, { ...b, z: 0.3 }, C.rail, 1);
     }
   }
   function paintHub(ctx, mail) {
     const r = mail.rect, c = 2, oct = [{ x: r.x + c, y: r.y }, { x: r.x, y: r.y + c }, { x: r.x, y: r.y + r.h - c }, { x: r.x + c, y: r.y + r.h },
       { x: r.x + r.w - c, y: r.y + r.h }, { x: r.x + r.w, y: r.y + r.h - c }, { x: r.x + r.w, y: r.y + c }, { x: r.x + r.w - c, y: r.y }];
-    prism(ctx, oct, 0, -1.5, { top: '#1d2228', left: PALETTE.hullLeft, right: PALETTE.hullRight, mid: '#101317' });
+    prism(ctx, oct, 0, -1.5, { top: C['hub-top'], left: C.hullLeft, right: C.hullRight, mid: C['hub-mid'] });
     // Hazard chevron border: an amber dash over a black band, inset half a unit.
     const inset = [{ x: r.x + c, y: r.y + 0.5 }, { x: r.x + 0.5, y: r.y + c }, { x: r.x + 0.5, y: r.y + r.h - c }, { x: r.x + c, y: r.y + r.h - 0.5 },
       { x: r.x + r.w - c, y: r.y + r.h - 0.5 }, { x: r.x + r.w - 0.5, y: r.y + r.h - c }, { x: r.x + r.w - 0.5, y: r.y + c }, { x: r.x + r.w - c, y: r.y + 0.5 }].map(point => P(point));
-    ctx.save(); ctx.lineWidth = 6; poly(ctx, inset, null, '#070809'); ctx.setLineDash([10, 10]); ctx.lineWidth = 4; poly(ctx, inset, null, PALETTE.amber); ctx.restore();
-    for (const pad of mail.pads) { isoEllipse(ctx, pad, 1.1, PALETTE.amber, '#14181c', 1.5); isoEllipse(ctx, pad, 0.7, 'rgba(200,120,28,0.6)'); glow(ctx, pad, 30, PALETTE.amber, 0.18); }
+    ctx.save(); ctx.lineWidth = 6; poly(ctx, inset, null, C['hub-stripe-underlay']); ctx.setLineDash([10, 10]); ctx.lineWidth = 4; poly(ctx, inset, null, C.amber); ctx.restore();
+    for (const pad of mail.pads) { isoEllipse(ctx, pad, 1.1, C.amber, C['hub-pad'], 1.5); isoEllipse(ctx, pad, 0.7, C['hub-pad-ring']); if (decor) glow(ctx, pad, 30, C.amber, 0.18); }
     // Pod rack for off-deck routes and the outbound launch rail into space for outside endpoints.
-    const pod = mail.pod[0]; box(ctx, { x: pod.x - 0.6, y: pod.y - 0.5, w: 1.2, h: 1 }, 0.9, { top: '#2a3138', left: '#111519', right: '#191e23' });
-    for (let z = 0.25; z < 0.9; z += 0.3) line(ctx, { x: pod.x - 0.5, y: pod.y + 0.5, z }, { x: pod.x + 0.5, y: pod.y + 0.5, z }, PALETTE.cyan, 1, 0.5);
+    const pod = mail.pod[0]; box(ctx, { x: pod.x - 0.6, y: pod.y - 0.5, w: 1.2, h: 1 }, 0.9, { top: C['pod-top'], left: C['pod-left'], right: C['pod-right'] });
+    for (let z = 0.25; z < 0.9; z += 0.3) line(ctx, { x: pod.x - 0.5, y: pod.y + 0.5, z }, { x: pod.x + 0.5, y: pod.y + 0.5, z }, C.cyan, 1, 0.5);
     const chute = mail.chute[0];
-    box(ctx, { x: r.x - 1.5, y: chute.y - 0.35, w: chute.x - r.x + 2, h: 0.7 }, 0.25, { top: '#2b2620', left: '#120f0b', right: '#1b1712' });
-    for (let x = r.x - 1.2; x < chute.x; x += 0.8) line(ctx, { x, y: chute.y - 0.3, z: 0.26 }, { x: x - 0.3, y: chute.y, z: 0.26 }, PALETTE.amber, 1, 0.8);
+    box(ctx, { x: r.x - 1.5, y: chute.y - 0.35, w: chute.x - r.x + 2, h: 0.7 }, 0.25, { top: C['chute-top'], left: C['chute-left'], right: C['chute-right'] });
+    for (let x = r.x - 1.2; x < chute.x; x += 0.8) line(ctx, { x, y: chute.y - 0.3, z: 0.26 }, { x: x - 0.3, y: chute.y, z: 0.26 }, C.amber, 1, 0.8);
     const t = mail.tower;
-    box(ctx, t, 3.2, { top: '#232a31', left: '#0d1013', right: '#151a1f' });
-    line(ctx, { x: t.x, y: t.y + t.h, z: 2.4 }, { x: t.x + t.w, y: t.y + t.h, z: 2.4 }, PALETTE.cyan, 2, 0.8);
-    line(ctx, { x: t.x + t.w, y: t.y, z: 2.4 }, { x: t.x + t.w, y: t.y + t.h, z: 2.4 }, PALETTE.cyan, 2, 0.8);
-    for (let z = 0.6; z < 2.2; z += 0.5) line(ctx, { x: t.x + 0.6, y: t.y + t.h, z }, { x: t.x + t.w - 0.6, y: t.y + t.h, z }, 'rgba(255,157,58,0.55)', 2);
+    box(ctx, t, 3.2, { top: C['tower-top'], left: C['tower-left'], right: C['tower-right'] });
+    line(ctx, { x: t.x, y: t.y + t.h, z: 2.4 }, { x: t.x + t.w, y: t.y + t.h, z: 2.4 }, C.cyan, 2, 0.8);
+    line(ctx, { x: t.x + t.w, y: t.y, z: 2.4 }, { x: t.x + t.w, y: t.y + t.h, z: 2.4 }, C.cyan, 2, 0.8);
+    for (let z = 0.6; z < 2.2; z += 0.5) line(ctx, { x: t.x + 0.6, y: t.y + t.h, z }, { x: t.x + t.w - 0.6, y: t.y + t.h, z }, C['tower-window'], 2);
   }
-  // A ship's hull: a faint plate well below the decks with a dashed rim. Only drawn when remote hosts exist.
-  const shipLive = ship => ship.health === 'available';
-  // Remote hulls are smaller and amber reads darker than cyan against space, so they get a firmer plate and a second,
-  // deck-level rim; a down host keeps the same weight in a light grey so the ship stays findable.
-  const HULL_DOWN = '#8d9893';
-  function paintHull(ctx, ship) {
-    const r = ship.rect, live = shipLive(ship), rim = ship.local ? PALETTE.cyan : live ? PALETTE.amber : HULL_DOWN;
-    poly(ctx, rectPoly(r, -2.4), ship.local ? 'rgba(63,216,232,0.035)' : live ? 'rgba(255,157,58,0.09)' : 'rgba(141,152,147,0.07)');
-    ctx.save(); ctx.globalAlpha = ship.local ? (live ? 0.7 : 0.4) : 0.9; ctx.setLineDash([6, 5]); ctx.lineWidth = ship.local ? 1.5 : 2.5;
-    poly(ctx, rectPoly(r, -2.4), null, rim); ctx.restore();
-    if (!ship.local) { ctx.save(); ctx.globalAlpha = 0.55; ctx.lineWidth = 1.5; poly(ctx, rectPoly(r, 0), null, rim); ctx.restore(); }
-  }
-  function paintStatic(ctx, scene) {
-    const hub = scene.mail.rect;
-    for (const ship of scene.ships || []) paintHull(ctx, ship);
-    const pieces = [
-      ...scene.platforms.map(platform => ({ key: center(platform.rect).x + center(platform.rect).y, paint: () => paintDeck(ctx, platform.rect, platform.accent, platform.sections.map(s => s.rect)) })),
-      ...scene.walkways.map(walkway => {
-        // Hub links stop at the hub edge so the grate never paints over the pad.
-        const r = walkway.rect, rect = walkway.kind !== 'hub-link' ? r : r.x < hub.x ? { ...r, w: Math.max(0, hub.x - r.x) } : { ...r, x: hub.x + hub.w, w: Math.max(0, r.x + r.w - hub.x - hub.w) };
-        return { key: center(rect).x + center(rect).y + (walkway.kind === 'connector' ? 40 : 0), paint: () => rect.w > 0 && paintWalkway(ctx, { ...walkway, rect }) };
-      }),
-      { key: center(hub).x + center(hub).y + 0.01, paint: () => paintHub(ctx, scene.mail) },
-      // Each remote ship's own mailroom: the same furniture, showing only that host's llm-bus.
-      ...(scene.ships || []).filter(ship => !ship.local && ship.mail).map(ship => ({ key: center(ship.mail.rect).x + center(ship.mail.rect).y + 0.01, paint: () => paintHub(ctx, ship.mail) })),
-      ...(scene.observatory ? [{ key: middle(scene.observatory.rect), paint: () => paintObservatoryDeck(ctx, scene.observatory) }] : [])
-    ].sort((a, b) => a.key - b.key);
-    for (const piece of pieces) piece.paint();
-    for (const platform of scene.platforms) {
-      paintRearWalls(ctx, platform.rect);
-      platform.decorationRegions.forEach((region, index) => { if (region.kind === 'wall' || region.kind === 'corner') paintWallRegion(ctx, platform, region, index); });
-    }
-    // An unreachable or stale remote ship is dimmed as a whole: its last rows are shown, never as live.
-    for (const ship of scene.ships || []) if (!ship.local && !shipLive(ship)) poly(ctx, rectPoly(ship.rect, 0), 'rgba(5,8,10,0.55)');
-    // Status-driven light pools: the screen glow on a seated worker, never title or timestamp driven.
+  // Status-driven light pools: the screen glow on a seated worker, never title or timestamp driven.
+  function paintPools(ctx, scene) {
     for (const worker of scene.workers) {
       const status = worker.row.status, scale = worker.scale || 1;
-      glow(ctx, { ...worker.chair, y: worker.chair.y + 0.4 }, 44 * scale, PALETTE.cyan, status === 'working' ? 0.35 : status === 'blocked' ? 0.12 : 0.06);
-      if (status === 'blocked') glow(ctx, { x: worker.desk.x + worker.desk.w - 0.2, y: worker.desk.y + 0.2 }, 26 * scale, STATUS.blocked, 0.25);
-    }
-    // Helper tethers: a dashed floor line from the helper's chair to its exact immediate parent's chair.
-    for (const worker of scene.workers) if (worker.connector) {
-      const from = P(worker.connector.from), to = P(worker.connector.to);
-      ctx.save(); ctx.globalAlpha = 0.6; ctx.strokeStyle = worker.accent; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
-      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); ctx.restore();
+      glow(ctx, { ...worker.chair, y: worker.chair.y + 0.4 }, 44 * scale, C.cyan, status === 'working' ? 0.35 : status === 'blocked' ? 0.12 : 0.06);
+      if (status === 'blocked') glow(ctx, { x: worker.desk.x + worker.desk.w - 0.2, y: worker.desk.y + 0.2 }, 26 * scale, S.blocked, 0.25);
     }
   }
+  const paintStatic = (ctx, scene) => staticPass(ctx, scene, { deck: (c, platform) => paintDeck(c, platform.rect, platform.accent, platform.sections.map(s => s.rect)),
+    walkway: paintWalkway, hub: paintHub, observatory: paintObservatoryDeck, walls: paintRearWalls, region: paintWallRegion, pools: decor ? paintPools : null, colors: C });
   // Observatory deck: a cool counterweight to the amber mailroom. Tall props are depth items, never cached here.
   function paintObservatoryDeck(ctx, observatory) {
     const r = observatory.rect;
-    prism(ctx, corners(r), 0, -1, { top: '#161d24', left: PALETTE.hullLeft, right: PALETTE.hullRight });
+    prism(ctx, corners(r), 0, -1, { top: C['observatory-top'], left: C.hullLeft, right: C.hullRight });
     ctx.save(); ctx.globalAlpha = 0.5;
-    for (let x = r.x + 2; x < r.x + r.w; x += 2) line(ctx, { x, y: r.y }, { x, y: r.y + r.h }, '#0f2a33');
-    for (let y = r.y + 2; y < r.y + r.h; y += 2) line(ctx, { x: r.x, y }, { x: r.x + r.w, y }, '#0f2a33');
+    for (let x = r.x + 2; x < r.x + r.w; x += 2) line(ctx, { x, y: r.y }, { x, y: r.y + r.h }, C['observatory-grid']);
+    for (let y = r.y + 2; y < r.y + r.h; y += 2) line(ctx, { x: r.x, y }, { x: r.x + r.w, y }, C['observatory-grid']);
     ctx.restore();
-    line(ctx, { x: r.x, y: r.y + r.h }, { x: r.x + r.w, y: r.y + r.h }, PALETTE.cyan, 2, 0.7);
-    line(ctx, { x: r.x + r.w, y: r.y }, { x: r.x + r.w, y: r.y + r.h }, PALETTE.cyan, 2, 0.7);
+    line(ctx, { x: r.x, y: r.y + r.h }, { x: r.x + r.w, y: r.y + r.h }, C.cyan, 2, 0.7);
+    line(ctx, { x: r.x + r.w, y: r.y }, { x: r.x + r.w, y: r.y + r.h }, C.cyan, 2, 0.7);
     paintRearWalls(ctx, r);
     const light = observatory.light.rect;
-    glow(ctx, { x: light.x + light.w / 2, y: light.y + light.h / 2 + 1.5 }, 70, PALETTE.cyan, 0.35);
+    if (decor) glow(ctx, { x: light.x + light.w / 2, y: light.y + light.h / 2 + 1.5 }, 70, C.cyan, 0.35);
   }
   // Observatory props: each returns a depth item for the shared stream, so crew walking past occlude correctly.
-  const middle = rect => rect.x + rect.w / 2 + rect.y + rect.h / 2;
   function paintObservatoryScreen(ctx, screen, now, animate) {
     const r = screen.rect, front = r.y + r.h, top = screen.height - 0.4;
-    box(ctx, { x: r.x, y: r.y, w: r.w, h: 0.3 }, screen.height, { top: '#20272e', left: '#0d1013', right: '#151a1f' });
+    box(ctx, { x: r.x, y: r.y, w: r.w, h: 0.3 }, screen.height, { top: C['observatory-screen-top'], left: C['observatory-screen-left'], right: C['observatory-screen-right'] });
     const face = [{ x: r.x + 0.15, y: r.y + 0.3, z: 1.1 }, { x: r.x + r.w - 0.15, y: r.y + 0.3, z: 1.1 }, { x: r.x + r.w - 0.15, y: r.y + 0.3, z: top }, { x: r.x + 0.15, y: r.y + 0.3, z: top }];
-    poly(ctx, face.map(P), '#071c24', PALETTE.cyan);
+    poly(ctx, face.map(P), C['observatory-screen-face'], C.cyan);
     // Ambient radar sweep; a frozen scene keeps one fixed phase.
     const phase = animate ? (now / 6000 + r.x / 7) % 1 : 0.3, x = r.x + 0.15 + phase * (r.w - 0.3);
-    line(ctx, { x, y: r.y + 0.3, z: 1.15 }, { x, y: r.y + 0.3, z: top - 0.05 }, PALETTE.cyan, 1, 0.6);
-    line(ctx, { x: r.x, y: front, z: 0 }, { x: r.x + r.w, y: front, z: 0 }, '#0d1013', 1, 0.6);
+    line(ctx, { x, y: r.y + 0.3, z: 1.15 }, { x, y: r.y + 0.3, z: top - 0.05 }, C.cyan, 1, 0.6);
+    line(ctx, { x: r.x, y: front, z: 0 }, { x: r.x + r.w, y: front, z: 0 }, C['observatory-screen-base'], 1, 0.6);
   }
   function paintTelescope(ctx, telescope, now, animate) {
     const r = telescope.rect, base = { x: r.x + r.w / 2, y: r.y + r.h / 2 }, mount = { ...base, z: 1.6 };
-    for (const [dx, dy] of [[-0.4, 0.3], [0.4, 0.3], [0, -0.45]]) line(ctx, { x: base.x + dx, y: base.y + dy, z: 0 }, mount, PALETTE.rail, 1.5);
+    for (const [dx, dy] of [[-0.4, 0.3], [0.4, 0.3], [0, -0.45]]) line(ctx, { x: base.x + dx, y: base.y + dy, z: 0 }, mount, C.rail, 1.5);
     // A slow ±6° ambient sweep over the rear rail, frozen when stale or reduced.
     const angle = (animate ? Math.sin(now / 40000 * Math.PI * 2) * 6 : 0) * Math.PI / 180;
     const tip = { x: mount.x + Math.sin(angle) * 0.7, y: mount.y - Math.cos(angle) * 0.7, z: telescope.height - 0.3 }, tail = { x: mount.x - Math.sin(angle) * 0.3, y: mount.y + Math.cos(angle) * 0.3, z: 1.3 };
-    line(ctx, tail, tip, '#c9d3da', 4); line(ctx, tail, tip, '#5b6b78', 2);
-    isoEllipse(ctx, tip, 0.08, null, PALETTE.cyan);
+    line(ctx, tail, tip, C['telescope-shell'], 4); line(ctx, tail, tip, C['telescope-core'], 2);
+    isoEllipse(ctx, tip, 0.08, null, C.cyan);
   }
   function paintPlant(ctx, plant) {
     const r = plant.rect;
-    box(ctx, { x: r.x + 0.25, y: r.y + 0.25, w: 0.5, h: 0.5 }, 0.45, { top: '#1f3a24', left: '#0f1a12', right: '#16261a' });
-    for (const [dx, dy, z] of [[0.4, 0.5, 0.9], [0.65, 0.4, 1.3], [0.5, 0.6, 1.7]]) isoEllipse(ctx, { x: r.x + dx, y: r.y + dy, z }, 0.22, null, '#3f8a46');
+    box(ctx, { x: r.x + 0.25, y: r.y + 0.25, w: 0.5, h: 0.5 }, 0.45, { top: C['planter-top'], left: C['planter-left'], right: C['planter-right'] });
+    for (const [dx, dy, z] of [[0.4, 0.5, 0.9], [0.65, 0.4, 1.3], [0.5, 0.6, 1.7]]) isoEllipse(ctx, { x: r.x + dx, y: r.y + dy, z }, 0.22, null, C['plant-leaf']);
   }
   function paintLamp(ctx, light) {
     const r = light.rect, post = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
-    line(ctx, { ...post, z: 0 }, { ...post, z: light.height - 0.2 }, PALETTE.rail, 2);
-    isoEllipse(ctx, { ...post, z: light.height - 0.15 }, 0.16, null, PALETTE.cyan);
+    line(ctx, { ...post, z: 0 }, { ...post, z: light.height - 0.2 }, C.rail, 2);
+    isoEllipse(ctx, { ...post, z: light.height - 0.15 }, 0.16, null, C.cyan);
   }
   // The Viewer is ambient: the neutral fallback figure, never a provider skin, status colour or hit target.
   function paintViewer(ctx, viewer) {
     const foot = P(viewer.point), h = CREW_HEIGHT, w = 16;
-    isoEllipse(ctx, viewer.point, 0.28, null, 'rgba(0,0,0,0.38)');
-    ctx.save(); ctx.globalAlpha = 0.8; ctx.fillStyle = '#6f7a82'; ctx.strokeStyle = '#05080a';
+    isoEllipse(ctx, viewer.point, 0.28, null, C['contact-shadow']);
+    ctx.save(); ctx.globalAlpha = 0.8; ctx.fillStyle = C['viewer-body']; ctx.strokeStyle = C['body-outline'];
     ctx.beginPath(); ctx.roundRect ? ctx.roundRect(foot.x - w / 2, foot.y - h * 0.72, w, h * 0.72, 6) : ctx.rect(foot.x - w / 2, foot.y - h * 0.72, w, h * 0.72); ctx.fill(); ctx.stroke();
     ctx.beginPath(); ctx.arc(foot.x, foot.y - h * 0.84, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore();
   }
@@ -353,63 +345,215 @@ const ObserverView = (() => {
   // ---------- dynamic items (depth sorted with crew) ----------
   function paintDesk(ctx, worker, now, animate) {
     const d = worker.desk, status = worker.row.status;
-    box(ctx, d, 0.55, { top: PALETTE.consoleTop, left: '#14191e', right: '#1c2228', edge: 'rgba(255,255,255,0.05)' });
+    box(ctx, d, 0.55, { top: C.consoleTop, left: C['desk-left'], right: C['desk-right'], edge: C['desk-edge'] });
     // Side monitors leave the seated worker's face clear; the camera sees their lit rims.
     const rim = status === 'working' ? 0.95 : status === 'blocked' ? 0.6 : 0.3;
     for (const x of [d.x + 0.05, d.x + 1.55]) {
-      box(ctx, { x, y: d.y + 0.1, w: 0.4, h: 0.5 }, 0.5, { top: '#0e1216', left: '#0a0d10', right: '#11161a' }, 0.55);
-      line(ctx, { x, y: d.y + 0.6, z: 1.05 }, { x: x + 0.4, y: d.y + 0.6, z: 1.05 }, PALETTE.cyan, 1.5, rim);
+      box(ctx, { x, y: d.y + 0.1, w: 0.4, h: 0.5 }, 0.5, { top: C['monitor-top'], left: C['monitor-left'], right: C['monitor-right'] }, 0.55);
+      line(ctx, { x, y: d.y + 0.6, z: 1.05 }, { x: x + 0.4, y: d.y + 0.6, z: 1.05 }, C.cyan, 1.5, rim);
       if (animate && status === 'working') {
         const scroll = ((now / 600 + hash(worker.id) % 7) % 3) / 3;
-        for (let i = 0; i < 3; i++) line(ctx, { x: x + 0.05, y: d.y + 0.6, z: 0.65 + ((i / 3 + scroll) % 1) * 0.35 }, { x: x + 0.3, y: d.y + 0.6, z: 0.65 + ((i / 3 + scroll) % 1) * 0.35 }, PALETTE.cyan, 1, 0.35);
+        for (let i = 0; i < 3; i++) line(ctx, { x: x + 0.05, y: d.y + 0.6, z: 0.65 + ((i / 3 + scroll) % 1) * 0.35 }, { x: x + 0.3, y: d.y + 0.6, z: 0.65 + ((i / 3 + scroll) % 1) * 0.35 }, C.cyan, 1, 0.35);
       }
     }
     // Observed status lamp: steady, never blinking.
     const lamp = { x: d.x + 1.85, y: d.y + 0.9, z: 0.6 };
-    isoEllipse(ctx, lamp, 0.09, null, STATUS[status] || STATUS.unknown);
-    if (status === 'working' || status === 'blocked') glow(ctx, lamp, 10, STATUS[status], 0.6);
+    isoEllipse(ctx, lamp, 0.09, null, S[status] || S.unknown);
+    if (status === 'working' || status === 'blocked') glow(ctx, lamp, 10, S[status], 0.6);
   }
   // A helper's jump seat: one compact console that stays inside its reviewed desk footprint (w1 × h0.72).
   function paintHelperDesk(ctx, worker, now, animate) {
     const d = worker.desk, status = worker.row.status;
-    box(ctx, d, 0.45, { top: shade(worker.accent, -0.6), left: '#14191e', right: '#1c2228', edge: 'rgba(255,255,255,0.05)' });
+    box(ctx, d, 0.45, { top: shade(worker.accent, -0.6), left: C['desk-left'], right: C['desk-right'], edge: C['desk-edge'] });
     const screen = { x: d.x + d.w - 0.35, y: d.y + 0.08, w: 0.3, h: 0.36 };
-    box(ctx, screen, 0.4, { top: '#0e1216', left: '#0a0d10', right: '#11161a' }, 0.45);
+    box(ctx, screen, 0.4, { top: C['monitor-top'], left: C['monitor-left'], right: C['monitor-right'] }, 0.45);
     const rimY = screen.y + screen.h, rim = status === 'working' ? 0.95 : status === 'blocked' ? 0.6 : 0.3;
-    line(ctx, { x: screen.x, y: rimY, z: 0.85 }, { x: screen.x + screen.w, y: rimY, z: 0.85 }, PALETTE.cyan, 1, rim);
+    line(ctx, { x: screen.x, y: rimY, z: 0.85 }, { x: screen.x + screen.w, y: rimY, z: 0.85 }, C.cyan, 1, rim);
     if (animate && status === 'working') {
       const scroll = ((now / 600 + hash(worker.id) % 7) % 3) / 3;
-      for (let i = 0; i < 2; i++) line(ctx, { x: screen.x + 0.04, y: rimY, z: 0.5 + ((i / 2 + scroll) % 1) * 0.3 }, { x: screen.x + 0.24, y: rimY, z: 0.5 + ((i / 2 + scroll) % 1) * 0.3 }, PALETTE.cyan, 1, 0.35);
+      for (let i = 0; i < 2; i++) line(ctx, { x: screen.x + 0.04, y: rimY, z: 0.5 + ((i / 2 + scroll) % 1) * 0.3 }, { x: screen.x + 0.24, y: rimY, z: 0.5 + ((i / 2 + scroll) % 1) * 0.3 }, C.cyan, 1, 0.35);
     }
     const lamp = { x: d.x + 0.15, y: d.y + d.h - 0.15, z: 0.5 };
-    isoEllipse(ctx, lamp, 0.07, null, STATUS[status] || STATUS.unknown);
-    if (status === 'working' || status === 'blocked') glow(ctx, lamp, 8, STATUS[status], 0.6);
+    isoEllipse(ctx, lamp, 0.07, null, S[status] || S.unknown);
+    if (status === 'working' || status === 'blocked') glow(ctx, lamp, 8, S[status], 0.6);
   }
   function paintChair(ctx, worker) {
     const c = worker.chair, s = worker.scale || 1;
-    box(ctx, { x: c.x - 0.3 * s, y: c.y - 0.35 * s, w: 0.6 * s, h: 0.5 * s }, 0.35 * s, { top: '#20262c', left: '#0f1317', right: '#161b20' });
-    box(ctx, { x: c.x - 0.3 * s, y: c.y - 0.45 * s, w: 0.6 * s, h: 0.1 * s }, 0.55 * s, { top: '#252c33', left: '#0f1317', right: '#161b20' }, 0.35 * s);
+    box(ctx, { x: c.x - 0.3 * s, y: c.y - 0.35 * s, w: 0.6 * s, h: 0.5 * s }, 0.35 * s, { top: C['chair-seat-top'], left: C['chair-left'], right: C['chair-right'] });
+    box(ctx, { x: c.x - 0.3 * s, y: c.y - 0.45 * s, w: 0.6 * s, h: 0.1 * s }, 0.55 * s, { top: C['chair-back-top'], left: C['chair-left'], right: C['chair-right'] }, 0.35 * s);
   }
   // Low repository partition, one unit long: long walls are cut into units so they depth-sort correctly with crew.
   function paintPartition(ctx, unit, accent) {
-    box(ctx, unit, 0.6, { top: '#2a3138', left: '#12161a', right: '#191e23' });
+    box(ctx, unit, 0.6, { top: C['partition-top'], left: C['partition-left'], right: C['partition-right'] });
     line(ctx, { x: unit.x, y: unit.y + unit.h, z: 0.6 }, { x: unit.x + unit.w, y: unit.y + unit.h, z: 0.6 }, accent, 1, 0.55);
   }
   function paintApronProp(ctx, region) {
     const r = region.rect, post = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
-    line(ctx, { ...post, z: 0 }, { ...post, z: 1.6 }, PALETTE.rail, 2);
-    isoEllipse(ctx, { ...post, z: 1.65 }, 0.14, null, PALETTE.window);
-    glow(ctx, { ...post, z: 0 }, 40, PALETTE.amber, 0.22);
+    line(ctx, { ...post, z: 0 }, { ...post, z: 1.6 }, C.rail, 2);
+    isoEllipse(ctx, { ...post, z: 1.65 }, 0.14, null, C.window);
+    if (decor) glow(ctx, { ...post, z: 0 }, 40, C.amber, 0.22);
+  }
+  function paintPlanningDesk(ctx, desk) {
+    box(ctx, desk, 0.55, { top: C['planning-desk-top'], left: C['planning-desk-left'], right: C['planning-desk-right'], edge: C['planning-desk-edge'] });
+    line(ctx, { x: desk.x + 0.3, y: desk.y + desk.h, z: 0.6 }, { x: desk.x + desk.w - 0.3, y: desk.y + desk.h, z: 0.6 }, C.cyan, 1.5, 0.5);
+  }
+  function paintDrone(ctx, drone, now, animate) {
+    const at = P(drone.point), bob = drone.parked && animate ? Math.sin(now / 500) : 0;
+    isoEllipse(ctx, { ...drone.point, z: 0 }, 0.25, null, C['drone-shadow']);
+    ctx.fillStyle = C['drone-body']; ctx.fillRect(at.x - 9, at.y - 4 + bob, 18, 6);
+    ctx.fillStyle = C['drone-wing']; ctx.fillRect(at.x - 12, at.y - 6 + bob, 6, 2); ctx.fillRect(at.x + 6, at.y - 6 + bob, 6, 2);
+    const running = drone.parcels[0] || C.cyan; ctx.fillStyle = running; ctx.fillRect(at.x - 1, at.y - 3 + bob, 2, 2);
+    drone.parcels.forEach((color, index) => { ctx.fillStyle = color; ctx.fillRect(at.x - 4, at.y + 3 + index * 3 + bob, 8, 2); });
+  }
+  return { glow, furnishing, furnishings, paintStatic, paintObservatoryScreen, paintTelescope, paintPlant, paintLamp, paintViewer,
+    paintDesk, paintHelperDesk, paintChair, paintPartition, paintApronProp, paintPlanningDesk, paintDrone };
+  }
+  /* One static pass for both art strategies: decks, walkways, hub and observatory sorted by the same keys, then each
+     platform's rear walls and hashed wall/corner units, the station's status pools, and the helper tethers. */
+  // A ship's hull: a faint plate well below the decks with a dashed rim. Only drawn when remote hosts exist.
+  const shipLive = ship => ship.health === 'available';
+  // Remote hulls are smaller and amber reads darker than cyan against space, so they get a firmer plate and a second,
+  // deck-level rim; a down host keeps the same weight in the idle grey so the ship stays findable.
+  function paintHull(ctx, ship, C = DEFAULT_SCENE.colors) {
+    const r = ship.rect, live = shipLive(ship), rim = ship.local ? C.cyan : live ? C.amber : C.idle;
+    poly(ctx, rectPoly(r, -2.4), withAlpha(rim, ship.local ? 0.035 : live ? 0.09 : 0.07));
+    ctx.save(); ctx.globalAlpha = ship.local ? (live ? 0.7 : 0.4) : 0.9; ctx.setLineDash([6, 5]); ctx.lineWidth = ship.local ? 1.5 : 2.5;
+    poly(ctx, rectPoly(r, -2.4), null, rim); ctx.restore();
+    if (!ship.local) { ctx.save(); ctx.globalAlpha = 0.55; ctx.lineWidth = 1.5; poly(ctx, rectPoly(r, 0), null, rim); ctx.restore(); }
+  }
+  function staticPass(ctx, scene, art) {
+    const hub = scene.mail.rect, colors = art.colors || DEFAULT_SCENE.colors;
+    for (const ship of scene.ships || []) paintHull(ctx, ship, colors);
+    const pieces = [
+      ...scene.platforms.map(platform => ({ key: center(platform.rect).x + center(platform.rect).y, paint: () => art.deck(ctx, platform) })),
+      ...scene.walkways.map(walkway => {
+        // Hub links stop at the hub edge so the walkway never paints over the pad.
+        const r = walkway.rect, rect = walkway.kind !== 'hub-link' ? r : r.x < hub.x ? { ...r, w: Math.max(0, hub.x - r.x) } : { ...r, x: hub.x + hub.w, w: Math.max(0, r.x + r.w - hub.x - hub.w) };
+        return { key: center(rect).x + center(rect).y + (walkway.kind === 'connector' ? 40 : 0), paint: () => rect.w > 0 && art.walkway(ctx, { ...walkway, rect }) };
+      }),
+      { key: center(hub).x + center(hub).y + 0.01, paint: () => art.hub(ctx, scene.mail) },
+      // Each remote ship's own mailroom: the same furniture, showing only that host's llm-bus.
+      ...(scene.ships || []).filter(ship => !ship.local && ship.mail).map(ship => ({ key: center(ship.mail.rect).x + center(ship.mail.rect).y + 0.01, paint: () => art.hub(ctx, ship.mail) })),
+      ...(scene.observatory ? [{ key: middle(scene.observatory.rect), paint: () => art.observatory(ctx, scene.observatory) }] : [])
+    ].sort((a, b) => a.key - b.key);
+    for (const piece of pieces) piece.paint();
+    for (const platform of scene.platforms) {
+      art.walls(ctx, platform.rect);
+      platform.decorationRegions.forEach((region, index) => { if (region.kind === 'wall' || region.kind === 'corner') art.region(ctx, platform, region, index); });
+    }
+    // An unreachable or stale remote ship is dimmed as a whole: its last rows are shown, never as live.
+    for (const ship of scene.ships || []) if (!ship.local && !shipLive(ship)) poly(ctx, rectPoly(ship.rect, 0), withAlpha(colors['body-outline'], 0.55));
+    if (art.pools) art.pools(ctx, scene);
+    // Helper tethers: a dashed floor line from the helper's chair to its exact immediate parent's chair.
+    for (const worker of scene.workers) if (worker.connector) {
+      const from = P(worker.connector.from), to = P(worker.connector.to);
+      ctx.save(); ctx.globalAlpha = 0.6; ctx.strokeStyle = worker.accent; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); ctx.restore();
+    }
   }
 
+  /* Home-office painters: the station's passes, footprints, hashes and depth keys drawn with the fixed role PNGs at
+     native size (ObserverOfficeArt.create). Procedural overlays stay application-owned and flat: two-tone outlined side
+     faces, project-hue rugs and trims, steady status lamps and contact shadows. Nothing glows, sparks or animates. */
+  // Each station wall/corner kind keeps its hashed slot: [role, along inset, depth inset] inside its reserved unit.
+  const OFFICE_WALL = { rack: ['cabinet', 0.1, 0.1], screen: ['bookcase', 0.1, 0.05], vent: ['radiator', 0.3, 0.2], board: ['board', 0.2, 0.2] };
+  const OFFICE_CORNER = { tank: ['waterCooler', 0.1, 0.2], planter: ['plant', 0, 0.5], crates: ['basket', 0.1, 0.3], mast: ['lamp', 0, 0.5] };
+  // Pure placement: the role and its extent rect (origin = role foot), fitted against the wall, never past the unit.
+  function officeFurnishing(kind, unit, edge) {
+    if (OFFICE_CORNER[kind]) { const [role, a, d] = OFFICE_CORNER[kind], e = ROLES[role].extent; return { role, rect: { x: unit.x + a, y: unit.y + d, w: e.w, h: e.h } }; }
+    const [stem, along, inset] = OFFICE_WALL[kind], rearX = edge === 'rear-x', role = stem + (rearX ? 'X' : 'Y'), e = ROLES[role].extent;
+    const depth = Math.max(0, Math.min(inset, rearX ? unit.w - e.w : unit.h - e.h));
+    return { role, rect: rearX ? { x: unit.x + depth, y: unit.y + along, w: e.w, h: e.h } : { x: unit.x + along, y: unit.y + depth, w: e.w, h: e.h } };
+  }
+  function officePaintersFor({ colors: C, status: S }, art) {
+    const outline = C['body-outline'];
+    // Flat skirts: the shaded (+y) face and the lit (+x, chamfer) face, each with a crisp one-pixel outline.
+    function faces(ctx, points, top, bottom) {
+      ctx.lineWidth = 1;
+      for (const { a, b, side } of visibleFaces(points))
+        poly(ctx, [P({ ...a, z: top }), P({ ...b, z: top }), P({ ...b, z: bottom }), P({ ...a, z: bottom })], side === 'left' ? C.hullLeft : C.hullRight, outline);
+    }
+    function floor(ctx, points, role, rect) {
+      ctx.save(); ctx.beginPath(); points.map(point => P(point)).forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)); ctx.closePath(); ctx.clip();
+      art.tile(ctx, role, rect); ctx.restore();
+      poly(ctx, points.map(point => P(point)), null, outline);
+    }
+    // Project hue appears only as a rug and a skirting stripe, never as a lit edge.
+    function rug(ctx, rect, accent) {
+      poly(ctx, rectPoly({ x: rect.x + 0.75, y: rect.y + 0.75, w: rect.w - 1.5, h: rect.h - 1.5 }), withAlpha(accent, 0.16), withAlpha(accent, 0.7));
+    }
+    function stripe(ctx, rect, accent, z) {
+      line(ctx, { x: rect.x, y: rect.y + rect.h, z }, { x: rect.x + rect.w, y: rect.y + rect.h, z }, accent);
+      line(ctx, { x: rect.x + rect.w, y: rect.y + rect.h, z }, { x: rect.x + rect.w, y: rect.y, z }, accent);
+    }
+    // The corner owns the first rear-x and rear-y cells; whole wall units repeat from there along both rear edges.
+    function walls(ctx, r) {
+      art.draw(ctx, 'wallCorner', r);
+      art.edge(ctx, 'wallRearX', { x: r.x, y: r.y + 2, w: 0, h: r.h - 2 });
+      art.edge(ctx, 'wallRearY', { x: r.x + 1, y: r.y, w: r.w - 1, h: 0 });
+    }
+    function deck(ctx, platform) {
+      const r = platform.rect;
+      faces(ctx, corners(r), 0, -1); stripe(ctx, r, platform.accent, -0.25);
+      floor(ctx, corners(r), 'floor', r);
+      platform.sections.forEach((section, index) => { if (index % 2) art.tile(ctx, 'floorAlt', section.rect); rug(ctx, section.rect, platform.accent); });
+    }
+    function region(ctx, platform, value, index) {
+      const kinds = value.kind === 'corner' ? CORNER_KINDS : WALL_KINDS;
+      wallUnits(value).forEach((unit, slot) => { const { role, rect } = officeFurnishing(kinds[hash(platform.key + ':' + index + ':' + slot) % kinds.length], unit, value.edge); art.draw(ctx, role, rect); });
+    }
+    function walkway(ctx, value) { const r = value.rect; faces(ctx, corners(r), 0, -0.35); floor(ctx, corners(r), 'corridor', r); }
+    // Mail room: round mats on the pads, reception and sorting cabinet at the rear, tray at the pod, counter at the chute.
+    function hub(ctx, mail) {
+      const r = mail.rect, c = 2, oct = [{ x: r.x + c, y: r.y }, { x: r.x, y: r.y + c }, { x: r.x, y: r.y + r.h - c }, { x: r.x + c, y: r.y + r.h },
+        { x: r.x + r.w - c, y: r.y + r.h }, { x: r.x + r.w, y: r.y + r.h - c }, { x: r.x + r.w, y: r.y + c }, { x: r.x + r.w - c, y: r.y }];
+      faces(ctx, oct, 0, -1.5); floor(ctx, oct, 'floorAlt', r);
+      for (const pad of mail.pads) art.draw(ctx, 'mailPad', { x: pad.x - 1.1, y: pad.y - 1.1 });
+      const pod = mail.pod[0], chute = mail.chute[0];
+      [['mailReception', { x: r.x + 1, y: r.y + 1, w: 4, h: 3 }], ['mailSorter', mail.tower], ['dispatchCounter', { x: r.x - 1.5, y: chute.y - 0.35, w: 4, h: 0.7 }],
+        ['mailTray', { x: pod.x - 0.6, y: pod.y - 0.5, w: 1.2, h: 1 }]].sort((a, b) => middle(a[1]) - middle(b[1])).forEach(([role, rect]) => art.draw(ctx, role, rect));
+    }
+    function observatory(ctx, o) { const r = o.rect; faces(ctx, corners(r), 0, -1); floor(ctx, corners(r), 'floor', r); walls(ctx, r); }
+    const paintStatic = (ctx, scene) => staticPass(ctx, scene, { deck, walkway, hub, observatory, walls, region, pools: null, colors: C });
+    // Observed status lamp: a steady outlined dot in the status colour, never a glow or blink.
+    const lamp = (ctx, point, radius, status) => isoEllipse(ctx, point, radius, outline, S[status] || S.unknown, 1);
+    return {
+      paintStatic,
+      desk: (ctx, worker) => { const d = worker.desk; art.draw(ctx, 'desk', d); lamp(ctx, { x: d.x + 1.85, y: d.y + 0.9, z: 0.6 }, 0.09, worker.row.status); },
+      helperDesk: (ctx, worker) => { const d = worker.desk; art.draw(ctx, 'helperDesk', d); lamp(ctx, { x: d.x + 0.15, y: d.y + d.h - 0.15, z: 0.5 }, 0.07, worker.row.status); },
+      // Native chairs at the seat anchor: the smaller helper PNG for scaled helpers, the root chair otherwise.
+      chair: (ctx, worker) => art.draw(ctx, worker.scale && worker.scale !== 1 ? 'helperChair' : 'chair', worker.chair),
+      partition: (ctx, unit, accent, end) => { art.draw(ctx, end ? 'partitionX' : 'partitionY', unit); line(ctx, { x: unit.x, y: unit.y + unit.h, z: 0.6 }, { x: unit.x + unit.w, y: unit.y + unit.h, z: 0.6 }, accent, 1, 0.55); },
+      apron: (ctx, value) => art.draw(ctx, 'apron', value.rect),
+      planningDesk: (ctx, desk) => art.draw(ctx, 'desk', desk),
+      viewer: (ctx, viewer) => { isoEllipse(ctx, viewer.point, 0.28, null, C['contact-shadow']); art.draw(ctx, 'viewer', viewer.point); },
+      screen: (ctx, screen) => art.draw(ctx, 'planningBoard', screen.rect),
+      telescope: (ctx, telescope) => art.draw(ctx, 'planningShelf', telescope.rect),
+      plant: (ctx, plant) => art.draw(ctx, 'plant', plant.rect),
+      lamp: (ctx, light) => art.draw(ctx, 'lamp', light.rect),
+      // Paper carrier at the exact airborne point; parcel colours and counts as observed, no bob or running light.
+      drone: (ctx, drone) => {
+        isoEllipse(ctx, { ...drone.point, z: 0 }, 0.25, null, C['drone-shadow']);
+        art.draw(ctx, 'carrier', drone.point);
+        const at = P(drone.point), x = Math.round(at.x), y = Math.round(at.y);
+        drone.parcels.forEach((color, index) => { ctx.fillStyle = color; ctx.fillRect(x - 4, y + 5 + index * 3, 8, 2); });
+      }
+    };
+  }
+  // Default-look painters back the exported helpers, so omitting a theme keeps the canonical station.
+  const DEFAULT_ART = paintersFor(resolveLook());
+
   // ---------- the view ----------
-  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onObservatory = () => {}, onShip = null, hostSelection = () => undefined, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, idleVigour = () => 1, onCamera = () => {}, env = {} }) {
+  function create({ theme, canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onObservatory = () => {}, onShip = null, hostSelection = () => undefined, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, idleVigour = () => 1, onCamera = () => {}, env = {} }) {
     const win = env.window || (typeof window !== 'undefined' ? window : {});
     const raf = env.raf || (fn => win.requestAnimationFrame(fn)), caf = env.caf || (id => win.cancelAnimationFrame(id));
     const dprOf = env.dpr || (() => win.devicePixelRatio || 1);
     const makeCanvas = env.createCanvas || ((w, h) => { const node = win.document.createElement('canvas'); node.width = w; node.height = h; return node; });
     const sprites = env.sprites !== undefined ? env.sprites : (typeof SPRITES !== 'undefined' ? SPRITES : null);
     const ctx = canvas.getContext('2d');
+    // Instance-local look: another view on the page, themed or not, never shares or changes it.
+    const look = resolveLook(theme), C = look.colors, S = look.status, decor = look.ambientFx === 'station', rain = look.backgroundFx === 'rain';
+    const station = paintersFor(look), { glow } = station;
     const movement = Scene.createMovement(), bodies = new Map();
     /* stale: the whole inventory (scene ambience). rowStale: one worker's own source health and observation time;
        a fresh Desktop source never animates or blesses a stale Herdr or helper row. */
@@ -462,6 +606,38 @@ const ObserverView = (() => {
     // Paint scheduling: a live scene keeps its RAF; a frozen (stale or reduced) one paints once per invalidation.
     let dirty = false, reported = null, workerIndex = new Map(), signature = '', platformCounts = new Map();
     const readiness = new Map(), watchers = [];
+    /* Home-office art: one view-owned load started here and kept across stop/start (page hiding is suspension, not
+       disposal). Until the complete group is ready, or after it fails, the complete station art and canonical station
+       crew paint; readiness activates office art once. A settlement while stopped only records it: invalidate()
+       schedules nothing until start(), and the cache key carries the art mode so the static layer rebuilds once. */
+    const status = env.themeStatus || Themes, packId = theme && typeof theme.effectiveId === 'string' ? theme.effectiveId : 'starnet';
+    const office = look.art === 'home-office' ? { state: 'pending', composition: null } : null;
+    if (office) {
+      status.reportNotice('scene-art', 'Theme pack ' + packId + ' office art loading; showing station art.');
+      OfficeArt.load(theme.scene.art, { Image: env.Image || win.Image }).then(settleOffice, () => settleOffice({ state: 'failed', reason: 'scene-art-load' }));
+    }
+    function settleOffice(result) {
+      if (office.state !== 'pending') return;
+      status.reportNotice('scene-art', null);
+      if (result.state === 'ready') {
+        office.composition = OfficeArt.create({ images: result.images, colors: C, project: P, crewHeight: CREW_HEIGHT });
+        office.painters = officePaintersFor(look, office.composition);
+        office.state = 'ready';
+        invalidate();
+        return;
+      }
+      office.state = 'failed';
+      const reason = result.reason === 'scene-art-dimensions' ? 'scene-art-dimensions' : 'scene-art-load';
+      status.reportWarning({ code: reason, pack: packId, message: 'Theme pack ' + packId + (reason === 'scene-art-dimensions'
+        ? ' office art has the wrong image sizes; showing station art.' : ' office art did not load; showing station art.') });
+    }
+    /* The single art dispatch point: 'office' only once the complete group is ready, then every scene role paints
+       through the office painters in the same passes, footprints and depth keys; otherwise the complete station. */
+    const artMode = () => (office && office.state === 'ready' ? 'office' : 'station');
+    const stationArt = { paintStatic: station.paintStatic, desk: station.paintDesk, helperDesk: station.paintHelperDesk, chair: station.paintChair,
+      partition: station.paintPartition, apron: station.paintApronProp, planningDesk: station.paintPlanningDesk, viewer: station.paintViewer,
+      screen: station.paintObservatoryScreen, telescope: station.paintTelescope, plant: station.paintPlant, lamp: station.paintLamp, drone: station.paintDrone };
+    const artPainters = () => (artMode() === 'office' ? office.painters : stationArt);
 
     function measure() {
       const width = canvas.clientWidth || canvas.width || 1, height = canvas.clientHeight || canvas.height || 1, ratio = dprOf();
@@ -550,14 +726,16 @@ const ObserverView = (() => {
     // ---------- static layer cache ----------
     function staticFor() {
       const resolution = cacheResolution(scene.bounds, camera.zoom, dpr);
-      const key = scene.revision + '#' + signature + '#' + resolution;
+      const key = scene.revision + '#' + signature + '#' + resolution + '#' + artMode();
       if (staticLayer && staticLayer.key === key) return staticLayer;
       // Floor, never ceil: the continuous budget holds for the integer backing store too (≤ 4 MP, ≤ 4096 per axis).
       const b = scene.bounds, spanX = Math.max(1, b.maxX - b.minX), spanY = Math.max(1, b.maxY - b.minY);
       const width = Math.max(1, Math.floor(spanX * resolution)), height = Math.max(1, Math.floor(spanY * resolution));
       const layer = makeCanvas(width, height), layerCtx = layer.getContext('2d'), sx = width / spanX, sy = height / spanY;
       layerCtx.setTransform(sx, 0, 0, sy, -b.minX * sx, -b.minY * sy);
-      paintStatic(layerCtx, scene);
+      // Office pixel art stays crisp when magnified; it is only smoothed when the bucket shrinks it.
+      if (artMode() === 'office') layerCtx.imageSmoothingEnabled = resolution < 1;
+      artPainters().paintStatic(layerCtx, scene);
       staticLayer = { key, canvas: layer, resolution, bounds: b, builds: (staticLayer ? staticLayer.builds : 0) + 1 };
       return staticLayer;
     }
@@ -565,7 +743,7 @@ const ObserverView = (() => {
     // ---------- space background (screen space, deterministic) ----------
     // Three depth layers: far dust (dense, dim, slow parallax), mid stars, and a few near bright ones with
     // cross rays. Nebula haze and shooting stars are ambient; everything freezes when stale or reduced.
-    const STAR_TINTS = ['#cfe6ff', '#ffffff', '#9fd8ff', '#ffe9c4', '#c9fff3'];
+    const STAR_TINTS = ['star-cool', 'star-white', 'star-blue', 'star-warm', 'star-teal'];
     function starfield() {
       if (stars) return stars;
       let seed = hash('starfield');
@@ -582,7 +760,7 @@ const ObserverView = (() => {
       const bright = [];
       for (let i = 0; i < 14; i++) bright.push({ x: next(), y: next(), depth: 0.12, size: 2, a: 0.75 + next() * 0.25, tint: STAR_TINTS[Math.floor(next() * 2)], twinkle: true, period: 2600 + next() * 2600, phase: next() * Math.PI * 2, ray: 4 + next() * 5 });
       const nebulae = [];
-      for (let i = 0; i < 4; i++) nebulae.push({ x: next(), y: next(), r: 0.18 + next() * 0.22, hue: i % 2 ? 'rgba(63,216,232,' : 'rgba(150,96,220,', a: 0.05 + next() * 0.05 });
+      for (let i = 0; i < 4; i++) nebulae.push({ x: next(), y: next(), r: 0.18 + next() * 0.22, hue: i % 2 ? 'nebula-cyan' : 'nebula-violet', a: 0.05 + next() * 0.05 });
       stars = { far: layer(520, 0.02, [0.85, 0.97], [0.12, 0.3], 0.08), mid: layer(260, 0.06, [0.6, 0.9], [0.3, 0.5], 0.35), bright, nebulae };
       return stars;
     }
@@ -592,7 +770,7 @@ const ObserverView = (() => {
         const sx = animate ? camera.tx * star.depth * shiftScale : 0, sy = animate ? camera.ty * star.depth * shiftScale : 0;
         const x = ((star.x * w + sx) % w + w) % w, y = ((star.y * h + sy) % h + h) % h;
         const pulse = star.twinkle && animate ? 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(now / star.period * Math.PI * 2 + star.phase)) : 1;
-        ctx.globalAlpha = star.a * pulse; ctx.fillStyle = star.tint;
+        ctx.globalAlpha = star.a * pulse; ctx.fillStyle = C[star.tint];
         ctx.fillRect(x, y, star.size, star.size);
         if (star.ray) {
           const len = star.ray * (0.6 + 0.4 * pulse);
@@ -610,7 +788,7 @@ const ObserverView = (() => {
         const cx = ((n.x * w + sx) % w + w) % w, cy = ((n.y * h + sy) % h + h) % h, r = n.r * base;
         const breathe = animate ? 1 + 0.12 * Math.sin(now / 9000 * Math.PI * 2 + n.x * 7) : 1;
         const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * breathe);
-        g.addColorStop(0, n.hue + (n.a * 1.6) + ')'); g.addColorStop(0.55, n.hue + n.a + ')'); g.addColorStop(1, n.hue + '0)');
+        g.addColorStop(0, withAlpha(C[n.hue], n.a * 1.6)); g.addColorStop(0.55, withAlpha(C[n.hue], n.a)); g.addColorStop(1, withAlpha(C[n.hue], 0));
         ctx.fillStyle = g; ctx.fillRect(cx - r * 1.2, cy - r * 1.2, r * 2.4, r * 2.4);
       }
     }
@@ -630,7 +808,7 @@ const ObserverView = (() => {
       ctx.save();
       for (let i = steps - 1; i >= 0; i--) {
         ctx.globalAlpha = Math.max(0, fade) * 0.85 * (1 - i / steps) * (1 - i / steps);
-        ctx.fillStyle = i < 2 ? '#ffffff' : '#cfe6ff';
+        ctx.fillStyle = i < 2 ? C['shooting-star-head'] : C['shooting-star-tail'];
         ctx.fillRect(x + dx * i - 1, y + dy * i - 1, 2, 2);
       }
       ctx.restore();
@@ -649,7 +827,7 @@ const ObserverView = (() => {
       for (const star of plainStarfield()) {
         const x = ((star.x * viewport.width + shiftX) % viewport.width + viewport.width) % viewport.width, y = ((star.y * viewport.height + shiftY) % viewport.height + viewport.height) % viewport.height;
         ctx.globalAlpha = star.twinkle && animate ? star.a * (0.55 + 0.45 * Math.sin(now / star.period * Math.PI * 2)) : star.a;
-        ctx.fillStyle = '#cfe6ff'; ctx.fillRect(x, y, star.size, star.size);
+        ctx.fillStyle = C['plain-star']; ctx.fillRect(x, y, star.size, star.size);
       }
       ctx.globalAlpha = 1;
     }
@@ -677,8 +855,8 @@ const ObserverView = (() => {
           const bucket = Math.floor((t + i * 97 + c * 31) / 140);
           const g = RAIN_GLYPHS[(hash('g' + c + ':' + i + ':' + bucket) >>> 0) % RAIN_GLYPHS.length];
           const k = 1 - i / len;
-          if (i === 0) { ctx.globalAlpha = 0.55; ctx.fillStyle = '#d8ffe8'; }
-          else { ctx.globalAlpha = 0.06 + 0.26 * k * k; ctx.fillStyle = k > 0.6 ? '#5cff9e' : '#1f8f55'; }
+          if (i === 0) { ctx.globalAlpha = 0.55; ctx.fillStyle = C['rain-head']; }
+          else { ctx.globalAlpha = 0.06 + 0.26 * k * k; ctx.fillStyle = k > 0.6 ? C['rain-bright'] : C['rain-dim']; }
           ctx.fillText(g, x, y);
         }
       }
@@ -691,7 +869,7 @@ const ObserverView = (() => {
       const list = []; let seed = hash('pixies');
       const next = () => (seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0) / 4294967296;
       for (let i = 0; i < 26; i++) list.push({ x: next(), y: next(), vx: (next() - 0.5) * 0.012, vy: (next() - 0.5) * 0.008, amp: 6 + next() * 18, period: 2500 + next() * 4500,
-        phase: next() * Math.PI * 2, r: 1.5 + next() * 2, tint: next() < 0.5 ? [63, 216, 232] : [92, 255, 158], blink: 1500 + next() * 2500 });
+        phase: next() * Math.PI * 2, r: 1.5 + next() * 2, tint: next() < 0.5 ? 'pixie-cyan' : 'pixie-green', blink: 1500 + next() * 2500 });
       pixies = list; return pixies;
     }
     function paintPixies(now, animate) {
@@ -700,17 +878,17 @@ const ObserverView = (() => {
         const bx = ((m.x + m.vx * t) % 1 + 1) % 1 * w, by = ((m.y + m.vy * t) % 1 + 1) % 1 * h;
         const px = bx + Math.sin(now / m.period * Math.PI * 2 + m.phase) * m.amp, py = by + Math.cos(now / (m.period * 1.3) * Math.PI * 2 + m.phase) * m.amp * 0.6;
         const glow = animate ? 0.55 + 0.45 * Math.sin(now / m.blink * Math.PI * 2 + m.phase) : 0.8;
-        const [r, g, b] = m.tint, rad = m.r * (2.5 + glow * 2.5);
+        const tint = C[m.tint], rad = m.r * (2.5 + glow * 2.5);
         const halo = ctx.createRadialGradient(px, py, 0, px, py, rad);
-        halo.addColorStop(0, `rgba(${r},${g},${b},${0.35 * glow})`); halo.addColorStop(1, `rgba(${r},${g},${b},0)`);
+        halo.addColorStop(0, withAlpha(tint, 0.35 * glow)); halo.addColorStop(1, withAlpha(tint, 0));
         ctx.fillStyle = halo; ctx.fillRect(px - rad, py - rad, rad * 2, rad * 2);
         // trail: three fading echoes behind the mote along its sine path
         for (let k = 1; k <= 3; k++) {
           const back = now - k * 90, tx = ((m.x + m.vx * (animate ? back / 1000 : 0)) % 1 + 1) % 1 * w + Math.sin(back / m.period * Math.PI * 2 + m.phase) * m.amp;
           const ty = ((m.y + m.vy * (animate ? back / 1000 : 0)) % 1 + 1) % 1 * h + Math.cos(back / (m.period * 1.3) * Math.PI * 2 + m.phase) * m.amp * 0.6;
-          ctx.globalAlpha = glow * (0.5 - k * 0.13); ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.fillRect(tx - 0.5, ty - 0.5, 1, 1);
+          ctx.globalAlpha = glow * (0.5 - k * 0.13); ctx.fillStyle = opaque(tint); ctx.fillRect(tx - 0.5, ty - 0.5, 1, 1);
         }
-        ctx.globalAlpha = Math.min(1, 0.6 + glow * 0.4); ctx.fillStyle = '#ffffff'; ctx.fillRect(px - m.r * 0.5, py - m.r * 0.5, m.r, m.r);
+        ctx.globalAlpha = Math.min(1, 0.6 + glow * 0.4); ctx.fillStyle = C['pixie-core']; ctx.fillRect(px - m.r * 0.5, py - m.r * 0.5, m.r, m.r);
       }
       ctx.globalAlpha = 1;
     }
@@ -718,11 +896,11 @@ const ObserverView = (() => {
       // Distant planet arc anchored bottom-left of the stage, as in the reference.
       const radius = Math.max(viewport.width, viewport.height) * 0.42, cx = -radius * 0.35, cy = viewport.height + radius * 0.55;
       const planet = ctx.createRadialGradient(cx + radius * 0.3, cy - radius * 0.3, radius * 0.2, cx, cy, radius);
-      planet.addColorStop(0, '#1b2a3a'); planet.addColorStop(0.85, '#0b131c'); planet.addColorStop(1, 'rgba(63,216,232,0.25)');
+      planet.addColorStop(0, C['planet-core']); planet.addColorStop(0.85, C['planet-shade']); planet.addColorStop(1, C['planet-edge']);
       ctx.fillStyle = planet; ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill();
       if (fx) {
         const rim = ctx.createRadialGradient(cx, cy, radius * 0.97, cx, cy, radius * 1.12);
-        rim.addColorStop(0, 'rgba(63,216,232,0.22)'); rim.addColorStop(1, 'rgba(63,216,232,0)');
+        rim.addColorStop(0, C['planet-rim']); rim.addColorStop(1, C['planet-rim-transparent']);
         ctx.fillStyle = rim; ctx.beginPath(); ctx.arc(cx, cy, radius * 1.12, 0, Math.PI * 2); ctx.fill();
       }
     }
@@ -730,16 +908,20 @@ const ObserverView = (() => {
       // An occasional distant shuttle (ambient): eight seconds in every sixty.
       const t = now % 60000;
       if (t < 8000) { const x = viewport.width * (1.1 - (t / 8000) * 1.2), y = viewport.height * 0.12 + Math.sin(t / 900) * 4;
-        ctx.fillStyle = '#9fb3c6'; ctx.fillRect(x, y, 7, 2); ctx.fillStyle = PALETTE.window; ctx.fillRect(x + 7, y, 3, 2); }
+        ctx.fillStyle = C['shuttle-body']; ctx.fillRect(x, y, 7, 2); ctx.fillStyle = C.window; ctx.fillRect(x + 7, y, 3, 2); }
     }
     function paintSpace(now, animate) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = PALETTE.space; ctx.fillRect(0, 0, viewport.width, viewport.height);
+      // Office art: one flat warm backdrop, with or without FX; no sky, rain or motes.
+      if (artMode() === 'office') { ctx.fillStyle = C['office-backdrop']; ctx.fillRect(0, 0, viewport.width, viewport.height); return; }
+      ctx.fillStyle = C.space; ctx.fillRect(0, 0, viewport.width, viewport.height);
+      // ambientFx none keeps only the backdrop fill (and rain when FX are on); backgroundFx none drops only the rain.
+      if (!decor) { if (fx && rain) paintMatrixRain(now, animate); return; }
       if (!fx) { paintPlainStars(now, animate); paintPlanet(); if (animate) paintShuttle(now); return; }
       const field = starfield();
       paintNebulae(field.nebulae, now, animate);
       paintStarLayer(field.far, now, animate, 1);
-      paintMatrixRain(now, animate);
+      if (rain) paintMatrixRain(now, animate);
       paintStarLayer(field.mid, now, animate, 1);
       paintStarLayer(field.bright, now, animate, 1);
       paintPlanet();
@@ -751,20 +933,20 @@ const ObserverView = (() => {
        hulls, well above deck height so it never reads as a walkway. Its state is the stream's real health: marching
        cyan dashes while available, still grey dashes when stale or unreachable. Nothing ever travels along it. */
     function paintObservation(link, now, animate) {
-      const live = link.health === 'available', color = live ? PALETTE.cyan : HULL_DOWN;
+      const live = link.health === 'available', color = live ? C.cyan : C.idle;
       const a = P({ ...link.from, z: 2.2 }), b = P({ ...link.to, z: 2.2 });
       ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = live ? 1.6 : 1.2; ctx.globalAlpha = live ? 0.85 : 0.45;
       ctx.setLineDash([3, 5]); ctx.lineDashOffset = live && animate ? -(now / 60) % 8 : 0;
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
       for (const end of [a, b]) { ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(end.x, end.y - 4); ctx.lineTo(end.x + 4, end.y); ctx.lineTo(end.x, end.y + 4); ctx.lineTo(end.x - 4, end.y); ctx.closePath(); ctx.fill(); }
-      if (live) glow(ctx, { ...link.to, z: 2.2 }, 14, PALETTE.cyan, animate ? 0.3 + 0.25 * Math.sin(now / 600) : 0.4);
+      if (live) glow(ctx, { ...link.to, z: 2.2 }, 14, C.cyan, animate ? 0.3 + 0.25 * Math.sin(now / 600) : 0.4);
       ctx.restore();
     }
     /* Relay line (config mail: "relay"): mailroom to mailroom. Configured but never observed, it is a broken amber dash
        ("relay configured · not seen"); only observed relayed traffic makes it a solid mail link. */
     function paintRelay(relay, now, animate) {
       const active = relay.state === 'active', a = P({ ...relay.from, z: 0.6 }), b = P({ ...relay.to, z: 0.6 });
-      ctx.save(); ctx.strokeStyle = PALETTE.amber;
+      ctx.save(); ctx.strokeStyle = C.amber;
       if (active) { ctx.lineWidth = 3; ctx.globalAlpha = 0.9; }
       else { ctx.lineWidth = 1.5; ctx.globalAlpha = 0.55; ctx.setLineDash([2, 9]); }
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.restore();
@@ -772,7 +954,7 @@ const ObserverView = (() => {
     }
     // ---------- FX: glow and sparks on the station itself (world space, deterministic) ----------
     // A burst of rising pixel sparks around a screen point. Each spark loops on its own phase so there is no state.
-    function sparks(x, y, key, now, { count = 6, color = '#ffffff', alt = null, rise = 18, spread = 14, life = 1400, size = 2, gravity = 0 } = {}) {
+    function sparks(x, y, key, now, { count = 6, color = C.spark, alt = null, rise = 18, spread = 14, life = 1400, size = 2, gravity = 0 } = {}) {
       const base = hash(key);
       for (let i = 0; i < count; i++) {
         const h1 = hash(key + ':' + i), h2 = hash(i + '#' + key);
@@ -800,7 +982,7 @@ const ObserverView = (() => {
         for (let k = 0; k < 10; k++) {
           const d = (((now - k * 40) / lap + rect.y * 0.01 + (k >= 5 ? 0.5 : 0)) % 1) * total;
           const pt = d < len1 ? { x: a.x + (b.x - a.x) * d / len1, y: a.y + (b.y - a.y) * d / len1 } : { x: b.x + (c.x - b.x) * (d - len1) / len2, y: b.y + (c.y - b.y) * (d - len1) / len2 };
-          ctx.globalAlpha = (1 - (k % 5) / 5) * 0.95 * strength; ctx.fillStyle = (k % 5) === 0 ? '#ffffff' : accent;
+          ctx.globalAlpha = (1 - (k % 5) / 5) * 0.95 * strength; ctx.fillStyle = (k % 5) === 0 ? C['rim-spark'] : accent;
           ctx.fillRect(pt.x - 1.5, pt.y - 1.5, 3, 3);
         }
       }
@@ -817,19 +999,19 @@ const ObserverView = (() => {
         // Corner beacons: a spark fountain at each lit corner, staggered.
         if (animate) for (const corner of [{ x: r.x, y: r.y + r.h }, { x: r.x + r.w, y: r.y + r.h }, { x: r.x + r.w, y: r.y }]) {
           const at = P(corner);
-          sparks(at.x, at.y - 2, 'corner' + platform.key + corner.x + ',' + corner.y, now, { count: 10, color: platform.accent, alt: '#ffffff', rise: 40, spread: 14, life: 1500, size: 2 });
+          sparks(at.x, at.y - 2, 'corner' + platform.key + corner.x + ',' + corner.y, now, { count: 10, color: platform.accent, alt: C['platform-spark'], rise: 40, spread: 14, life: 1500, size: 2 });
         }
       }
       // Mailroom and observatory get their own halos.
       const hub = scene.mail.rect;
       if (onStage(hub, 1, 48)) {
-        glow(ctx, { x: hub.x + hub.w / 2, y: hub.y + hub.h / 2, z: -1 }, Math.max(hub.w, hub.h) * 24, PALETTE.amber, animate ? 0.25 + 0.1 * Math.sin(now / 2600 * Math.PI * 2) : 0.3);
-        rimBloom(hub, PALETTE.amber, now, animate, 0.8);
+        glow(ctx, { x: hub.x + hub.w / 2, y: hub.y + hub.h / 2, z: -1 }, Math.max(hub.w, hub.h) * 24, C.amber, animate ? 0.25 + 0.1 * Math.sin(now / 2600 * Math.PI * 2) : 0.3);
+        rimBloom(hub, C.amber, now, animate, 0.8);
       }
       if (scene.observatory && onStage(scene.observatory.rect, 1, 48)) {
         const o = scene.observatory.rect;
-        glow(ctx, { x: o.x + o.w / 2, y: o.y + o.h / 2, z: -1 }, Math.max(o.w, o.h) * 24, PALETTE.cyan, animate ? 0.25 + 0.1 * Math.sin(now / 2900 * Math.PI * 2 + 1) : 0.3);
-        rimBloom(o, PALETTE.cyan, now, animate, 0.8);
+        glow(ctx, { x: o.x + o.w / 2, y: o.y + o.h / 2, z: -1 }, Math.max(o.w, o.h) * 24, C.cyan, animate ? 0.25 + 0.1 * Math.sin(now / 2900 * Math.PI * 2 + 1) : 0.3);
+        rimBloom(o, C.cyan, now, animate, 0.8);
       }
     }
     // Furniture FX: every wall unit, corner prop, walkway, chair, apron lamp, mail prop and observatory prop lights up.
@@ -844,42 +1026,42 @@ const ObserverView = (() => {
             const key = platform.key + ':' + index + ':' + slot, kind = kinds[hash(key) % kinds.length], o = hash(key) % 6;
             const c = { x: unit.x + unit.w / 2, y: unit.y + unit.h / 2 }, at = z => P({ ...c, z });
             if (kind === 'rack') {
-              glow(ctx, { ...c, z: 0.7 }, 30, PALETTE.cyan, 0.45 * pulse(1300, o));
+              glow(ctx, { ...c, z: 0.7 }, 30, C.cyan, 0.45 * pulse(1300, o));
               // LED column: blinking pixels up the rack face.
               const top = at(1.05), bottom = at(0.2);
-              for (let i = 0; i < 5; i++) { const on = animate ? (Math.floor(now / 180) + i * 3 + o) % 5 !== 0 : true; ctx.globalAlpha = on ? 0.95 : 0.2; ctx.fillStyle = i % 2 ? STATUS.working : PALETTE.cyan; ctx.fillRect(bottom.x - 6 + i * 3, bottom.y - (bottom.y - top.y) * (i / 5) - 1, 2, 2); }
+              for (let i = 0; i < 5; i++) { const on = animate ? (Math.floor(now / 180) + i * 3 + o) % 5 !== 0 : true; ctx.globalAlpha = on ? 0.95 : 0.2; ctx.fillStyle = i % 2 ? S.working : C.cyan; ctx.fillRect(bottom.x - 6 + i * 3, bottom.y - (bottom.y - top.y) * (i / 5) - 1, 2, 2); }
               ctx.globalAlpha = 1;
             } else if (kind === 'screen') {
-              glow(ctx, { ...c, z: 0.9 }, 44, PALETTE.cyan, 0.7 * pulse(900, o));
-              if (animate) { const a = at(1.1); sparks(a.x, a.y, 'scr' + key, now, { count: 8, color: '#bffcff', alt: '#ffffff', rise: 26, spread: 20, life: 1000, size: 2 }); }
+              glow(ctx, { ...c, z: 0.9 }, 44, C.cyan, 0.7 * pulse(900, o));
+              if (animate) { const a = at(1.1); sparks(a.x, a.y, 'scr' + key, now, { count: 8, color: C['screen-spark'], alt: C['furniture-spark'], rise: 26, spread: 20, life: 1000, size: 2 }); }
             } else if (kind === 'vent') {
-              glow(ctx, { ...c, z: 0.4 }, 30, PALETTE.window, 0.55 * pulse(2200, o));
-              if (animate) { const a = at(0.5); sparks(a.x, a.y, 'vent' + key, now, { count: 7, color: PALETTE.window, alt: '#ffd9a0', rise: 34, spread: 14, life: 1800, size: 2 }); }
+              glow(ctx, { ...c, z: 0.4 }, 30, C.window, 0.55 * pulse(2200, o));
+              if (animate) { const a = at(0.5); sparks(a.x, a.y, 'vent' + key, now, { count: 7, color: C.window, alt: C['vent-spark'], rise: 34, spread: 14, life: 1800, size: 2 }); }
             } else if (kind === 'board') {
               glow(ctx, { ...c, z: 0.8 }, 34, platform.accent, 0.6 * pulse(1700, o));
             } else if (kind === 'tank') {
-              glow(ctx, { ...c, z: 0.6 }, 36, PALETTE.cyan, 0.7 * pulse(1100, o));
-              if (animate) { const a = at(0.15); sparks(a.x, a.y, 'tank' + key, now, { count: 8, color: '#9ff3ff', alt: '#ffffff', rise: 28, spread: 10, life: 2200, size: 2 }); }
+              glow(ctx, { ...c, z: 0.6 }, 36, C.cyan, 0.7 * pulse(1100, o));
+              if (animate) { const a = at(0.15); sparks(a.x, a.y, 'tank' + key, now, { count: 8, color: C['tank-spark'], alt: C['furniture-spark'], rise: 28, spread: 10, life: 2200, size: 2 }); }
             } else if (kind === 'planter') {
-              glow(ctx, { ...c, z: 0.6 }, 34, STATUS.working, 0.6 * pulse(2600, o));
-              if (animate) { const a = at(0.7); sparks(a.x, a.y, 'plant' + key, now, { count: 7, color: STATUS.working, alt: '#ffffff', rise: 30, spread: 18, life: 2400, size: 2 }); }
+              glow(ctx, { ...c, z: 0.6 }, 34, S.working, 0.6 * pulse(2600, o));
+              if (animate) { const a = at(0.7); sparks(a.x, a.y, 'plant' + key, now, { count: 7, color: S.working, alt: C['furniture-spark'], rise: 30, spread: 18, life: 2400, size: 2 }); }
             } else if (kind === 'crates') {
-              glow(ctx, { ...c, z: 0.7 }, 30, PALETTE.window, 0.5 * pulse(1900, o));
+              glow(ctx, { ...c, z: 0.7 }, 30, C.window, 0.5 * pulse(1900, o));
             } else {
               // mast: strong red beacon with a flare and sparks.
               const beacon = { ...c, z: 2.2 }, b = pulse(700, o);
-              glow(ctx, beacon, 40, '#ff5a3a', 0.9 * b);
-              const a = at(2.2); ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.8 * b; ctx.fillStyle = '#ffd0c0';
+              glow(ctx, beacon, 40, C['mast-glow'], 0.9 * b);
+              const a = at(2.2); ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.8 * b; ctx.fillStyle = C['mast-core'];
               ctx.fillRect(a.x - 12, a.y - 0.5, 24, 1); ctx.fillRect(a.x - 0.5, a.y - 12, 1, 24); ctx.restore();
-              if (animate) sparks(a.x, a.y, 'mast' + key, now, { count: 8, color: '#ff8a6a', alt: '#ffffff', rise: 30, spread: 20, life: 1200, size: 2, gravity: 14 });
+              if (animate) sparks(a.x, a.y, 'mast' + key, now, { count: 8, color: C['mast-spark'], alt: C['furniture-spark'], rise: 30, spread: 20, life: 1200, size: 2, gravity: 14 });
             }
           });
         });
         // Apron lamps: big warm halos with a sparkle.
         for (const region of platform.decorationRegions) if (region.kind === 'apron') {
           const r = region.rect, post = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
-          glow(ctx, { ...post, z: 1.6 }, 46, PALETTE.window, 0.8 * pulse(1500, r.x));
-          if (animate) { const a = P({ ...post, z: 1.6 }); sparks(a.x, a.y, 'apron' + platform.key + r.x, now, { count: 6, color: '#ffe0b0', alt: '#ffffff', rise: 22, spread: 16, life: 1300, size: 2 }); }
+          glow(ctx, { ...post, z: 1.6 }, 46, C.window, 0.8 * pulse(1500, r.x));
+          if (animate) { const a = P({ ...post, z: 1.6 }); sparks(a.x, a.y, 'apron' + platform.key + r.x, now, { count: 6, color: C['apron-spark'], alt: C['furniture-spark'], rise: 22, spread: 16, life: 1300, size: 2 }); }
         }
       }
       // Walkways: cyan running lights streaming along both long edges.
@@ -890,56 +1072,56 @@ const ObserverView = (() => {
           const f = ((now / lap) + k / beads + side * 0.5) % 1, d = f * len;
           const pt = along ? { x: r.x + d, y: side ? r.y + r.h : r.y } : { x: side ? r.x + r.w : r.x, y: r.y + d };
           const a = P(pt); ctx.save(); ctx.globalCompositeOperation = 'lighter';
-          for (let t = 0; t < 4; t++) { const back = along ? P({ x: pt.x - t * 0.35, y: pt.y }) : P({ x: pt.x, y: pt.y - t * 0.35 }); ctx.globalAlpha = (1 - t / 4) * 0.9; ctx.fillStyle = t === 0 ? '#ffffff' : PALETTE.cyan; ctx.fillRect(back.x - 1, back.y - 1, 2, 2); }
+          for (let t = 0; t < 4; t++) { const back = along ? P({ x: pt.x - t * 0.35, y: pt.y }) : P({ x: pt.x, y: pt.y - t * 0.35 }); ctx.globalAlpha = (1 - t / 4) * 0.9; ctx.fillStyle = t === 0 ? C['walkway-light-head'] : C.cyan; ctx.fillRect(back.x - 1, back.y - 1, 2, 2); }
           ctx.restore();
         }
       }
       // Chairs: a small ring; desks: every desk blooms, idle ones dimly.
       for (const worker of scene.workers) {
         const sc = worker.scale || 1, status = worker.row.status, idle = status !== 'working' && status !== 'blocked';
-        if (onStage(worker.desk, 1.2, 24)) glow(ctx, { x: worker.desk.x + worker.desk.w / 2, y: worker.desk.y + worker.desk.h / 2, z: 0.6 }, 40 * sc, idle ? worker.accent : status === 'working' ? PALETTE.cyan : STATUS.blocked, (idle ? 0.3 : 0.6) * pulse(1400, hash(worker.id) % 6));
+        if (onStage(worker.desk, 1.2, 24)) glow(ctx, { x: worker.desk.x + worker.desk.w / 2, y: worker.desk.y + worker.desk.h / 2, z: 0.6 }, 40 * sc, idle ? worker.accent : status === 'working' ? C.cyan : S.blocked, (idle ? 0.3 : 0.6) * pulse(1400, hash(worker.id) % 6));
         const c = worker.chair; if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.5 * pulse(2000, c.x); isoEllipse(ctx, c, 0.34 * sc, worker.accent, null, 1.5); ctx.restore(); }
       }
       // Mailroom: tower bloom, pad pulse rings, pod and chute sparks.
       const mail = scene.mail;
       if (onStage(mail.rect, 3.5, 48)) {
         const t = mail.tower, top = { x: t.x + t.w / 2, y: t.y + t.h / 2, z: 2 };
-        glow(ctx, top, 90, PALETTE.amber, 0.7 * pulse(1800));
-        glow(ctx, { ...top, z: 0.2 }, 70, PALETTE.window, 0.45 * pulse(2300, 1));
-        for (const pad of mail.pads) { glow(ctx, pad, 46, PALETTE.amber, 0.55 * pulse(1600, pad.x)); if (animate) { const ring = ((now / 1600) + pad.x) % 1; ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (1 - ring) * 0.8; isoEllipse(ctx, pad, 0.5 + 0.9 * ring, PALETTE.window, null, 1.5); ctx.restore(); } }
-        if (animate) { const a = P({ ...top, z: 3.4 }); sparks(a.x, a.y, 'tower', now, { count: 12, color: PALETTE.window, alt: '#ffffff', rise: 40, spread: 30, life: 1500, size: 2, gravity: 10 }); }
-        const pod = mail.pod[0]; glow(ctx, { x: pod.x, y: pod.y, z: 0.8 }, 36, PALETTE.cyan, 0.7 * pulse(1000));
-        if (animate) { const a = P({ x: pod.x, y: pod.y, z: 0.9 }); sparks(a.x, a.y, 'pod', now, { count: 7, color: '#bffcff', alt: '#ffffff', rise: 26, spread: 16, life: 1100, size: 2 }); }
+        glow(ctx, top, 90, C.amber, 0.7 * pulse(1800));
+        glow(ctx, { ...top, z: 0.2 }, 70, C.window, 0.45 * pulse(2300, 1));
+        for (const pad of mail.pads) { glow(ctx, pad, 46, C.amber, 0.55 * pulse(1600, pad.x)); if (animate) { const ring = ((now / 1600) + pad.x) % 1; ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (1 - ring) * 0.8; isoEllipse(ctx, pad, 0.5 + 0.9 * ring, C.window, null, 1.5); ctx.restore(); } }
+        if (animate) { const a = P({ ...top, z: 3.4 }); sparks(a.x, a.y, 'tower', now, { count: 12, color: C.window, alt: C['tower-spark'], rise: 40, spread: 30, life: 1500, size: 2, gravity: 10 }); }
+        const pod = mail.pod[0]; glow(ctx, { x: pod.x, y: pod.y, z: 0.8 }, 36, C.cyan, 0.7 * pulse(1000));
+        if (animate) { const a = P({ x: pod.x, y: pod.y, z: 0.9 }); sparks(a.x, a.y, 'pod', now, { count: 7, color: C['pod-spark'], alt: C['furniture-spark'], rise: 26, spread: 16, life: 1100, size: 2 }); }
       }
       // Observatory: screens, telescope tip, plant and the beacon light.
       const ob = scene.observatory;
       if (ob && onStage(ob.rect, 3, 48)) {
-        for (const screen of ob.screens) { const r = screen.rect; glow(ctx, { x: r.x + r.w / 2, y: r.y + 0.3, z: screen.height * 0.6 }, 44, PALETTE.cyan, 0.7 * pulse(1200, r.x)); if (animate) { const a = P({ x: r.x + r.w / 2, y: r.y + 0.3, z: screen.height }); sparks(a.x, a.y, 'obs' + r.x, now, { count: 7, color: '#bffcff', alt: '#ffffff', rise: 24, spread: 20, life: 1100, size: 2 }); } }
-        for (const tel of ob.telescopes) { const r = tel.rect, tip = { x: r.x + r.w / 2, y: r.y + r.h / 2 - 0.7, z: tel.height - 0.3 }; glow(ctx, tip, 34, PALETTE.cyan, 0.9 * pulse(800)); if (animate) { const a = P(tip); sparks(a.x, a.y, 'tel' + r.x, now, { count: 6, color: '#ffffff', alt: PALETTE.cyan, rise: 22, spread: 18, life: 1000, size: 2 }); } }
-        const pr = ob.plant.rect; glow(ctx, { x: pr.x + 0.5, y: pr.y + 0.5, z: 1.2 }, 36, STATUS.working, 0.6 * pulse(2400));
-        if (animate) { const a = P({ x: pr.x + 0.5, y: pr.y + 0.5, z: 1.5 }); sparks(a.x, a.y, 'obplant', now, { count: 6, color: STATUS.working, alt: '#ffffff', rise: 28, spread: 16, life: 2200, size: 2 }); }
-        const light = ob.light.rect; glow(ctx, { x: light.x + light.w / 2, y: light.y + light.h / 2 + 1.5, z: 0.5 }, 110, PALETTE.cyan, 0.5 * pulse(2000));
+        for (const screen of ob.screens) { const r = screen.rect; glow(ctx, { x: r.x + r.w / 2, y: r.y + 0.3, z: screen.height * 0.6 }, 44, C.cyan, 0.7 * pulse(1200, r.x)); if (animate) { const a = P({ x: r.x + r.w / 2, y: r.y + 0.3, z: screen.height }); sparks(a.x, a.y, 'obs' + r.x, now, { count: 7, color: C['observatory-spark'], alt: C['furniture-spark'], rise: 24, spread: 20, life: 1100, size: 2 }); } }
+        for (const tel of ob.telescopes) { const r = tel.rect, tip = { x: r.x + r.w / 2, y: r.y + r.h / 2 - 0.7, z: tel.height - 0.3 }; glow(ctx, tip, 34, C.cyan, 0.9 * pulse(800)); if (animate) { const a = P(tip); sparks(a.x, a.y, 'tel' + r.x, now, { count: 6, color: C['telescope-spark'], alt: C.cyan, rise: 22, spread: 18, life: 1000, size: 2 }); } }
+        const pr = ob.plant.rect; glow(ctx, { x: pr.x + 0.5, y: pr.y + 0.5, z: 1.2 }, 36, S.working, 0.6 * pulse(2400));
+        if (animate) { const a = P({ x: pr.x + 0.5, y: pr.y + 0.5, z: 1.5 }); sparks(a.x, a.y, 'obplant', now, { count: 6, color: S.working, alt: C['furniture-spark'], rise: 28, spread: 16, life: 2200, size: 2 }); }
+        const light = ob.light.rect; glow(ctx, { x: light.x + light.w / 2, y: light.y + light.h / 2 + 1.5, z: 0.5 }, 110, C.cyan, 0.5 * pulse(2000));
       }
     }
     // Sparks and screen bloom on an active desk: the monitors throw light and the working lamp crackles.
     function paintDeskFx(worker, now, live) {
       const d = worker.desk, status = worker.row.status, scale = worker.scale || 1;
       if (status !== 'working' && status !== 'blocked') return;
-      const color = STATUS[status], helper = worker.kind === 'helper';
+      const color = S[status], helper = worker.kind === 'helper';
       const pulse = live ? 0.6 + 0.4 * Math.sin(now / (status === 'working' ? 700 : 1600) * Math.PI * 2 + hash(worker.id) % 7) : 0.7;
       // Screen bloom above the monitors.
       const screens = helper ? [{ x: d.x + d.w - 0.2, y: d.y + 0.26, z: 0.9 }] : [{ x: d.x + 0.25, y: d.y + 0.35, z: 1.1 }, { x: d.x + 1.75, y: d.y + 0.35, z: 1.1 }];
-      for (const sc of screens) glow(ctx, sc, 34 * scale, status === 'working' ? PALETTE.cyan : color, 0.85 * pulse);
+      for (const sc of screens) glow(ctx, sc, 34 * scale, status === 'working' ? C.cyan : color, 0.85 * pulse);
       if (!live) return;
-      for (const sc of screens) { const at = P(sc); sparks(at.x, at.y, 'screen' + worker.id + sc.x, now, { count: status === 'working' ? 9 : 3, color: status === 'working' ? '#bffcff' : color, alt: '#ffffff', rise: 22 * scale, spread: 14 * scale, life: 1000, size: 2 }); }
+      for (const sc of screens) { const at = P(sc); sparks(at.x, at.y, 'screen' + worker.id + sc.x, now, { count: status === 'working' ? 9 : 3, color: status === 'working' ? C['desk-spark'] : color, alt: C['desk-spark-alt'], rise: 22 * scale, spread: 14 * scale, life: 1000, size: 2 }); }
       // Lamp crackle.
       const lamp = P(helper ? { x: d.x + 0.15, y: d.y + d.h - 0.15, z: 0.5 } : { x: d.x + 1.85, y: d.y + 0.9, z: 0.6 });
-      sparks(lamp.x, lamp.y, 'lamp' + worker.id, now, { count: 5, color, alt: '#ffffff', rise: 16 * scale, spread: 8 * scale, life: 850, size: 2 });
+      sparks(lamp.x, lamp.y, 'lamp' + worker.id, now, { count: 5, color, alt: C['desk-spark-alt'], rise: 16 * scale, spread: 8 * scale, life: 850, size: 2 });
     }
     // Agent aura: a status-coloured halo behind the body and a ring of orbiting motes in front of it.
     function paintAgentAura(worker, foot, extent, now, live, before) {
       const status = worker.row.status, size = worker.scale || 1, working = status === 'working', blocked = status === 'blocked';
-      const color = working ? STATUS.working : blocked ? STATUS.blocked : worker.accent;
+      const color = working ? S.working : blocked ? S.blocked : worker.accent;
       // Vigour (1 fresh … 0 after days idle) thins the aura, motes and sparks of a resting agent; working is always 1.
       let vigour = 1; if (!working) { try { vigour = Math.max(0, Math.min(1, Number(idleVigour(worker.id)))); if (!Number.isFinite(vigour)) vigour = 1; } catch (_) { vigour = 1; } }
       const chestY = extent ? extent.top + extent.h * 0.45 : foot.y - CREW_HEIGHT * size * 0.5;
@@ -948,7 +1130,7 @@ const ObserverView = (() => {
         const radius = (working ? 54 : blocked ? 44 : 30) * size;
         ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (working ? 0.95 : blocked ? 0.65 : 0.32 * (0.25 + 0.75 * vigour)) * pulse;
         const g = ctx.createRadialGradient(foot.x, chestY, 0, foot.x, chestY, radius);
-        g.addColorStop(0, color); g.addColorStop(0.5, color); g.addColorStop(1, 'rgba(0,0,0,0)');
+        g.addColorStop(0, color); g.addColorStop(0.5, color); g.addColorStop(1, C['aura-transparent']);
         ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(foot.x, chestY, radius, radius * 1.25, 0, 0, Math.PI * 2); ctx.fill();
         // Floor ring under the feet.
         ctx.globalAlpha = (working ? 0.45 : 0.2) * pulse; ctx.strokeStyle = color; ctx.lineWidth = 1.5;
@@ -965,17 +1147,17 @@ const ObserverView = (() => {
         const bob = Math.sin(ang * 2) * 6 * size;
         const x = foot.x + Math.cos(ang) * rx, y = chestY + Math.sin(ang) * ry + bob;
         const front = Math.sin(ang) > 0;
-        ctx.globalAlpha = (front ? 0.95 : 0.35) * pulse; ctx.fillStyle = i % 2 ? '#ffffff' : color;
+        ctx.globalAlpha = (front ? 0.95 : 0.35) * pulse; ctx.fillStyle = i % 2 ? C['aura-spark'] : color;
         ctx.fillRect(x - 1, y - 1, 2, 2);
         // short tail
         for (let k = 1; k <= 3; k++) { const ta = ang - k * 0.18; ctx.globalAlpha = (front ? 0.5 : 0.15) * pulse * (1 - k / 4); ctx.fillRect(foot.x + Math.cos(ta) * rx - 0.5, chestY + Math.sin(ta) * ry + Math.sin(ta * 2) * 6 * size - 0.5, 1, 1); }
       }
       ctx.restore();
-      if (live && working) sparks(foot.x, chestY - 10 * size, 'head' + worker.id, now, { count: 8, color: '#ffffff', alt: color, rise: 28 * size, spread: 22 * size, life: 1200, size: 2 });
+      if (live && working) sparks(foot.x, chestY - 10 * size, 'head' + worker.id, now, { count: 8, color: C['aura-spark'], alt: color, rise: 28 * size, spread: 22 * size, life: 1200, size: 2 });
       if (live && blocked) sparks(foot.x, chestY, 'ember' + worker.id, now, { count: 3, color, rise: 26 * size, spread: 12 * size, life: 2600, size: 2 });
       // Resting agents keep a crackle that dies away with idle age: plenty after a fresh turn, none after days.
       const rest = Math.round(7 * vigour);
-      if (live && !working && !blocked && rest) sparks(foot.x, chestY - 8 * size, 'rest' + worker.id, now, { count: rest, color: worker.accent, alt: '#ffffff', rise: (14 + 14 * vigour) * size, spread: 18 * size, life: 1500, size: 2 });
+      if (live && !working && !blocked && rest) sparks(foot.x, chestY - 8 * size, 'rest' + worker.id, now, { count: rest, color: worker.accent, alt: C['star-white'], rise: (14 + 14 * vigour) * size, spread: 18 * size, life: 1500, size: 2 });
     }
 
     // ---------- crew ----------
@@ -990,10 +1172,12 @@ const ObserverView = (() => {
       const foot = P(actor.point), body = bodyFor(worker), size = worker.scale || 1, scale = SPRITE_SCALE * size;
       // Our own contact shadow (the shared one is skipped): a small projected floor ellipse under every body, fallback
       // included, culled only by its own footprint.
-      if (onStage({ x: actor.point.x - 0.3, y: actor.point.y - 0.3, w: 0.6, h: 0.6 }, 0, 2)) isoEllipse(ctx, actor.point, 0.28 * size, null, 'rgba(0,0,0,0.38)');
+      if (onStage({ x: actor.point.x - 0.3, y: actor.point.y - 0.3, w: 0.6, h: 0.6 }, 0, 2)) isoEllipse(ctx, actor.point, 0.28 * size, null, C['contact-shadow']);
       body.px = foot.x; body.py = foot.y; body.dir = actor.direction;
       body.state = actor.pose === 'walk' ? 'walk' : 'idle'; body.working = actor.pose === 'working'; body.sitting = actor.pose === 'working';
-      if (fx) paintAgentAura(worker, foot, null, now, !reduced, true);
+      // Auras are station decoration; office crew carry only their contact shadow, plates and rings.
+      const art = artMode(), aura = fx && decor && art === 'station';
+      if (aura) paintAgentAura(worker, foot, null, now, !reduced, true);
       ctx.save(); ctx.translate(foot.x, foot.y); ctx.scale(scale, scale); ctx.translate(-foot.x, -foot.y);
       let extent = null;
       // The stateful sprite call always runs (pose, facing, frame and skin loading advance); the shared seam rejects
@@ -1007,18 +1191,30 @@ const ObserverView = (() => {
       // Long-idle agents fade toward grey (canvas filter where supported; elsewhere the hover text still says so).
       let tint = 'none'; try { tint = idleFilter(idleLevel(worker.id)); } catch (_) {}
       if (tint !== 'none' && 'filter' in ctx) ctx.filter = tint;
-      try { extent = sprites && sprites.drawBody ? sprites.drawBody(ctx, body, now, { reducedMotion: reduced, skipGroundShadow: true, shouldPaint }) : null; } catch (_) { extent = null; }
+      /* Station art (and pending/failed office art) draws through the sprite engine; office art only with a ready
+         replacement group, since default android frames never stand in an office. */
+      const appearance = { reducedMotion: reduced, skipGroundShadow: true, shouldPaint };
+      if (office && art === 'station') appearance.group = 'default';
+      if (art === 'station' || replacementReady(body.skin)) {
+        try { extent = sprites && sprites.drawBody ? sprites.drawBody(ctx, body, now, appearance) : null; } catch (_) { extent = null; }
+      }
       ctx.restore();
-      if (!extent) {
+      // A replacement group still loading draws canonical frames now; repaint once it settles, ready or failed.
+      if (replacementLoading(body.skin)) watchSkin(body.skin, true);
+      if (!extent && art === 'office') {
+        // Original procedural human at the existing fallback bounds; a ready group's missing frames still repaint.
+        if (replacementReady(body.skin)) watchSkin(body.skin);
+        extent = office.composition.human(ctx, foot, { size, sitting: body.sitting, accent: worker.accent, skin: body.skin });
+      } else if (!extent) {
         watchSkin(body.skin);
         // Visible upright fallback silhouette while sprites load or are unavailable.
         const h = CREW_HEIGHT * size, w = 16 * size;
-        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = worker.accent; ctx.strokeStyle = '#05080a'; if (tint !== 'none' && 'filter' in ctx) ctx.filter = tint;
+        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = worker.accent; ctx.strokeStyle = C['body-outline']; if (tint !== 'none' && 'filter' in ctx) ctx.filter = tint;
         ctx.beginPath(); ctx.roundRect ? ctx.roundRect(foot.x - w / 2, foot.y - h * 0.72, w, h * 0.72, 6 * size) : ctx.rect(foot.x - w / 2, foot.y - h * 0.72, w, h * 0.72); ctx.fill(); ctx.stroke();
         ctx.beginPath(); ctx.arc(foot.x, foot.y - h * 0.84, 6 * size, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore();
         extent = { top: foot.y - h, w, h, fallback: true };
       } else if (!extent.fallback) extent = { top: foot.y + (extent.top - foot.y) * scale, w: extent.w * scale, h: extent.h * scale, painted: extent.painted };
-      if (fx) paintAgentAura(worker, foot, extent, now, !reduced, false);
+      if (aura) paintAgentAura(worker, foot, extent, now, !reduced, false);
       // Hit regions are in CSS pixels; DPR only touches the backing store.
       const left = camera.tx + (foot.x - extent.w / 2) * camera.zoom, top = camera.ty + extent.top * camera.zoom;
       const width = extent.w * camera.zoom, height = extent.h * camera.zoom, padX = Math.max(0, (MIN_HIT - width) / 2), padY = Math.max(0, (MIN_HIT - height) / 2);
@@ -1028,47 +1224,52 @@ const ObserverView = (() => {
     }
 
     /* A frozen scene repaints when a skin set it is waiting on finishes loading. One pending job per skin; a job
-       that settles without frames (pre-init or missing set) never schedules work, so no loop is parked on assets. */
-    function watchSkin(skin) {
+       that settles without frames (pre-init or missing set) never schedules work, so no loop is parked on assets.
+       `settled` (a replacement group was loading) repaints on any settlement: the state has left 'loading', so the
+       next paint never re-arms the same job. */
+    function replacementIs(skin, state) {
+      if (!sprites || typeof sprites.replacementState !== 'function') return false;
+      try { return sprites.replacementState(skin) === state; } catch (_) { return false; }
+    }
+    const replacementLoading = skin => replacementIs(skin, 'loading'), replacementReady = skin => replacementIs(skin, 'ready');
+    function watchSkin(skin, settled = false) {
       if (!sprites || typeof sprites.ensureSkin !== 'function') return;
       let job; try { job = sprites.ensureSkin(skin); } catch (_) { return; }
-      if (!job || typeof job.then !== 'function' || readiness.get(skin) === job) return;
-      readiness.set(skin, job);
-      job.then(ok => { if (ok && running && readiness.get(skin) === job) invalidate(); }, () => {});
+      if (!job || typeof job.then !== 'function') return;
+      const known = readiness.get(skin);
+      if (known && known.job === job) { if (settled) known.settled = true; return; }
+      const entry = { job, settled };
+      readiness.set(skin, entry);
+      const done = ok => { if ((ok || entry.settled) && running && readiness.get(skin) === entry) invalidate(); };
+      job.then(done, () => done(false));
     }
 
     // ---------- mail (airborne pass) ----------
     function paintMail(mail, now, animate) {
       for (const { envelope, lift } of stackEnvelopes(mail.envelopes)) {
         const anchor = P(envelope.point), at = { x: anchor.x, y: anchor.y - lift }; ctx.save(); ctx.globalAlpha = envelope.alpha;
-        ctx.fillStyle = envelope.color; ctx.fillRect(at.x - 7, at.y - 5, 14, 10); ctx.strokeStyle = '#3a2508'; ctx.strokeRect(at.x - 7, at.y - 5, 14, 10);
+        ctx.fillStyle = envelope.color; ctx.fillRect(at.x - 7, at.y - 5, 14, 10); ctx.strokeStyle = C['envelope-outline']; ctx.strokeRect(at.x - 7, at.y - 5, 14, 10);
         ctx.beginPath(); ctx.moveTo(at.x - 7, at.y - 5); ctx.lineTo(at.x, at.y + 1); ctx.lineTo(at.x + 7, at.y - 5); ctx.stroke();
         if (envelope.count > 1 || envelope.label || envelope.mark) {
-          ctx.font = "13px VT323, monospace"; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = envelope.mark ? '#ff6b5a' : PALETTE.ink;
+          ctx.font = "13px VT323, monospace"; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = envelope.mark ? C['envelope-mark'] : C.ink;
           ctx.fillText([envelope.label, envelope.count > 1 ? '×' + envelope.count : '', envelope.mark ? '!' : ''].filter(Boolean).join(' '), at.x + 10, at.y);
         }
         ctx.restore();
       }
-      for (const drone of mail.drones) {
-        const at = P(drone.point), bob = drone.parked && animate ? Math.sin(now / 500) : 0;
-        isoEllipse(ctx, { ...drone.point, z: 0 }, 0.25, null, 'rgba(0,0,0,0.35)');
-        ctx.fillStyle = '#2a3138'; ctx.fillRect(at.x - 9, at.y - 4 + bob, 18, 6);
-        ctx.fillStyle = '#4a5560'; ctx.fillRect(at.x - 12, at.y - 6 + bob, 6, 2); ctx.fillRect(at.x + 6, at.y - 6 + bob, 6, 2);
-        const running = drone.parcels[0] || PALETTE.cyan; ctx.fillStyle = running; ctx.fillRect(at.x - 1, at.y - 3 + bob, 2, 2);
-        drone.parcels.forEach((color, index) => { ctx.fillStyle = color; ctx.fillRect(at.x - 4, at.y + 3 + index * 3 + bob, 8, 2); });
-      }
+      const art = artPainters();
+      for (const drone of mail.drones) art.drone(ctx, drone, now, animate);
     }
 
     // ---------- plates (screen space) ----------
-    function textPlate(text, x, y, { accent = PALETTE.dim, size = 13, color = PALETTE.ink, priority = 0, force = false, dash = null } = {}) {
+    function textPlate(text, x, y, { accent = C.dim, size = 13, color = C.ink, priority = 0, force = false, dash = null } = {}) {
       ctx.font = size + 'px VT323, monospace';
       const width = Math.ceil(ctx.measureText(text).width) + 12, height = Math.round(size * 1.35);
       return { text, x: Math.round(x - width / 2), y: Math.round(y - height), w: width, h: height, accent, size, color, priority, force, dash };
     }
     function drawPlate(plate) {
       const { x, y } = plate;
-      ctx.fillStyle = PALETTE.glass; ctx.fillRect(x, y, plate.w, plate.h);
-      ctx.globalAlpha = 0.12; ctx.fillStyle = '#000'; for (let sy = y + 2; sy < y + plate.h - 1; sy += 3) ctx.fillRect(x + 1, sy, plate.w - 2, 1); ctx.globalAlpha = 1;
+      ctx.fillStyle = C.glass; ctx.fillRect(x, y, plate.w, plate.h);
+      ctx.globalAlpha = 0.12; ctx.fillStyle = C['plate-scanline']; for (let sy = y + 2; sy < y + plate.h - 1; sy += 3) ctx.fillRect(x + 1, sy, plate.w - 2, 1); ctx.globalAlpha = 1;
       ctx.strokeStyle = plate.accent; if (plate.dash) ctx.setLineDash(plate.dash); ctx.strokeRect(x + 0.5, y + 0.5, plate.w - 1, plate.h - 1); ctx.setLineDash([]);
       ctx.fillStyle = plate.accent; ctx.fillRect(x + 1, y, plate.w - 2, 2);
       ctx.font = plate.size + 'px VT323, monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = plate.color;
@@ -1088,12 +1289,12 @@ const ObserverView = (() => {
         const at = screen(platform.sign), size = signSize(tier === 'overview' ? 30 : 22), listed = overflowByPlatform.get(platform.key);
         const label = clipText((platform.name || 'Unassigned').toUpperCase() + (platform.annex ? ' +' + platform.annex : '') + ' · ' + (platformCounts.get(platform.key) || 0) + (listed ? ' · +' + listed + ' listed' : ''), viewport.width * 0.4, size);
         plates.push(textPlate(label, at.x, at.y - 6, { accent: platform.accent, size, color: platform.accent, priority: 50 }));
-        if (isStale || staleKeys.has(platform.key)) plates.push(textPlate('STALE', at.x, at.y - 6 - size * 1.5, { accent: STATUS.blocked, size: 13, color: STATUS.blocked, priority: 49, dash: [3, 3] }));
+        if (isStale || staleKeys.has(platform.key)) plates.push(textPlate('STALE', at.x, at.y - 6 - size * 1.5, { accent: C.stale, size: 13, color: C.stale, priority: 49, dash: [3, 3] }));
         if (tier !== 'overview') for (const section of platform.sections) {
           const point = screen(section.sign), text = clipText(String(section.label || section.repo || ''), 160, 13);
           // A selected repository's sign changes colour only: same text, size and priority, so placement never moves.
           const repo = repositories.has(section.repo) ? section.repo : null, chosen = repo !== null && repo === selectedRepo;
-          if (text) plates.push({ ...textPlate(text, point.x, point.y - 2, { accent: chosen ? PALETTE.repo : shade(platform.accent, -0.3), size: 13, color: chosen ? PALETTE.repo : '#c7d4cc', priority: 30 }), repo });
+          if (text) plates.push({ ...textPlate(text, point.x, point.y - 2, { accent: chosen ? C.repo : shade(platform.accent, -0.3), size: 13, color: chosen ? C.repo : C['repo-label'], priority: 30 }), repo });
         }
       }
       for (const ship of scene.ships || []) {
@@ -1106,49 +1307,49 @@ const ObserverView = (() => {
         const seen = !live && ship.observedAt ? ' · last seen ' + Model.age(ship.observedAt) : '';
         const label = ship.local ? '● THIS MACHINE' : (live ? '● ' : '○ ') + String(ship.id).toUpperCase() + ' · ' + (ship.agents || 0) + ' agent' + (ship.agents === 1 ? '' : 's') +
           (live ? '' : ship.health === 'stale' ? ' · STALE' + seen : ' · ' + (ship.reason || 'unreachable'));
-        const color = ship.local ? PALETTE.cyan : live ? PALETTE.amber : HULL_DOWN;
+        const color = ship.local ? C.cyan : live ? C.amber : C.idle;
         const plate = textPlate(clipText(label, viewport.width * 0.5, signSize(20)), at.x, at.y - (ship.local ? 0 : 10), { accent: color, size: signSize(20), color, priority: ship.local ? 48 : 58, dash: live ? null : [3, 3], force: !ship.local && hullOnScreen });
         plates.push({ ...plate,
           ...(onShip ? { ship: { host: ship.local ? null : ship.id } } : {}) });
         // A remote mailroom names its host once zoomed in; at overview the narrow gap belongs to the link label.
         if (!ship.local && ship.mail && tier !== 'overview') {
           const tower = ship.mail.tower, mailAt = screen({ x: tower.x + tower.w / 2, y: tower.y + tower.h / 2, z: 3.4 });
-          plates.push(textPlate('MAILROOM · ' + String(ship.id), mailAt.x, mailAt.y, { accent: PALETTE.amber, size: signSize(16), color: PALETTE.window, priority: 44 }));
+          plates.push(textPlate('MAILROOM · ' + String(ship.id), mailAt.x, mailAt.y, { accent: C.amber, size: signSize(16), color: C.window, priority: 44 }));
         }
       }
       // Link labels: the observation link says what it is (and its real state); a relay says whether it was ever seen.
       for (const link of scene.links || []) {
         const mid = screen({ x: link.from.x, y: (link.from.y + link.to.y) / 2, z: 2.2 }), live = link.health === 'available';
         plates.push(textPlate(live ? 'ssh · observing' : link.health === 'stale' ? 'ssh · stale' : 'ssh · unreachable', mid.x, mid.y - 4,
-          { accent: live ? PALETTE.cyan : HULL_DOWN, size: 12, color: live ? PALETTE.cyan : HULL_DOWN, priority: 46, dash: [2, 2] }));
+          { accent: live ? C.cyan : C.idle, size: 12, color: live ? C.cyan : C.idle, priority: 46, dash: [2, 2] }));
       }
       for (const relay of scene.relays || []) {
         // Labelled where it leaves this machine's mailroom, clear of the gap the observation link labels use.
         const start = screen({ x: relay.from.x, y: relay.from.y + 4, z: 0.6 });
-        plates.push(textPlate(relay.state === 'active' ? 'relay · mail' : 'relay configured · not seen', start.x, start.y, { accent: PALETTE.amber, size: 12, color: PALETTE.amber, priority: 45, dash: relay.state === 'active' ? null : [3, 3] }));
+        plates.push(textPlate(relay.state === 'active' ? 'relay · mail' : 'relay configured · not seen', start.x, start.y, { accent: C.amber, size: 12, color: C.amber, priority: 45, dash: relay.state === 'active' ? null : [3, 3] }));
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
-      plates.push(textPlate('MAILROOM · llm-bus', hubAt.x, hubAt.y, { accent: PALETTE.amber, size: signSize(18), color: PALETTE.window, priority: 45 }));
+      plates.push(textPlate('MAILROOM · llm-bus', hubAt.x, hubAt.y, { accent: C.amber, size: signSize(18), color: C.window, priority: 45 }));
       const observatory = scene.observatory;
       if (observatory) {
         const r = observatory.rect, signAt = screen({ x: r.x + r.w / 2, y: r.y, z: 3.6 });
-        plates.push({ ...textPlate(observatory.overseer ? 'OBSERVATORY ✦ overseer' : 'OBSERVATORY ✦', signAt.x, signAt.y, { accent: PALETTE.cyan, size: signSize(18), color: PALETTE.cyan, priority: 44 }), observatory: true });
+        plates.push({ ...textPlate(observatory.overseer ? 'OBSERVATORY ✦ overseer' : 'OBSERVATORY ✦', signAt.x, signAt.y, { accent: C.cyan, size: signSize(18), color: C.cyan, priority: 44 }), observatory: true });
         // Ambient: dim, no status dot, never a hover, focus or inspection target.
-        if (tier !== 'overview' && observatory.viewer) { const head = screen({ ...observatory.viewer.point, z: 2 }); plates.push(textPlate(observatory.viewer.label + ' · ambient', head.x, head.y, { accent: '#3a444e', size: 12, color: PALETTE.dim, priority: 6 })); }
+        if (tier !== 'overview' && observatory.viewer) { const head = screen({ ...observatory.viewer.point, z: 2 }); plates.push(textPlate(observatory.viewer.label + ' · ambient', head.x, head.y, { accent: C['viewer-label'], size: 12, color: C.dim, priority: 6 })); }
       }
       const inspectedId = inspected();
       for (const region of anchors) {
         const worker = workerIndex.get(region.id); if (!worker) continue;
         const status = worker.row.status, head = region.head;
-        if (tier === 'overview') { ctx.fillStyle = STATUS[status] || STATUS.unknown; ctx.beginPath(); ctx.arc(head.x, head.y - 5, 2.5, 0, Math.PI * 2); ctx.fill(); }
+        if (tier === 'overview') { ctx.fillStyle = S[status] || S.unknown; ctx.beginPath(); ctx.arc(head.x, head.y - 5, 2.5, 0, Math.PI * 2); ctx.fill(); }
         // Worker name plates carry their worker as a title target.
         if (region.id === hovered) plates.push({ ...textPlate(clipText(hoverLabel(region.id) || nameFor(region.id), viewport.width - 24, 15), head.x, head.y - 6, { accent: worker.accent, size: 15, priority: 100, force: true }), target: region.id });
-        else if (region.id === focused) plates.push({ ...textPlate(clipText(hoverLabel(region.id) || nameFor(region.id), viewport.width - 24, 14), head.x, head.y - 6, { accent: PALETTE.focus, size: 14, priority: 90, force: true }), target: region.id });
-        else if (status === 'blocked') plates.push({ ...textPlate(nameFor(region.id) + ' · WAITING', head.x, head.y - 6, { accent: STATUS.blocked, size: 13, color: STATUS.blocked, priority: 70 }), target: region.id });
-        else if (tier === 'detail' && worker.row.worktree) plates.push(textPlate(clipText(String(worker.row.worktree), 110, 12), head.x, region.foot + 18, { accent: shade(worker.accent, -0.35), size: 12, color: PALETTE.dim, priority: 10 }));
-        if (region.id === inspectedId) plates.push(textPlate('⌕ inspecting', head.x, head.y - 30, { accent: PALETTE.focus, size: 13, color: PALETTE.focus, priority: 95 }));
+        else if (region.id === focused) plates.push({ ...textPlate(clipText(hoverLabel(region.id) || nameFor(region.id), viewport.width - 24, 14), head.x, head.y - 6, { accent: C.focus, size: 14, priority: 90, force: true }), target: region.id });
+        else if (status === 'blocked') plates.push({ ...textPlate(nameFor(region.id) + ' · WAITING', head.x, head.y - 6, { accent: S.blocked, size: 13, color: S.blocked, priority: 70 }), target: region.id });
+        else if (tier === 'detail' && worker.row.worktree) plates.push(textPlate(clipText(String(worker.row.worktree), 110, 12), head.x, region.foot + 18, { accent: shade(worker.accent, -0.35), size: 12, color: C.dim, priority: 10 }));
+        if (region.id === inspectedId) plates.push(textPlate('⌕ inspecting', head.x, head.y - 30, { accent: C.focus, size: 13, color: C.focus, priority: 95 }));
         const listed = overflowByWorker.get(region.id);
-        if (listed && tier !== 'overview') plates.push(textPlate('+' + listed + ' helper' + (listed > 1 ? 's' : '') + ' in list', head.x, region.foot + 34, { accent: shade(worker.accent, -0.35), size: 12, color: PALETTE.dim, priority: 8 }));
+        if (listed && tier !== 'overview') plates.push(textPlate('+' + listed + ' helper' + (listed > 1 ? 's' : '') + ' in list', head.x, region.foot + 34, { accent: shade(worker.accent, -0.35), size: 12, color: C.dim, priority: 8 }));
       }
       const accepted = placePlates(stagePlates(plates, viewport));
       for (const plate of accepted) drawPlate(plate);
@@ -1164,7 +1365,7 @@ const ObserverView = (() => {
         const worker = workerIndex.get(region.id);
         if (!worker || !needsAttention(worker, workerStale(worker))) continue;
         const bob = animate && !reducedMotion() ? Math.round(Math.sin(now / 380 + hash(worker.id) % 7) * 2) : 0;
-        const box = paintAttention(ctx, region.head.x, region.head.y - (tier === 'overview' ? 14 : 34) + bob);
+        const box = paintAttention(ctx, region.head.x, region.head.y - (tier === 'overview' ? 14 : 34) + bob, C);
         attentionRegions.push({ id: region.id, ...box });
       }
       const obsPlate = accepted.find(plate => plate.observatory); observatoryRegion = obsPlate ? { left: obsPlate.x, top: obsPlate.y, width: obsPlate.w, height: obsPlate.h } : null;
@@ -1173,7 +1374,7 @@ const ObserverView = (() => {
       const hover = regions.find(region => region.id === hovered);
       if (hover) {
         const worker = workerIndex.get(hovered), r = hover, arm = 6;
-        ctx.strokeStyle = worker ? worker.accent : PALETTE.focus; ctx.lineWidth = 2;
+        ctx.strokeStyle = worker ? worker.accent : C.focus; ctx.lineWidth = 2;
         for (const [x, y, dx, dy] of [[r.left, r.top, 1, 1], [r.left + r.width, r.top, -1, 1], [r.left, r.top + r.height, 1, -1], [r.left + r.width, r.top + r.height, -1, -1]]) {
           ctx.beginPath(); ctx.moveTo(x, y + dy * arm); ctx.lineTo(x, y); ctx.lineTo(x + dx * arm, y); ctx.stroke();
         }
@@ -1201,32 +1402,37 @@ const ObserverView = (() => {
       const mail = mailFrame ? mailFrame(now) : { drones: [], envelopes: [] };
       paintSpace(now, animate);
       ctx.setTransform(dpr * camera.zoom, 0, 0, dpr * camera.zoom, dpr * camera.tx, dpr * camera.ty);
-      const layer = staticFor(), b = layer.bounds;
+      const layer = staticFor(), b = layer.bounds, A = artPainters(), stationArt = A !== office?.painters, ambient = fx && decor && stationArt;
+      // Office art: nearest-neighbour while magnified (crisp pixel outlines), smoothed only when shrunk.
+      if (!stationArt) ctx.imageSmoothingEnabled = camera.zoom * dpr <= layer.resolution;
       ctx.drawImage(layer.canvas, b.minX, b.minY, b.maxX - b.minX, b.maxY - b.minY);
-      // Hub ambience: radar dish and beacon sweep (cosmetic).
-      const t = scene.mail.tower, top = { x: t.x + t.w / 2, y: t.y + t.h / 2, z: 3.2 }, at = P(top);
-      const sweep = animate ? (now / 20000) * Math.PI * 2 : 0.6;
-      ctx.strokeStyle = PALETTE.rail; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(at.x, at.y); ctx.lineTo(at.x, at.y - 14); ctx.stroke(); ctx.lineWidth = 1;
-      ctx.fillStyle = '#3a444e'; ctx.beginPath(); ctx.ellipse(at.x, at.y - 16, 14 * Math.abs(Math.cos(sweep)) + 3, 6, 0, 0, Math.PI * 2); ctx.fill();
-      glow(ctx, { ...top, z: 3.9 }, 22, PALETTE.amber, animate ? 0.35 + 0.3 * Math.max(0, Math.sin(now / 4000 * Math.PI * 2)) : 0.35);
+      if (!stationArt) ctx.imageSmoothingEnabled = camera.zoom * dpr < 1;
+      // Hub ambience: radar dish and beacon sweep (cosmetic, station only).
+      if (stationArt) {
+        const t = scene.mail.tower, top = { x: t.x + t.w / 2, y: t.y + t.h / 2, z: 3.2 }, at = P(top);
+        const sweep = animate ? (now / 20000) * Math.PI * 2 : 0.6;
+        ctx.strokeStyle = C.rail; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(at.x, at.y); ctx.lineTo(at.x, at.y - 14); ctx.stroke(); ctx.lineWidth = 1;
+        ctx.fillStyle = C['radar-sweep']; ctx.beginPath(); ctx.ellipse(at.x, at.y - 16, 14 * Math.abs(Math.cos(sweep)) + 3, 6, 0, 0, Math.PI * 2); ctx.fill();
+        if (decor) glow(ctx, { ...top, z: 3.9 }, 22, C.amber, animate ? 0.35 + 0.3 * Math.max(0, Math.sin(now / 4000 * Math.PI * 2)) : 0.35);
+      }
       for (const relay of scene.relays || []) paintRelay(relay, now, animate);
       for (const link of scene.links || []) paintObservation(link, now, animate);
       // Depth-sorted solid furniture, apron posts and crew. Wholly offscreen furniture is never submitted; every crew
       // body is submitted so its sprite state advances, and the shared sprite seam skips its pixels when off stage.
       const items = [], zoom = camera.zoom;
       visibleArea = { left: -camera.tx / zoom, top: -camera.ty / zoom, right: (viewport.width - camera.tx) / zoom, bottom: (viewport.height - camera.ty) / zoom };
-      if (fx) paintPlatformGlow(now, animate);
-      if (fx) paintFurnitureFx(now, animate);
+      if (ambient) paintPlatformGlow(now, animate);
+      if (ambient) paintFurnitureFx(now, animate);
       const byId = new Map(actors.map(actor => [actor.id, actor])), staleKeys = new Set();
       for (const worker of scene.workers) {
         // Each worker animates on its own row's freshness; a stale row freezes its desk, sprite breathing and blinks.
         const own = workerStale(worker), live = animate && !own;
         if (own) staleKeys.add(worker.platformKey);
-        const paintStation = worker.kind === 'helper' ? paintHelperDesk : paintDesk;
+        const paintStation = worker.kind === 'helper' ? A.helperDesk : A.desk;
         if (onStage(worker.desk, 1.1, 16)) items.push({ depth: middle(worker.desk), draw: () => paintStation(ctx, worker, now, live) });
-        if (fx && onStage(worker.desk, 1.1, 24)) items.push({ depth: middle(worker.desk) + 0.01, draw: () => paintDeskFx(worker, now, live) });
+        if (ambient && onStage(worker.desk, 1.1, 24)) items.push({ depth: middle(worker.desk) + 0.01, draw: () => paintDeskFx(worker, now, live) });
         const c = worker.chair;
-        if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: c.x + c.y - 0.6, draw: () => paintChair(ctx, worker) });
+        if (onStage({ x: c.x - 0.3, y: c.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: c.x + c.y - 0.6, draw: () => A.chair(ctx, worker) });
         const actor = byId.get(worker.id);
         if (actor) items.push({ depth: actor.point.x + actor.point.y, tie: worker.id, draw: () => paintCrew(worker, actor, now, !live) });
       }
@@ -1234,24 +1440,22 @@ const ObserverView = (() => {
       if (observatory) {
         const { desk, chair, viewer } = observatory;
         // With an overseer seated, its own desk, chair and body come from the worker loop; the ambient set stands down.
-        if (!observatory.overseer && onStage(desk, 1.1, 16)) items.push({ depth: middle(desk), draw: () => {
-          box(ctx, desk, 0.55, { top: '#22303a', left: '#101a20', right: '#17232a', edge: 'rgba(63,216,232,0.12)' });
-          line(ctx, { x: desk.x + 0.3, y: desk.y + desk.h, z: 0.6 }, { x: desk.x + desk.w - 0.3, y: desk.y + desk.h, z: 0.6 }, PALETTE.cyan, 1.5, 0.5);
-        } });
-        if (!observatory.overseer && onStage({ x: chair.x - 0.3, y: chair.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: chair.x + chair.y - 0.6, draw: () => paintChair(ctx, { chair }) });
-        if (viewer && onStage({ x: viewer.point.x - 0.5, y: viewer.point.y - 0.5, w: 1, h: 1 }, 2, 12)) items.push({ depth: viewer.point.x + viewer.point.y, tie: viewer.id, draw: () => paintViewer(ctx, viewer) });
-        for (const screen of observatory.screens) if (onStage(screen.rect, screen.height, 8)) items.push({ depth: middle(screen.rect), draw: () => paintObservatoryScreen(ctx, screen, now, animate) });
-        for (const telescope of observatory.telescopes) if (onStage(telescope.rect, telescope.height, 8)) items.push({ depth: middle(telescope.rect), draw: () => paintTelescope(ctx, telescope, now, animate) });
-        if (onStage(observatory.plant.rect, observatory.plant.height, 8)) items.push({ depth: middle(observatory.plant.rect), draw: () => paintPlant(ctx, observatory.plant) });
-        if (onStage(observatory.light.rect, observatory.light.height, 8)) items.push({ depth: middle(observatory.light.rect), draw: () => paintLamp(ctx, observatory.light) });
+        if (!observatory.overseer && onStage(desk, 1.1, 16)) items.push({ depth: middle(desk), draw: () => A.planningDesk(ctx, desk) });
+        if (!observatory.overseer && onStage({ x: chair.x - 0.3, y: chair.y - 0.45, w: 0.6, h: 0.6 }, 0.9, 4)) items.push({ depth: chair.x + chair.y - 0.6, draw: () => A.chair(ctx, { chair }) });
+        if (viewer && onStage({ x: viewer.point.x - 0.5, y: viewer.point.y - 0.5, w: 1, h: 1 }, 2, 12)) items.push({ depth: viewer.point.x + viewer.point.y, tie: viewer.id, draw: () => A.viewer(ctx, viewer) });
+        for (const screen of observatory.screens) if (onStage(screen.rect, screen.height, 8)) items.push({ depth: middle(screen.rect), draw: () => A.screen(ctx, screen, now, animate) });
+        for (const telescope of observatory.telescopes) if (onStage(telescope.rect, telescope.height, 8)) items.push({ depth: middle(telescope.rect), draw: () => A.telescope(ctx, telescope, now, animate) });
+        if (onStage(observatory.plant.rect, observatory.plant.height, 8)) items.push({ depth: middle(observatory.plant.rect), draw: () => A.plant(ctx, observatory.plant) });
+        if (onStage(observatory.light.rect, observatory.light.height, 8)) items.push({ depth: middle(observatory.light.rect), draw: () => A.lamp(ctx, observatory.light) });
       }
+      // Partition runs are cut into whole units so they depth-sort with crew; `end` marks a run's exposed last unit.
       for (const platform of scene.platforms) for (const section of platform.sections) for (const wall of section.partitions || [])
         for (let x = wall.x; x < wall.x + wall.w - 1e-6; x++) {
-          const unit = { x, y: wall.y, w: Math.min(1, wall.x + wall.w - x), h: wall.h };
-          if (onStage(unit, 0.6, 4)) items.push({ depth: unit.x + unit.w / 2 + unit.y + unit.h / 2, draw: () => paintPartition(ctx, unit, platform.accent) });
+          const unit = { x, y: wall.y, w: Math.min(1, wall.x + wall.w - x), h: wall.h }, end = x + 1 >= wall.x + wall.w - 1e-6;
+          if (onStage(unit, 0.6, 4)) items.push({ depth: unit.x + unit.w / 2 + unit.y + unit.h / 2, draw: () => A.partition(ctx, unit, platform.accent, end) });
         }
       for (const platform of scene.platforms) for (const region of platform.decorationRegions) if (region.kind === 'apron' && onStage(region.rect, 1.8, 44))
-        items.push({ depth: region.rect.x + region.rect.y + 1, draw: () => paintApronProp(ctx, region) });
+        items.push({ depth: region.rect.x + region.rect.y + 1, draw: () => A.apron(ctx, region) });
       items.sort((a, b) => a.depth - b.depth || String(a.tie || '').localeCompare(String(b.tie || '')));
       for (const item of items) item.draw();
       /* The selected repository's crew, roots and helpers alike, each get a ring; a worker whose own fresh status is
@@ -1260,16 +1464,16 @@ const ObserverView = (() => {
       if (selectedRepo != null) for (const worker of scene.workers) {
         const point = worker.row.repoId === selectedRepo && pointOf(worker.id); if (!point) continue;
         const working = worker.row.status === 'working' && !workerStale(worker), radius = 0.62 * worker.scale;
-        if (working) glow(ctx, point, 40 * worker.scale, PALETTE.repo, 0.4);
-        isoEllipse(ctx, point, radius, PALETTE.repo, null, working ? 3 : 1.5);
-        if (working) isoEllipse(ctx, point, radius + 0.16, PALETTE.repo, null, 1);
+        if (working && stationArt) glow(ctx, point, 40 * worker.scale, C.repo, 0.4);
+        isoEllipse(ctx, point, radius, C.repo, null, working ? 3 : 1.5);
+        if (working) isoEllipse(ctx, point, radius + 0.16, C.repo, null, 1);
       }
       // Focus and hover floor rings sit over the floor but under the plates.
-      for (const [id, color] of [[focused, PALETTE.focus], [hovered, null]]) {
+      for (const [id, color] of [[focused, C.focus], [hovered, null]]) {
         const point = id && pointOf(id); if (!point) continue;
         const worker = workerIndex.get(id);
         ctx.save(); ctx.globalAlpha = color && animate ? 0.6 + 0.35 * Math.sin(now / 450) : 0.85;
-        isoEllipse(ctx, point, 0.55, color || (worker ? worker.accent : PALETTE.focus), null, 2); ctx.restore();
+        isoEllipse(ctx, point, 0.55, color || (worker ? worker.accent : C.focus), null, 2); ctx.restore();
       }
       // A zoomed platform keeps a thin outline in its accent, so platform focus reads as a mode.
       const zoomed = mode === 'platform' && scene.platforms.find(value => value.key === platform);
@@ -1279,10 +1483,11 @@ const ObserverView = (() => {
       const chosenShip = chosenHost !== undefined && scene.ships.find(ship => (ship.local ? null : ship.id) === chosenHost);
       if (chosenShip) {
         ctx.save(); ctx.lineWidth = 2.5 / Math.max(zoom, 0.25); ctx.globalAlpha = animate ? 0.75 + 0.2 * Math.sin(now / 700) : 0.9;
-        poly(ctx, rectPoly(chosenShip.rect, -2.4), null, chosenShip.local ? PALETTE.cyan : shipLive(chosenShip) ? PALETTE.amber : HULL_DOWN); ctx.restore();
+        poly(ctx, rectPoly(chosenShip.rect, -2.4), null, chosenShip.local ? C.cyan : shipLive(chosenShip) ? C.amber : C.idle); ctx.restore();
       }
       paintMail(mail, now, animate);
-      if (isStale) { ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.save(); ctx.globalCompositeOperation = 'saturation'; ctx.fillStyle = 'rgba(128,128,128,0.45)'; ctx.fillRect(0, 0, viewport.width, viewport.height); ctx.restore(); }
+      if (!stationArt) ctx.imageSmoothingEnabled = true;
+      if (isStale) { ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.save(); ctx.globalCompositeOperation = 'saturation'; ctx.fillStyle = C['stale-overlay']; ctx.fillRect(0, 0, viewport.width, viewport.height); ctx.restore(); }
       // Hovering a worker's own name plate keeps it hovered, so the plate stays put to be clicked.
       if (pointer) { hovered = Scene.hitTest(pointer, regions) || titleAt(pointer); canvas.style.cursor = drag && drag.moved ? 'grabbing' : hovered || signAt(pointer) ? 'pointer' : 'grab'; }
       paintPlates(isStale, staleKeys, now, animate);
@@ -1407,6 +1612,7 @@ const ObserverView = (() => {
       cacheBuilds: () => (staticLayer ? staticLayer.builds : 0), running: () => running, titleRegions: () => titleRegions.map(region => ({ ...region })),
       signRegions: () => signRegions.map(region => ({ ...region })), attentionRegions: () => attentionRegions.map(region => ({ ...region })) };
   }
-  return { create, needsAttention, paintAttention, idleFilter, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
+  const { furnishing, furnishings, paintDesk, paintHelperDesk } = DEFAULT_ART;
+  return { create, needsAttention, paintAttention, idleFilter, lodFor, cacheResolution, statusSignature, placePlates, stagePlates, stackEnvelopes, visibleFaces, furnishing, furnishings, officeFurnishing, wallUnits, paintDesk, paintHelperDesk, WALL_KINDS, CORNER_KINDS, PALETTE, STATUS, LOD, SPRITE_SCALE, CREW_HEIGHT };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverView;
