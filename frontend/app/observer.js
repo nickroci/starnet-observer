@@ -306,7 +306,7 @@
   function busHealth(bus) {
     if (!bus) return 'Bus not read yet';
     if (bus.health === 'available') return 'Live · llm-bus';
-    const reason = { missing: 'No bus database found', unsupported: 'Bus reader needs Node with node:sqlite', unreadable: 'Bus unreadable',
+    const reason = { missing: 'No bus database found', unsupported: 'Bus SQLite support unavailable; use the supported Bun runtime', unreadable: 'Bus unreadable',
       unstable: 'Bus busy while copying · retrying' }[bus.reason] || 'Bus unavailable';
     return reason + (bus.observedAt ? ' · last known ' + ObserverModel.age(bus.observedAt) : '');
   }

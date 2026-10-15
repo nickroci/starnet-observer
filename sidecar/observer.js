@@ -94,7 +94,7 @@ function makeObserver(options = {}) {
   const endpoint = options.endpoint || process.env.HERDR_SOCKET_PATH || path.join(os.homedir(), '.config/herdr/herdr.sock');
   const identities = options.identities || makeIdentityResolver({ execute, now, endpoint, readConfiguration: options.readIdentityConfiguration, readProcessBirth: options.readProcessBirth });
   let identityProofs = new Map();
-  let lastGood = [], aggregate = aggregateRows([]), refreshedAt = null, pending = null, mail = null;
+  let lastGood = [], aggregate = aggregateRows([]), refreshStartedAt = null, pending = null, mail = null;
   const sources = { herdr: { health: 'unavailable', observedAt: null, reason: 'not-observed' },
     desktop: { health: 'unavailable', observedAt: null, reason: 'not-observed' } };
   const rowsBySource = { herdr: [], desktop: [], helper: [] };
@@ -111,12 +111,22 @@ function makeObserver(options = {}) {
       const inventoryAt = now();
       const rows = [], seen = new Set(), proofs = new Map();
       const identityRefresh = { endpointTimedOut: false };
+      const panes = [];
       for (const pane of inventory.result.agents) {
         if (!pane || !['codex', 'claude'].includes(pane.agent)) continue;
         if (typeof pane.pane_id !== 'string' || !/^[A-Za-z0-9:_-]{1,100}$/.test(pane.pane_id) || seen.has(pane.pane_id)) throw new Error('Invalid pane identity');
         seen.add(pane.pane_id);
+        panes.push(pane);
+      }
+      let resolved;
+      if (identities.resolveMany) resolved = await identities.resolveMany(panes, identityRefresh);
+      else {
+        resolved = [];
+        for (const pane of panes) resolved.push(await identities.resolve(pane, identityRefresh));
+      }
+      for (const [index, pane] of panes.entries()) {
         const id = 'obs_' + crypto.createHash('sha256').update(endpoint + '\0' + pane.pane_id).digest('hex').slice(0, 24);
-        const identity = await identities.resolve(pane, identityRefresh);
+        const identity = resolved[index];
         const sessionId = identity.sessionId;
         if (identity.proof) proofs.set(id, identity.proof);
         const tool = await transcripts.read(id, pane.agent, sessionId);
@@ -161,7 +171,6 @@ function makeObserver(options = {}) {
     transcripts.retain(new Set(lastGood.filter(row => row.source !== 'desktop').map(row => row.id)));
     // Bus health is independent of Herdr: its own read, observedAt and stale retention.
     try { mail = bus.read(); } catch (_) { mail = { rows: mail ? mail.rows : [], observedAt: mail ? mail.observedAt : null, health: 'unavailable', reason: 'unreadable' }; }
-    refreshedAt = now();
     return snapshot();
   }
   function snapshot() {
@@ -174,7 +183,8 @@ function makeObserver(options = {}) {
   }
   function get() {
     if (pending) return pending;
-    if (refreshedAt !== null && now() - refreshedAt < 2000) return Promise.resolve(snapshot());
+    if (refreshStartedAt !== null && now() - refreshStartedAt < 2000) return Promise.resolve(snapshot());
+    refreshStartedAt = now();
     pending = refresh().finally(() => { pending = null; });
     return pending;
   }

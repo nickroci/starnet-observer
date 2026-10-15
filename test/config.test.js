@@ -55,14 +55,21 @@ try {
   fs.writeFileSync(file, ' '.repeat(65537));
   assert.throws(() => loadConfig([], file), /64 KiB/);
   const server = path.join(__dirname, '../server.js');
-  const invalid = spawnSync(process.execPath, [server, '--config', file], { cwd: folder, encoding: 'utf8', timeout: 3000 });
+  const invalid = spawnSync(process.execPath, ['--no-env-file', server, '--config', file], { cwd: folder, encoding: 'utf8', timeout: 3000 });
   assert.equal(invalid.status, 1); assert.match(invalid.stderr, /config/); assert.doesNotMatch(invalid.stdout, /Local Observer:/);
   write({ theme: { pack: 'uninstalled-test-pack' } });
-  const missingPack = spawnSync(process.execPath, [server, '--config', file], { cwd: folder, encoding: 'utf8', timeout: 3000 });
+  const missingPack = spawnSync(process.execPath, ['--no-env-file', server, '--config', file], { cwd: folder, encoding: 'utf8', timeout: 3000 });
   assert.equal(missingPack.status, 1); assert.match(missingPack.stderr, /Unknown or uninstalled theme pack/);
   assert.doesNotMatch(missingPack.stdout, /Local Observer:/);
-  const help = spawnSync(process.execPath, [server, '--help'], { cwd: folder, encoding: 'utf8', timeout: 3000 });
+  const help = spawnSync(process.execPath, ['--no-env-file', server, '--help'], { cwd: folder, encoding: 'utf8', timeout: 3000 });
   assert.equal(help.status, 0); assert.match(help.stdout, /--no-presentation/);
+  assert.match(help.stdout, /Usage: bun --no-env-file server\.js/);
+  const executable = spawnSync(server, ['--help'], { cwd: folder, encoding: 'utf8', timeout: 3000 });
+  assert.equal(executable.status, 0, executable.stderr); assert.match(executable.stdout, /Usage: bun --no-env-file server\.js/);
+  for (const script of ['start', 'presentation']) {
+    const launched = spawnSync(process.execPath, ['run', script, '--help'], { cwd: path.join(__dirname, '..'), encoding: 'utf8', timeout: 3000 });
+    assert.equal(launched.status, 0, launched.stderr); assert.match(launched.stdout, /Usage: bun --no-env-file server\.js/);
+  }
   const example = JSON.parse(fs.readFileSync(path.join(__dirname, '../observer.config.example.json'), 'utf8'));
   validateConfig(example);
   console.log('config: defaults, optional/explicit files, CLI precedence, custom names, strict validation, help and fail-before-startup passed');

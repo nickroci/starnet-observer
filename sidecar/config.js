@@ -13,7 +13,7 @@ const DEFAULT_LABELS = Object.freeze({
   ])
 });
 const DEFAULT_CONFIG = path.join(__dirname, '..', 'observer.config.json');
-const HELP = `Usage: node server.js [options]
+const HELP = `Usage: bun --no-env-file server.js [options]
 
   --presentation          Enable private labels and block inspectors
   --no-presentation       Disable private labels, overriding the config file

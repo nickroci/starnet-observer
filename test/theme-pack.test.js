@@ -73,9 +73,9 @@ const frozen = ThemePack.freezeSnapshot(Object.freeze({ nested: { list: [1] } })
 assert.ok(Object.isFrozen(frozen.nested.list));
 assert.throws(() => ThemePack.getDefault().ui.colors.ink = '#000000', TypeError);
 const browser = { window: {} };
-vm.runInNewContext(fs.readFileSync(path.join(root, 'app/theme-pack.js'), 'utf8'), browser);
+vm.runInNewContext(fs.readFileSync(path.join(root, 'app/theme-pack.js'), 'utf8') + '\nwindow.readDefault = () => ThemePack.getDefault();', browser);
 browser.window.__OBSERVER_THEME_DEFAULT__ = clone(defaults);
-assert.equal(vm.runInNewContext('ThemePack.getDefault().id', browser), 'starnet', 'helper may load before nonce data');
+assert.equal(browser.window.readDefault().id, 'starnet', 'helper may load before nonce data');
 const fakeDocument = () => { const styles = new Map(); return { styles, documentElement: { style: { setProperty(key, value) { styles.set(key, value); } } } }; };
 const colorKeys = Object.keys(defaults.ui.colors);
 assert.equal(colorKeys.length, 48);
