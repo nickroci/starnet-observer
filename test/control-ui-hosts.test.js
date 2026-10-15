@@ -78,6 +78,40 @@ function element() {
   assert.equal(elements['mail-title'].textContent, 'Mailroom · herdr-dev-2 · recent 100', 'the mailroom section is the selected host’s own');
   assert.equal(elements['mail-ledger'].children.length, 2, 'and lists that host’s own bus');
   assert.match(elements['mail-counts'].textContent, /^1 pending · 1 acknowledged/);
+  // Expired relay history is still listed, but never waiting, acknowledged by
+  // inference, highlighted as pending, or counted in the recipient's unread badge.
+  const mixedBus = { ...hostBus['herdr-dev-2'], window: 37, messages: [
+    { id: 11, from: 'external', to: blocked.id, acknowledgedAt: null, relay: { direction: 'in', machine: 'peer', repo: 'repo', state: 'expired' } },
+    { id: 12, from: blocked.id, to: 'external', acknowledgedAt: null, relay: { direction: 'out', machine: 'peer', repo: 'repo', state: 'expired' } },
+    { id: 13, from: 'external', to: blocked.id, acknowledgedAt: null, wake: 'none' },
+    { id: 14, from: 'external', to: blocked.id, acknowledgedAt: Date.now(), wake: 'requested' }
+  ] };
+  const mixed = bus => listener({ data: { sessions: [sessions[0], blocked], health: 'available', observedAt: Date.now(),
+    sources: { hosts }, bus: { ...localBus, window: 99, messages: [...localBus.messages, { id: 13, from: 'external', to: sessions[0].id, acknowledgedAt: null }] },
+    hostBus: { 'herdr-dev-2': bus } } });
+  mixed(mixedBus);
+  assert.equal(elements['mail-counts'].textContent, '1 pending · 1 acknowledged · 2 expired · in recent 37');
+  const ledgerState = id => elements['mail-ledger'].children.find(item => item.children[0].dataset.messageId === String(id)).children[0].children[1];
+  for (const id of [11, 12]) {
+    assert.equal(ledgerState(id).className, 'mail-state', 'expired message has no pending highlight');
+    assert.match(ledgerState(id).textContent, /^expired at the relay/);
+  }
+  assert.equal(ledgerState(13).className, 'mail-state pending');
+  assert.equal(ledgerState(14).className, 'mail-state');
+  let recipient = sessionItems(elements.sessions).find(item => item.children[0].dataset.sessionId === blocked.id).children[0];
+  const badge = recipient.children.find(node => node.className === 'row-mail');
+  assert(badge, 'remote incoming mail supplies an unread badge from the selected host bus');
+  assert.equal(badge.textContent, '✉ 1 unacknowledged message · recent 37');
+  elements['mail-ledger'].children.find(item => item.children[0].dataset.messageId === '13').children[0].handlers.click();
+  assert.equal(viewOptions.hostSelection(), 'herdr-dev-2', 'same message id on the local bus cannot retarget remote ledger selection');
+  assert.equal(recipient.attributes['aria-pressed'], 'true');
+  assert.match(elements['mail-detail'].textContent, /^Message #13/);
+  assert.equal(elements['mail-title'].textContent, 'Mailroom · herdr-dev-2 · recent 37');
+  mixed({ ...mixedBus, messages: mixedBus.messages.filter(message => message.id !== 13) });
+  assert.equal(elements['mail-counts'].textContent, '0 pending · 1 acknowledged · 2 expired · in recent 37');
+  recipient = sessionItems(elements.sessions).find(item => item.children[0].dataset.sessionId === blocked.id).children[0];
+  assert.equal(recipient.children.some(node => node.className === 'row-mail'), false, 'expired-only unacknowledged history removes the live recipient badge');
+  multi();
   // Blocked: the row reads "waiting for input", carries the attach hint and a prominent attach button.
   const blockedItem = sessionItems(elements.sessions)[0];
   assert.equal(blockedItem.title, 'Waiting for input — press ⇱ to attach'); assert.match(blockedItem.className, /needs-input/);

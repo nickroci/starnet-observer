@@ -358,7 +358,8 @@
     acknowledged: 'acknowledged', expired: 'expired at the relay (30 days)', unknown: 'relay state unknown' };
   // Wake is a request to the recipient's host, never proof the message was read.
   const wakeText = { requested: 'wake requested', failed: 'wake failed', unsupported: 'wake unsupported', unknown: 'wake state unknown', none: 'no wake recorded' };
-  const mailStatus = message => message.relay?.direction === 'out' ? RELAY_TEXT[message.relay.state] || RELAY_TEXT.unknown
+  const mailPending = message => !message.acknowledgedAt && message.relay?.state !== 'expired';
+  const mailStatus = message => message.relay && (message.relay.direction === 'out' || message.relay.state === 'expired') ? RELAY_TEXT[message.relay.state] || RELAY_TEXT.unknown
     : message.acknowledgedAt ? 'acknowledged' : 'not acknowledged · ' + (wakeText[message.wake] || wakeText.unknown);
   function busHealth(bus) {
     if (!bus) return 'Bus not read yet';
@@ -412,9 +413,10 @@
   }
   function renderMail(bus, mailCourier = courier) {
     const messages = bus && Array.isArray(bus.messages) ? bus.messages : [], limit = bus?.window || 100;
-    const pending = messages.filter(message => !message.acknowledgedAt).length, skipped = mailCourier.state().skipped;
+    const pending = messages.filter(mailPending).length, acknowledged = messages.filter(message => !!message.acknowledgedAt).length;
+    const expired = messages.length - pending - acknowledged, skipped = mailCourier.state().skipped;
     setText(get('mail-health'), busHealth(bus));
-    setText(get('mail-counts'), bus ? pending + ' pending · ' + (messages.length - pending) + ' acknowledged · in recent ' + limit +
+    setText(get('mail-counts'), bus ? pending + ' pending · ' + acknowledged + ' acknowledged' + (expired ? ' · ' + expired + ' expired' : '') + ' · in recent ' + limit +
       (skipped ? ' · ' + skipped + ' shown without animation' : '') : '');
     const focusedNode = document.activeElement, ledgerTop = get('mail-ledger').scrollTop, present = new Set(messages.map(message => message.id));
     for (const id of mailRows.keys()) if (!present.has(id)) mailRows.delete(id);
@@ -423,7 +425,7 @@
       const entry = mailRow(message.id);
       entry.button.setAttribute('aria-pressed', String(mailSelected === message.id));
       setText(entry.route, '#' + message.id + ' ' + endpointLabel(message.from, message, 'from') + ' → ' + endpointLabel(message.to, message, 'to'));
-      entry.state.className = 'mail-state' + (message.acknowledgedAt ? '' : ' pending');
+      entry.state.className = 'mail-state' + (mailPending(message) ? ' pending' : '');
       setText(entry.state, mailStatus(message) + ' · ' + ObserverModel.age(message.sentAt));
       // Only a message with a verified identity can be read; the toggle names what it will do.
       const target = mailTarget(message), open = !!target && isOpenTarget(target);
@@ -711,7 +713,7 @@
     const matching = rows.filter(row => (filter === 'all' || row.status === filter) &&
       [row.project, row.repo, row.title, row.paneId, row.provider, row.worktree, row.folder, ObserverModel.checkoutLabel(row)].some(value => String(value || '').toLowerCase().includes(query)));
     const groups = new Map(), labels = new Map(), unread = new Map();
-    for (const message of messages) if (!message.acknowledgedAt) unread.set(message.to, (unread.get(message.to) || 0) + 1);
+    for (const message of messages) if (mailPending(message)) unread.set(message.to, (unread.get(message.to) || 0) + 1);
     // Repositories by exact id per project, from every row: a filter or search never hides a repository's toggle.
     const repos = new Map(), repoNames = new Map();
     for (const row of rows) {
@@ -1004,7 +1006,7 @@
     const shownBus = hosts.length && selectedHost ? hostBus[selectedHost] || null : bus;
     renderMail(shownBus, hosts.length && selectedHost ? courierFor(selectedHost) : courier);
     if (hosts.length) setText(get('mail-title'), 'Mailroom · ' + (selectedHost || 'this machine') + ' · recent ' + (Number.isInteger(shownBus?.window) ? shownBus.window : 100));
-    renderSessions(panelRows, stale, messages, bus);
+    renderSessions(panelRows, stale, Array.isArray(shownBus?.messages) ? shownBus.messages : [], shownBus);
     if (hosts.length && !panelRows.length && !stale) setText(get('empty'), 'No sessions on ' + (selectedHost || 'this machine') + '.');
     for (const entry of panels) if (entry.target.kind === 'agent') entry.view.roster();
   }
