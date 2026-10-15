@@ -176,6 +176,26 @@ const notification = (child, status) => line({ type: 'queue-operation', operatio
     assert.deepEqual(names(result), ['scout'], 'completed root ambiguity continues to suppress nested helper');
     assert.equal((await coldHelpers.inspect(result.rows[0])).available, true, 'complete proof unlocks valid tail helper inspection');
 
+    // Preserve the bounded reader's exact prefix/tail/mtime while changing an
+    // unvalidated header spawn and making a middle run too large to index fully.
+    await child('partial-header');
+    const partialTime = new Date('2026-10-15T13:00:00Z');
+    const headerPrefix = head + padding(20, 'header');
+    const partialMiddle = padding(600, 'merge');
+    const partialBefore = headerPrefix + spawn('partial-header') + padding(500, 'gap') + partialMiddle + padding(1700, 'tail');
+    await fs.writeFile(parentFile, partialBefore); await fs.utimes(parentFile, partialTime, partialTime);
+    result = await helpers.children([parent]);
+    const partialSelected = result.rows.find(row => row.sessionId === 'partial-header');
+    assert(partialSelected);
+    assert.equal((await helpers.inspect(partialSelected)).available, true);
+    const partialAfter = partialBefore.replace('"Agent"', '"Other"').replace(partialMiddle, partialMiddle.replaceAll('\n', ' '));
+    assert.equal(Buffer.byteLength(partialAfter), Buffer.byteLength(partialBefore));
+    await fs.writeFile(parentFile, partialAfter); await fs.utimes(parentFile, partialTime, partialTime);
+    assert.equal((await helpers.inspect(partialSelected)).available, false, 'partial index denies private stale-header proof');
+    result = await helpers.children([parent]);
+    assert.deepEqual(names(result), [], 'partial full index cannot resurrect stale header claim during discovery');
+    assert.equal((await helpers.inspect(partialSelected)).available, false, 'private denial persists after stale row withdrawal');
+
     // Losing either a spawn or its pending call makes negative ancestry evidence
     // incomplete. Exercise each cap independently; status-only eviction is separate.
     const splitSpawn = (name, call) => spawn(name, call).trim().split('\n').map(JSON.parse);
@@ -204,8 +224,7 @@ const notification = (child, status) => line({ type: 'queue-operation', operatio
       await fs.writeFile(parentFile, head + padding(500, 'h') + incomplete + padding(1700) + spawn('scout'));
       assert.equal((await helpers.inspect(selected)).available, false, label + ': incomplete ancestor proof revokes private binding');
       result = await helpers.children([parent]);
-      assert.deepEqual(names(result), ['scout'], label + ': readable tail remains but incomplete absence cannot choose a nested parent');
-      assert.equal((await helpers.inspect(result.rows[0])).available, false, label + ': retained positive claim does not make proof complete');
+      assert.deepEqual(names(result), [], label + ': incomplete index cannot prove a unique helper even with readable tail metadata');
       assert(!JSON.stringify(result).includes('PRIVATE OVERSIZED'));
     }
 
@@ -260,6 +279,69 @@ const notification = (child, status) => line({ type: 'queue-operation', operatio
     result = await helpers.children([parent]);
     assert.equal(result.rows[0].status, 'unknown', 'full-index event absence withdraws stale cached terminal status');
 
+    // The bounded reader must revalidate all retained header metadata, including
+    // a header that grew after its first projection, independently of index proof.
+    const headerProof = makeTranscriptObserver({ now, roots: { claude, codex } });
+    await rewriteAtFixedTime(head);
+    await headerProof.read('header-proof', 'claude', ID);
+    await rewriteAtFixedTime(headerClaim);
+    await headerProof.read('header-proof', 'claude', ID);
+    assert(headerProof.helperMetadata('header-proof').helperSpawns.has('header'));
+    await rewriteAtFixedTime(headerClaim.replace('"Agent"', '"Other"'));
+    await headerProof.read('header-proof', 'claude', ID);
+    assert.equal(headerProof.helperMetadata('header-proof').helperSpawns.has('header'), false, 'grown header proof covers every retained helper record');
+
+    // A failed or rejected full scan is unavailable proof, never a fresh cold
+    // scan whose bounded positive metadata can establish uniqueness by fallback.
+    await rewriteAtFixedTime(headerClaim);
+    let failIndexReads = false, holdIndexRead = null;
+    const unavailableFs = Object.create(fs), unavailableParentFile = await fs.realpath(parentFile);
+    unavailableFs.open = async (file, ...args) => {
+      const handle = await fs.open(file, ...args);
+      return new Proxy(handle, { get(target, name) {
+        if (name === 'read') return async (buffer, offset, length, position) => {
+          if (file === unavailableParentFile && length > 256 * 1024) {
+            if (failIndexReads) throw new Error('Index read unavailable');
+            if (holdIndexRead) await holdIndexRead;
+          }
+          return target.read(buffer, offset, length, position);
+        };
+        const value = target[name];
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+    };
+    const unavailableTranscripts = makeTranscriptObserver({ now, fs: unavailableFs, roots: { claude, codex } });
+    const unavailableHelpers = makeHelperObserver({ now, transcripts: unavailableTranscripts, readEdges: () => ({ rows: [] }) });
+    await unavailableHelpers.children([parent]); await unavailableTranscripts.spawnIndexIdle();
+    result = await unavailableHelpers.children([parent]);
+    const beforeFailure = result.rows.find(row => row.sessionId === 'header');
+    assert(beforeFailure);
+    failIndexReads = true;
+    assert.equal((await unavailableHelpers.inspect(beforeFailure)).available, false);
+    result = await unavailableHelpers.children([parent]);
+    assert.deepEqual(names(result), [], 'failed warm index cannot fall back to a readable positive header claim');
+    failIndexReads = false;
+    result = await unavailableHelpers.children([parent]);
+    assert.deepEqual(names(result), ['header'], 'a failed scan recovers on the next successful full proof');
+    await fs.truncate(parentFile, 128 * 1024 * 1024 + 1);
+    result = await unavailableHelpers.children([parent]);
+    assert.deepEqual(names(result), [], 'oversized-file rejection cannot fall back to a readable positive header claim');
+    await unavailableTranscripts.spawnIndexIdle();
+    await rewriteAtFixedTime(headerClaim);
+    result = await unavailableHelpers.children([parent]);
+    assert.deepEqual(names(result), ['header'], 'oversized rejection clears old digest evidence and recovers after shrink');
+    assert.equal((await unavailableHelpers.inspect(result.rows[0])).available, true);
+
+    await rewriteAtFixedTime(head + manyCalls + spawn('header') + padding(1700, 'tail'));
+    let releasePartialCold;
+    holdIndexRead = new Promise(resolve => { releasePartialCold = resolve; });
+    const partialColdTranscripts = makeTranscriptObserver({ now, fs: unavailableFs, roots: { claude, codex } });
+    const partialColdHelpers = makeHelperObserver({ now, transcripts: partialColdTranscripts, readEdges: () => ({ rows: [] }) });
+    try {
+      result = await partialColdHelpers.children([parent]);
+      assert.deepEqual(names(result), [], 'an explicitly partial bounded projection cannot authorize cold helper discovery');
+    } finally { releasePartialCold(); holdIndexRead = null; await partialColdTranscripts.spawnIndexIdle(); }
+
     // Saturating cold discovery must not detach pending scans from their cache
     // entries or shutdown tracking. Delay each index while ordinary reads finish.
     const capacityRoot = path.join(root, 'capacity');
@@ -299,10 +381,16 @@ const notification = (child, status) => line({ type: 'queue-operation', operatio
     const capacityTimeout = new Promise((_, reject) => { capacityDeadline = setTimeout(() => reject(new Error('Capacity scan tracking did not settle')), 3000); });
     try {
       await Promise.race([(async () => {
-        for (const id of capacityIds) await fs.writeFile(path.join(capacityRoot, id + '.jsonl'), line({ type: 'user', sessionId: id, message: { content: 'Identity' } }));
+        for (const id of capacityIds) await fs.writeFile(path.join(capacityRoot, id + '.jsonl'),
+          line({ type: 'user', sessionId: id, message: { content: 'Identity' } }) +
+          (id === capacityIds[64] ? spawn('refused').trim().split('\n').map(row => line({ ...JSON.parse(row), sessionId: id })).join('') : ''));
+        const refusedDirectory = path.join(capacityRoot, capacityIds[64], 'subagents');
+        await fs.mkdir(refusedDirectory, { recursive: true });
+        await fs.writeFile(path.join(refusedDirectory, 'agent-refused.jsonl'), childRow('refused', '2026-10-15T10:00:00Z'));
         for (const id of capacityIds) {
           assert.equal((await capacityTranscripts.read(id, 'claude', id)).available, true);
-          await capacityTranscripts.claudeCandidates(id, undefined, id);
+          const candidates = await capacityTranscripts.claudeCandidates(id, undefined, id);
+          if (id === capacityIds[64]) assert.deepEqual(candidates, [], 'capacity refusal cannot authorize a bounded positive claim');
         }
         await started64;
         const firstFile = await fs.realpath(path.join(capacityRoot, capacityIds[0] + '.jsonl'));
