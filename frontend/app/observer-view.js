@@ -370,7 +370,7 @@ const ObserverView = (() => {
   }
 
   // ---------- the view ----------
-  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, onCamera = () => {}, env = {} }) {
+  function create({ canvas, onSelect = () => {}, onTitleToggle = () => {}, onPlatform = () => {}, onMode = () => {}, hoverLabel = () => null, nameFor = () => '', reducedMotion = () => false, idleLevel = () => 0, idleVigour = () => 1, onCamera = () => {}, env = {} }) {
     const win = env.window || (typeof window !== 'undefined' ? window : {});
     const raf = env.raf || (fn => win.requestAnimationFrame(fn)), caf = env.caf || (id => win.cancelAnimationFrame(id));
     const dprOf = env.dpr || (() => win.devicePixelRatio || 1);
@@ -870,11 +870,13 @@ const ObserverView = (() => {
     function paintAgentAura(worker, foot, extent, now, live, before) {
       const status = worker.row.status, size = worker.scale || 1, working = status === 'working', blocked = status === 'blocked';
       const color = working ? STATUS.working : blocked ? STATUS.blocked : worker.accent;
+      // Vigour (1 fresh … 0 after days idle) thins the aura, motes and sparks of a resting agent; working is always 1.
+      let vigour = 1; if (!working) { try { vigour = Math.max(0, Math.min(1, Number(idleVigour(worker.id)))); if (!Number.isFinite(vigour)) vigour = 1; } catch (_) { vigour = 1; } }
       const chestY = extent ? extent.top + extent.h * 0.45 : foot.y - CREW_HEIGHT * size * 0.5;
       const pulse = live ? 0.7 + 0.3 * Math.sin(now / (working ? 900 : 2600) * Math.PI * 2 + (hash(worker.id) % 10)) : 0.8;
       if (before) {
         const radius = (working ? 54 : blocked ? 44 : 30) * size;
-        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (working ? 0.95 : blocked ? 0.65 : 0.32) * pulse;
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = (working ? 0.95 : blocked ? 0.65 : 0.32 * (0.25 + 0.75 * vigour)) * pulse;
         const g = ctx.createRadialGradient(foot.x, chestY, 0, foot.x, chestY, radius);
         g.addColorStop(0, color); g.addColorStop(0.5, color); g.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(foot.x, chestY, radius, radius * 1.25, 0, 0, Math.PI * 2); ctx.fill();
@@ -886,7 +888,7 @@ const ObserverView = (() => {
         return;
       }
       // Orbiting motes: six when working, two otherwise; blocked agents get slow amber embers instead.
-      const count = working ? 10 : 4, rx = 17 * size, ry = 22 * size * 0.45, speed = working ? 1600 : 5200, seed = hash(worker.id) % 360;
+      const count = working ? 10 : blocked ? 4 : Math.round(8 * vigour), rx = 17 * size, ry = 22 * size * 0.45, speed = working ? 1600 : 5200, seed = hash(worker.id) % 360;
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
       for (let i = 0; i < count; i++) {
         const ang = (live ? now / speed : 0.3) * Math.PI * 2 + i * (Math.PI * 2 / count) + seed;
@@ -901,6 +903,9 @@ const ObserverView = (() => {
       ctx.restore();
       if (live && working) sparks(foot.x, chestY - 10 * size, 'head' + worker.id, now, { count: 8, color: '#ffffff', alt: color, rise: 28 * size, spread: 22 * size, life: 1200, size: 2 });
       if (live && blocked) sparks(foot.x, chestY, 'ember' + worker.id, now, { count: 3, color, rise: 26 * size, spread: 12 * size, life: 2600, size: 2 });
+      // Resting agents keep a crackle that dies away with idle age: plenty after a fresh turn, none after days.
+      const rest = Math.round(7 * vigour);
+      if (live && !working && !blocked && rest) sparks(foot.x, chestY - 8 * size, 'rest' + worker.id, now, { count: rest, color: worker.accent, alt: '#ffffff', rise: (14 + 14 * vigour) * size, spread: 18 * size, life: 1500, size: 2 });
     }
 
     // ---------- crew ----------

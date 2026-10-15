@@ -43,15 +43,19 @@ const ObserverModel = (() => {
      eight hours. Levels are quantised to IDLE_STEPS so a slowly ageing body changes look a handful of times, not every
      frame. Rows without a timestamp (helpers, desktop, presentation without evidence) never age. */
   const IDLE_FRESH = 10 * 60000, IDLE_FULL = 8 * 3600000, IDLE_STEPS = 6;
+  /* Sparkle runs on a longer clock than the tint so days stay distinguishable: full vigour while fresh, fading on a square-root
+     curve to none at three days, in eighths. "Lots of sparks today, fewer the older it is." */
+  const SPARK_GONE = 72 * 3600000, SPARK_STEPS = 8;
   function idleAge(row, now = Date.now()) {
     const at = row && row.status !== 'working' ? row.lastActivityAt : null;
-    if (typeof at !== 'number' || !Number.isFinite(at)) return { ms: null, level: 0, label: '' };
+    if (typeof at !== 'number' || !Number.isFinite(at)) return { ms: null, level: 0, vigour: 1, label: '' };
     const ms = Math.max(0, now - at);
     const t = ms <= IDLE_FRESH ? 0 : Math.min(1, Math.log(ms / IDLE_FRESH) / Math.log(IDLE_FULL / IDLE_FRESH));
     const minutes = Math.floor(ms / 60000), hours = Math.floor(minutes / 60), days = Math.floor(hours / 24);
     const label = ms < IDLE_FRESH ? '' : days >= 1 ? 'idle ' + days + 'd ' + (hours % 24) + 'h'
       : hours >= 1 ? 'idle ' + hours + 'h ' + (minutes % 60) + 'm' : 'idle ' + minutes + 'm';
-    return { ms, level: Math.ceil(t * IDLE_STEPS) / IDLE_STEPS, label };
+    const fade = ms <= IDLE_FRESH ? 0 : Math.min(1, Math.sqrt((ms - IDLE_FRESH) / (SPARK_GONE - IDLE_FRESH)));
+    return { ms, level: Math.ceil(t * IDLE_STEPS) / IDLE_STEPS, vigour: 1 - Math.ceil(fade * SPARK_STEPS) / SPARK_STEPS, label };
   }
   /* Canvas hover plate: provider plus Herdr's generated tab title. Herdr publishes the title after the conversation
      starts and the sidecar falls back to the bare agent name until then, so a provider-only title is unpublished. */
