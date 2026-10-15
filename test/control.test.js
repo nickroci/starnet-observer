@@ -85,19 +85,26 @@ const { makePresentationObserver } = require('../sidecar/presentation.js');
       if (args[0] === 'workspace' && args[1] === 'create') { announceWorkspace(); await workspaceGate; }
       return execute(command, args, options);
     } });
-    const concurrent = boss.overseer();
+    for (const provider of [undefined, null, '', 'Claude', 'gemini', {}, ['codex']]) {
+      const reads = calls.length;
+      await assert.rejects(makeControl(settings).overseer(provider), error => error.status === 400 && error.message === 'invalid-provider');
+      assert.equal(calls.length, reads, 'invalid providers never reach processes');
+      assert.equal((await fs.readdir(home)).length, 0, 'invalid providers never reserve or write files');
+    }
+    const concurrent = boss.overseer('claude');
     await workspaceStarted;
-    try { await assert.rejects(makeControl(settings).overseer(), /overseer-unavailable/); }
+    try { await assert.rejects(makeControl(settings).overseer('codex'), /overseer-unavailable/); }
     finally { releaseWorkspace(); }
     assert.deepEqual(await concurrent, { ok: true, action: 'overseer', paneId: 'w9:p1', name: 'overseer', home });
     assert.match(await fs.readFile(path.join(home, 'CLAUDE.md'), 'utf8'), /^# Overseer/);
+    assert.equal(await fs.readFile(path.join(home, 'AGENTS.md'), 'utf8'), await fs.readFile(path.join(home, 'CLAUDE.md'), 'utf8'));
     assert.equal(calls.filter(call => call[1] === 'workspace' && call[2] === 'create').length, 1);
     await fs.writeFile(path.join(home, 'CLAUDE.md'), 'edited by user');
-    await assert.rejects(makeControl(settings).overseer(), error => error.status === 409 && error.paneId === 'w9:p1');
+    await assert.rejects(makeControl(settings).overseer('codex'), error => error.status === 409 && error.paneId === 'w9:p1');
     assert.equal(await fs.readFile(path.join(home, 'CLAUDE.md'), 'utf8'), 'edited by user');
     const before = calls.length;
     replies['agent list'] = { result: { agents: [{ ...identity, terminal_id: 'reused' }] } };
-    await assert.rejects(makeControl(settings).overseer(), /overseer-unavailable/);
+    await assert.rejects(makeControl(settings).overseer('claude'), /overseer-unavailable/);
     assert.equal(calls.slice(before).some(call => call[1] === 'workspace'), false);
     replies['agent list'] = { result: { agents: [identity] } };
     replies['agent get w9:p1'] = { result: { agent: { ...identity, workspace_id: 'foreign' } } };
@@ -106,6 +113,7 @@ const { makePresentationObserver } = require('../sidecar/presentation.js');
     await fs.rm(home, { recursive: true, force: true });
     if (previousSecret === undefined) delete process.env.STARNET_TEST_TOKEN; else process.env.STARNET_TEST_TOKEN = previousSecret;
   }
+  await providerBriefs();
   await uncertainOverseer();
   await privateControls();
   await observedControls();
@@ -113,7 +121,7 @@ const { makePresentationObserver } = require('../sidecar/presentation.js');
   // ---- server: control routes exist only with a control object, need the token, validate the body ----
   const observer = { async get() { return { health: 'available', sessions: [] }; }, async inspect() { return {}; }, inspectMessage() { return {}; } };
   const hits = [];
-  const fake = { attach: async id => (hits.push(['attach', id]), { ok: true }), spawn: async id => (hits.push(['spawn', id]), { ok: true }), close: async () => { throw Object.assign(new Error('no-agent-in-pane'), { status: 400 }); }, overseer: async () => { hits.push(['overseer']); throw Object.assign(new Error('overseer-exists'), { status: 409, paneId: 'w9:p1' }); } };
+  const fake = { attach: async id => (hits.push(['attach', id]), { ok: true }), spawn: async id => (hits.push(['spawn', id]), { ok: true }), close: async () => { throw Object.assign(new Error('no-agent-in-pane'), { status: 400 }); }, overseer: async provider => { hits.push(['overseer', provider]); throw Object.assign(new Error('overseer-exists'), { status: 409, paneId: 'w9:p1' }); } };
   const serve = async (control) => { const server = createServer({ observer, token: 't', control }); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); return { server, base: 'http://127.0.0.1:' + server.address().port }; };
   const post = (base, path, body, headers = {}) => fetch(base + path, { method: 'POST', headers: { 'X-Observer-Token': 't', 'Content-Type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) });
   const off = await serve(null);
@@ -135,8 +143,18 @@ const { makePresentationObserver } = require('../sidecar/presentation.js');
     const closed = await post(on.base, '/api/control/close', { paneId: 'w1:p2' });
     assert.equal(closed.status, 400); assert.deepEqual(await closed.json(), { error: 'no-agent-in-pane' });
     assert.equal((await post(on.base, '/api/control/attach', { paneId: 'w1:p2' }, { Origin: 'http://evil.example' })).status, 403);
-    const boss = await post(on.base, '/api/control/overseer', {}); assert.equal(boss.status, 409); assert.deepEqual(await boss.json(), { error: 'overseer-exists', paneId: 'w9:p1' });
-    assert.deepEqual(hits, [['attach', 'w1:p2'], ['spawn', 'w1:p2'], ['overseer']]);
+    for (const body of [{}, null, [], { provider: 'gemini' }, { provider: ['codex'] }, { provider: '/Users/private' }]) {
+      const before = hits.length;
+      const rejected = await post(on.base, '/api/control/overseer', body);
+      assert.equal(rejected.status, 400);
+      assert.deepEqual(await rejected.json(), { error: 'invalid-provider' });
+      assert.equal(hits.length, before, 'route rejects invalid provider before control dispatch');
+    }
+    for (const provider of ['claude', 'codex']) {
+      const boss = await post(on.base, '/api/control/overseer', { provider });
+      assert.equal(boss.status, 409); assert.deepEqual(await boss.json(), { error: 'overseer-exists', paneId: 'w9:p1' });
+    }
+    assert.deepEqual(hits, [['attach', 'w1:p2'], ['spawn', 'w1:p2'], ['overseer', 'claude'], ['overseer', 'codex']]);
     assert.equal((await post(on.base, '/api/observer/sessions', {})).status, 405, 'observer routes stay GET-only');
   } finally { on.server.close(); on.server.closeAllConnections(); }
   console.log('control: overseer brief/409, pane validation, Herdr-gated close, spawn command order, terminal launch, opt-in routes, token/origin/body guards OK');
@@ -165,13 +183,13 @@ async function uncertainOverseer() {
   };
   const options = { execute, endpoint, platform: 'darwin', overseerHome: home, sleep: async () => {} };
   try {
-    await assert.rejects(makeControl(options).overseer(), /overseer-unavailable/);
+    await assert.rejects(makeControl(options).overseer('claude'), /overseer-unavailable/);
     assert.equal(calls.some(call => call[0] === 'osascript'), false, 'unverified launch is never attached');
     const created = () => calls.filter(call => call[1] === 'workspace' && call[2] === 'create').length;
-    await assert.rejects(makeControl(options).overseer(), /overseer-unavailable/);
+    await assert.rejects(makeControl(options).overseer('claude'), /overseer-unavailable/);
     assert.equal(created(), 1, 'uncertain launch survives observer/control restart');
     missing = true; valid = true;
-    await makeControl(options).overseer();
+    await makeControl(options).overseer('claude');
     assert.equal(created(), 2, 'only confirmed missing pane permits replacement');
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 }
@@ -190,7 +208,7 @@ async function privateControls() {
     const server = createServer({ observer: presentation ? makePresentationObserver(source) : source, token: 't', control: enabled ? fake : null });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const base = 'http://127.0.0.1:' + server.address().port;
-    const post = (action, body = '{"paneId":"w1:p2"}') => fetch(base + '/api/control/' + action, { method: 'POST', headers: { 'X-Observer-Token': 't', 'Content-Type': 'application/json' }, body });
+    const post = (action, body = JSON.stringify(action === 'overseer' ? { provider: 'codex' } : { paneId: 'w1:p2' })) => fetch(base + '/api/control/' + action, { method: 'POST', headers: { 'X-Observer-Token': 't', 'Content-Type': 'application/json' }, body });
     try {
       for (fail of [false, true]) for (const action of ['attach', 'spawn', 'close', 'overseer']) {
         const res = await post(action), text = await res.text();
@@ -213,6 +231,11 @@ async function privateControls() {
       if (enabled) {
         const before = hits;
         assert.equal((await post('attach', '{"paneId":"w1:p2","extra":"' + '界'.repeat(1500) + '"}')).status, 413, '4KB limit counts bytes');
+        for (const provider of [undefined, secret, ['codex']]) {
+          const res = await post('overseer', JSON.stringify({ provider }));
+          assert.equal(res.status, 400);
+          assert.deepEqual(await res.json(), { error: 'invalid-provider' });
+        }
         for (const body of ['not json', '{"paneId":"' + secret + '"}']) {
           const res = await post('attach', body); assert.equal(res.status, 400); assert.equal((await res.text()).includes(secret), false);
         }
@@ -263,4 +286,53 @@ async function observedControls() {
     assert.equal(observer.controlTarget('foreign'), null);
   } finally { await observer.close(); }
   assert.equal(observer.controlTarget('pane'), null, 'closed observers never authorize controls');
+}
+
+async function providerBriefs() {
+  for (const provider of ['claude', 'codex']) {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'observer-provider-')), calls = [];
+    const identity = { pane_id: 'p1', workspace_id: 'w1', terminal_id: 't1', agent: provider };
+    const options = { overseerHome: home, endpoint: '/fixture/providers.sock', platform: 'darwin', sleep: async () => {}, claudeArgs: ['--fixture-claude-arg'],
+      execute: async (command, args) => {
+        calls.push([command, ...args]);
+        const key = args.slice(0, 2).join(' ');
+        const result = key === 'workspace create' ? { root_pane: { pane_id: 'p1' } } : key === 'agent get' ? { agent: identity } : key === 'pane get' ? { pane: identity } : key === 'agent list' ? { agents: [identity] } : {};
+        return { stdout: JSON.stringify({ result }) };
+      } };
+    try {
+      await makeControl(options).overseer(provider);
+      assert.deepEqual(calls.find(call => call[1] === 'agent' && call[2] === 'start'), ['herdr', 'agent', 'start', 'overseer', '--kind', provider, '--pane', 'p1', '--timeout', '60000', ...(provider === 'claude' ? ['--', '--fixture-claude-arg'] : [])]);
+      const original = await fs.readFile(path.join(home, 'AGENTS.md'), 'utf8');
+      assert.equal(await fs.readFile(path.join(home, 'CLAUDE.md'), 'utf8'), original);
+      assert.equal(JSON.parse(await fs.readFile(path.join(home, 'identity.json'), 'utf8')).provider, provider);
+      await assert.rejects(makeControl(options).overseer(provider === 'claude' ? 'codex' : 'claude'), error => error.message === 'overseer-exists' && error.paneId === 'p1');
+      for (const existing of ['AGENTS.md', 'CLAUDE.md']) {
+        await fs.unlink(path.join(home, 'identity.json'));
+        const missing = existing === 'AGENTS.md' ? 'CLAUDE.md' : 'AGENTS.md';
+        await fs.unlink(path.join(home, missing));
+        const edited = Buffer.from('user edits\r\n' + existing + '\u0000');
+        await fs.writeFile(path.join(home, existing), edited);
+        await makeControl(options).overseer(provider);
+        assert.deepEqual(await fs.readFile(path.join(home, existing)), edited);
+        assert.equal(await fs.readFile(path.join(home, missing), 'utf8'), original);
+      }
+      await fs.unlink(path.join(home, 'identity.json'));
+      for (const file of ['AGENTS.md', 'CLAUDE.md']) await fs.writeFile(path.join(home, file), 'divergent ' + file);
+      await makeControl(options).overseer(provider);
+      for (const file of ['AGENTS.md', 'CLAUDE.md']) assert.equal(await fs.readFile(path.join(home, file), 'utf8'), 'divergent ' + file);
+      // Simulate a user creating AGENTS.md immediately before the exclusive create.
+      await fs.unlink(path.join(home, 'identity.json'));
+      await fs.unlink(path.join(home, 'AGENTS.md'));
+      await makeControl({ ...options, fs: { ...fs, writeFile: async (file, content, settings) => {
+        if (file === path.join(home, 'AGENTS.md')) await fs.writeFile(file, 'concurrent user edit');
+        return fs.writeFile(file, content, settings);
+      } } }).overseer(provider);
+      assert.equal(await fs.readFile(path.join(home, 'AGENTS.md'), 'utf8'), 'concurrent user edit');
+      assert.equal(await fs.readFile(path.join(home, 'CLAUDE.md'), 'utf8'), 'divergent CLAUDE.md');
+      await fs.writeFile(path.join(home, 'identity.json'), '{corrupt');
+      const before = calls.length;
+      await assert.rejects(makeControl(options).overseer(provider), /overseer-unavailable/);
+      assert.equal(calls.length, before, 'corrupt identity never reaches Herdr');
+    } finally { await fs.rm(home, { recursive: true, force: true }); }
+  }
 }

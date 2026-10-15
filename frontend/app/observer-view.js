@@ -4,6 +4,7 @@
    The view never fetches: freshness, hover text, names, mail frames and the inspected id all come from callbacks. */
 'use strict';
 const ObserverView = (() => {
+  const Model = typeof module !== 'undefined' && module.exports ? require('./observer-model.js') : ObserverModel;
   const Scene = typeof module !== 'undefined' && module.exports ? require('./observer-scene.js') : ObserverScene;
   const Themes = typeof module !== 'undefined' && module.exports ? require('./theme-pack.js') : ThemePack;
   const OfficeArt = typeof module !== 'undefined' && module.exports ? require('./observer-office-art.js') : ObserverOfficeArt;
@@ -1207,7 +1208,8 @@ const ObserverView = (() => {
       ctx.strokeStyle = plate.accent; if (plate.dash) ctx.setLineDash(plate.dash); ctx.strokeRect(x + 0.5, y + 0.5, plate.w - 1, plate.h - 1); ctx.setLineDash([]);
       ctx.fillStyle = plate.accent; ctx.fillRect(x + 1, y, plate.w - 2, 2);
       ctx.font = plate.size + 'px VT323, monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = plate.color;
-      ctx.fillText(plate.text, x + 6, y + plate.h / 2 + 1);
+      if (plate.lines) plate.lines.forEach((line, index) => ctx.fillText(line, x + 6, y + (index + 0.5) * plate.h / plate.lines.length + 1));
+      else ctx.fillText(plate.text, x + 6, y + plate.h / 2 + 1);
     }
     function clipText(text, max, size) {
       ctx.font = size + 'px VT323, monospace';
@@ -1219,6 +1221,7 @@ const ObserverView = (() => {
     function paintPlates(isStale, staleKeys) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       const tier = lodFor(camera.zoom), plates = [], screen = point => Scene.toScreen(point, camera), selectedRepo = repositorySelection();
+      const checkoutIds = scene.platforms.flatMap(platform => platform.sections.map(section => section.checkoutId));
       for (const platform of scene.platforms) {
         const at = screen(platform.sign), size = signSize(tier === 'overview' ? 30 : 22), listed = overflowByPlatform.get(platform.key);
         const label = clipText((platform.name || 'Unassigned').toUpperCase() + (platform.annex ? ' +' + platform.annex : '') + ' · ' + (platformCounts.get(platform.key) || 0) + (listed ? ' · +' + listed + ' listed' : ''), viewport.width * 0.4, size);
@@ -1228,7 +1231,18 @@ const ObserverView = (() => {
           const point = screen(section.sign), text = clipText(String(section.label || section.repo || ''), 160, 13);
           // A selected repository's sign changes colour only: same text, size and priority, so placement never moves.
           const repo = repositories.has(section.repo) ? section.repo : null, chosen = repo !== null && repo === selectedRepo;
-          if (text) plates.push({ ...textPlate(text, point.x, point.y - 2, { accent: chosen ? C.repo : shade(platform.accent, -0.3), size: 13, color: chosen ? C.repo : C['repo-label'], priority: 30 }), repo });
+          if (text) {
+            const suffix = section.checkoutKind === 'worktree' && section.checkoutId ? ' · ' + Model.checkoutSuffix(section.checkoutId, checkoutIds) : '';
+            ctx.font = '13px VT323, monospace';
+            const suffixWidth = ctx.measureText(suffix).width;
+            const lines = section.checkoutLabel ? [clipText(section.repoLabel || section.repo || '', 180, 13),
+              clipText(section.checkoutLabel, 180 - suffixWidth, 13) + suffix,
+              clipText(section.folder || 'Checkout root', 180, 13)] : [text];
+            const plate = textPlate(lines.reduce((a, b) => ctx.measureText(a).width > ctx.measureText(b).width ? a : b), point.x, point.y - 2,
+              { accent: chosen ? C.repo : shade(platform.accent, -0.3), size: 13, color: chosen ? C.repo : C['repo-label'], priority: 30 });
+            plate.y -= plate.h * (lines.length - 1); plate.h *= lines.length;
+            plates.push({ ...plate, lines, repo });
+          }
         }
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });

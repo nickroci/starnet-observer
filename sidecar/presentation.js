@@ -8,7 +8,7 @@ const TOOL_NAMES = new Set(['Bash', 'exec_command', 'shell', 'local_shell', 'wri
 // Opaque ownership IDs and live status/freshness remain unchanged; aliases are display identities only.
 function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LABELS) {
   let closePromise = null;
-  const projects = new Map(), repos = new Map(), worktrees = new Map();
+  const projects = new Map(), repos = new Map(), worktrees = new Map(), folders = new Map();
   const roomNames = new Set(labels.rooms.map(room => room.name.toLowerCase()));
   const repoNames = new Set(labels.rooms.flatMap(room => room.repos).map(name => name.toLowerCase()));
   function project(id) {
@@ -39,14 +39,19 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
   }
   function rowProjection(row) {
     const room = project(row.projectId), repoName = repo(row, room);
-    const worktreeKey = row.repoId + '\0' + row.worktree;
-    if (row.worktree && !worktrees.has(worktreeKey)) worktrees.set(worktreeKey, 'Worktree ' + (worktrees.size + 1));
+    const checkoutId = typeof row.checkoutId === 'string' && row.checkoutId ? row.checkoutId : null;
+    const checkoutKind = checkoutId && ['main', 'worktree', 'folder'].includes(row.checkoutKind) ? row.checkoutKind : null;
+    if (checkoutKind === 'worktree' && !worktrees.has(checkoutId)) worktrees.set(checkoutId, 'Checkout ' + (worktrees.size + 1));
+    const folderKey = JSON.stringify([checkoutId, row.folder]);
+    if (checkoutId && row.folder && !folders.has(folderKey)) folders.set(folderKey, 'Folder ' + (folders.size + 1));
     const helper = row.source === 'helper' || Object.hasOwn(row, 'parentId');
     const safe = {
       id: row.id, provider: row.provider, source: row.source, status: row.status,
       projectId: row.projectId, project: room.name, projectKind: row.projectKind,
       repoId: row.repoId, repo: repoName, repoKind: row.repoKind,
-      worktree: row.worktree ? worktrees.get(worktreeKey) : null,
+      checkoutId, checkoutKind,
+      worktree: checkoutKind === 'worktree' ? worktrees.get(checkoutId) : null,
+      folder: checkoutId && row.folder ? folders.get(folderKey) : '',
       paneId: typeof row.paneId === 'string' && PANE.test(row.paneId) ? row.paneId : null,
       role: row.role === 'overseer' && row.source === 'herdr' ? 'overseer' : null,
       title: helper ? 'Helper' : 'Live ' + (row.provider === 'claude' ? 'Claude' : 'Codex') + ' session',
