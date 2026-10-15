@@ -11,7 +11,7 @@ You do **not** need to install or run StarNet. The necessary observer code, shar
 | Dependency | Purpose |
 | --- | --- |
 | macOS | Supported and tested platform for this initial release. |
-| [Node.js](https://nodejs.org/en/download) 22.13 or newer | Runs the local server; built-in SQLite reads bus and helper-session snapshots. |
+| [Bun](https://bun.sh/) 1.3.13 or newer | Runs the local server; native SQLite reads bus and helper-session snapshots. |
 | Git | Cloning, updates, and read-only repository/worktree detection. |
 | [Herdr](https://herdr.dev/docs/install/) | Discovers Codex and Claude Code agents running in Herdr panes. Start your terminal agents inside Herdr. |
 | Codex CLI and/or Claude Code | Supply the sessions and their locally stored transcripts. Authenticate them normally; this observer needs no provider API keys. |
@@ -19,28 +19,32 @@ You do **not** need to install or run StarNet. The necessary observer code, shar
 | [llm-bus](https://github.com/wnz99/llm-bus) (optional) | Supplies local agent registrations, message couriers, and message inspectors. Without it, terminal observation still works, but mail is unavailable. |
 | Xcode Command Line Tools (optional) | Supplies `swiftc` for observing the Codex desktop app. Not needed for terminal-only use. |
 
-There are no npm package dependencies. Use Node to launch it even if you normally use Bun; the readers use `node:sqlite`.
+There are no package dependencies. Bun runs the server and regression suite; its native `bun:sqlite` reads private database snapshots. No Node executable is required.
+
+Bun emits no lockfile for this empty dependency graph. `bun install --frozen-lockfile` still verifies the dependency-free installation.
 
 ## Install the observer
 
-After installing Node, Git, Herdr, and Python:
+After installing Bun, Git, Herdr, and Python:
 
 ```sh
 git clone https://github.com/wnz99/starnet-observer.git
 cd starnet-observer
-npm ci
-npm start
+bun install --frozen-lockfile
+bun run start
 ```
 
 Open **http://127.0.0.1:4319** in your browser. Keep the server terminal open. Stop with **Ctrl+C**.
 
-You can also run `node server.js` directly. Start it from any directory with `node /path/to/starnet-observer/server.js`. If port 4319 is occupied:
+You can also run `bun --no-env-file server.js` directly. Start it from any directory with `bun --no-env-file /path/to/starnet-observer/server.js`. If port 4319 is occupied:
 
 ```sh
-PORT=4320 npm start
+PORT=4320 bun run start
 ```
 
 The server prints the address to open. It listens only on your own computer's loopback address.
+
+Supported commands disable implicit `.env` loading, including when launched from another directory. Shell-exported settings such as `PORT` and `HERDR_SOCKET_PATH` still apply. JSON application configuration is described below.
 
 ## Start terminal agents with Herdr
 
@@ -102,7 +106,7 @@ The observer reads the default macOS mailbox at `~/.local/share/llm-bus/bus.sqli
 For a screen recording, stop the normal server and start:
 
 ```sh
-npm run presentation
+bun run presentation
 ```
 
 Open http://127.0.0.1:4319. This mode shows **real live activity** under a fictional company, **Helioforge**. Rooms use Product, Platform, Intelligence, and Operations; repositories use names such as `helio-web`, `helio-auth`, `helio-agents`, and `helio-console`. Additional rooms and repositories receive numbered aliases.
@@ -111,7 +115,7 @@ Labels stay stable during that server run. Actual repositories, folders, session
 
 The header explicitly says **LIVE · FICTIONAL LABELS**. Describe a shared recording as “Live agent activity with fictional company/project labels”; these labels do not represent an actual customer or employer. This is presentation masking, not a guarantee of full anonymity: activity patterns, timing, and aggregate counts are still real.
 
-Restart with `npm start -- --no-presentation` to return to normal observation, even if your config enables masking. Do not record private terminal windows or unrelated browser tabs alongside it.
+Restart with `bun run start --no-presentation` to return to normal observation, even if your config enables masking. Do not record private terminal windows or unrelated browser tabs alongside it.
 
 ## Themes and configuration
 
@@ -121,10 +125,10 @@ Two presets are included:
 
 ```sh
 # Original interface colors, real names, simple starfield
-npm start -- --config themes/basic.json
+bun run start --config themes/basic.json
 
 # Helioforge fictional labels, cyan interface accents, FX enabled
-npm start -- --config themes/helioforge.json
+bun run start --config themes/helioforge.json
 ```
 
 `presentation` explicitly controls privacy masking. Colors and FX do not enable masking on their own. The Helioforge preset sets `presentation: true`; the basic preset sets it to `false`.
@@ -135,7 +139,7 @@ To make your own theme, copy the example:
 cp observer.config.example.json observer.config.json
 ```
 
-Edit it, then run `npm start`. `observer.config.json` next to `server.js` is loaded automatically and is Git-ignored. An explicit `--config` path instead selects that file; relative paths resolve from the directory where you run the command. The selected file replaces the automatic file, then merges with built-in defaults. Restart the server and reload the browser after edits.
+Edit it, then run `bun run start`. `observer.config.json` next to `server.js` is loaded automatically and is Git-ignored. An explicit `--config` path instead selects that file; relative paths resolve from the directory where you run the command. The selected file replaces the automatic file, then merges with built-in defaults. Restart the server and reload the browser after edits.
 
 The configuration fields are:
 
@@ -153,13 +157,13 @@ Names must be nonempty text without control characters, at most 80 characters. R
 CLI flags override the selected file:
 
 ```sh
-npm start -- --presentation --company "Orbit Works" --repo-prefix orbit --no-fx
-npm start -- --config themes/helioforge.json --company "My Demo Studio" --no-fx
-npm start -- --no-presentation
-node server.js --help
+bun run start --presentation --company "Orbit Works" --repo-prefix orbit --no-fx
+bun run start --config themes/helioforge.json --company "My Demo Studio" --no-fx
+bun run start --no-presentation
+bun --no-env-file server.js --help
 ```
 
-Use either `--presentation` or `--no-presentation`, and either `--fx` or `--no-fx`; conflicting pairs are rejected. `--company` and `--repo-prefix` customize labels but do not enable presentation mode. Port selection remains `PORT=4320 npm start`.
+Use either `--presentation` or `--no-presentation`, and either `--fx` or `--no-fx`; conflicting pairs are rejected. `--company` and `--repo-prefix` customize labels but do not enable presentation mode. Port selection remains `PORT=4320 bun run start`.
 
 ## Optional Codex desktop observation
 
@@ -186,14 +190,14 @@ Stop the observer before updating:
 
 ```sh
 git pull --ff-only
-npm ci
-npm start
+bun install --frozen-lockfile
+bun run start
 ```
 
 For the regression suite:
 
 ```sh
-npm test
+bun run test
 ```
 
 ## Credits

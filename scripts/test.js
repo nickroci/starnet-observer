@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, '..');
 const files = fs.readdirSync(path.join(root, 'test')).filter(file => file.endsWith('.test.js')).sort();
 for (const file of files) {
   console.log('\n' + file);
-  const result = spawnSync(process.execPath, [path.join(root, 'test', file)], { cwd: root, stdio: 'inherit' });
+  const result = spawnSync(process.execPath, ['--no-env-file', path.join(root, 'test', file)], { cwd: root, stdio: 'inherit' });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status || 1);
 }

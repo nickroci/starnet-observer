@@ -10,7 +10,7 @@ const ObserverMailInspector = (() => {
     'invalid-identity': 'This message could not be identified, so no text is shown.',
     'identity-mismatch': 'The bus no longer holds the message that was listed, so no text is shown.',
     missing: 'No bus database found.',
-    unsupported: 'The bus reader needs Node with node:sqlite.',
+    unsupported: 'Bus SQLite support unavailable; use the supported Bun runtime.',
     unstable: 'The bus was busy while copying. Close and reopen to retry.',
     unreadable: 'The bus could not be read.'
   };

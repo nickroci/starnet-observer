@@ -47,12 +47,12 @@ None. Initialization records the current application only; no feature milestone 
 
 ## Constraints
 
-- **Runtime:** Node.js 22.13+; native `node:sqlite` requires Node rather than substituting Bun. No npm package dependencies.
+- **Runtime:** Bun 1.3.13+ with native `bun:sqlite`. No package dependencies or Node executable required.
 - **Platform:** macOS is the supported initial target. Python 3.11+, Git, and Herdr support source discovery. llm-bus and Xcode command-line tools enable optional integrations.
 - **Privacy:** Loopback binding, per-launch API token, origin checks, bounded reads, identity checks, and redaction must remain intact. Presentation masking does not guarantee anonymity.
 - **Truthfulness:** Missing sources remain unavailable and stale observations remain marked stale; unresolved identities must not open guessed transcripts.
 - **Independence:** No StarNet checkout, account, cloud service, database server, or provider API key is required by the observer.
-- **Verification:** `npm test` passed all 18 test files on Node v22.16.0 during initialization. This does not establish a fresh real-browser visual audit or live desktop integration check.
+- **Verification:** `bun run test` passed all 19 test files on Bun 1.3.13 on 2026-10-15, including mandatory native SQLite fixtures. Historical initialization evidence: `npm test` passed all 18 test files on Node v22.16.0. Neither run establishes a real-browser visual audit or live desktop integration check.
 
 ## Key Decisions
 
