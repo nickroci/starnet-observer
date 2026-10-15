@@ -23,6 +23,20 @@ for (const worker of scene.workers) for (let i = 1; i < worker.route.length; i++
 const revision = scene.revision;
 rows[0] = { ...rows[0], status: 'working', title: 'new dynamic title' }; layout.reconcile(rows);
 assert.equal(Scene.build(layout.onPage(0), 0).revision, revision, 'status/title changes do not change geometry revision');
+{
+  const folderLayout = Model.createLayout(), folderRows = Array.from({ length: 9 }, (_, i) =>
+    ({ ...row('worker' + i), source: 'herdr', provider: 'claude', folder: 'front' }));
+  folderLayout.reconcile(folderRows);
+  const shared = Scene.build(folderLayout.onPage(0), 0);
+  assert.equal(shared.platforms[0].sections.length, 1);
+  folderRows[8] = { ...folderRows[8], folder: 'back' };
+  folderLayout.reconcile(folderRows);
+  const divided = Scene.build(folderLayout.onPage(0), 0);
+  assert.equal(divided.platforms[0].sections.length, 2);
+  assert.equal(divided.platforms[0].sections[1].partitions.length, 2, 'folder separation adds partition walls');
+  assert.deepEqual(divided.workers.map(w => [w.id, w.chair]), shared.workers.map(w => [w.id, w.chair]), 'folder separation can preserve every chair');
+  assert.notEqual(divided.revision, shared.revision, 'changed section topology invalidates floor and movement caches even with stable chairs');
+}
 const small = Model.createLayout(); small.reconcile([row(0)]);
 const one = Scene.build(small.onPage(0), 0);
 assert(one.bounds.maxY - one.bounds.minY < scene.bounds.maxY - scene.bounds.minY, 'unused slots do not enter occupied fit');

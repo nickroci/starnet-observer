@@ -33,6 +33,11 @@ assert.throws(() => makeProjectResolver({ execute: execFile }), /requires an inj
     const linkedAlias = path.join(temp, 'linked-alias'); await fs.symlink(worktree, linkedAlias);
     assert.equal((await batch.resolve(path.join(linkedAlias, 'nested'))).folder, 'nested');
     assert.equal((await batch.resolve(path.join(root, 'nested'))).folder, 'nested');
+    await fs.mkdir(path.join(root, '..drafts'));
+    const dotDrafts = await batch.resolve(path.join(root, '..drafts'));
+    assert.equal(dotDrafts.folder, '..drafts', 'a child beginning with two dots stays inside its checkout');
+    assert.equal(dotDrafts.repoId, batchRows[1].repoId);
+    assert.equal(dotDrafts.projectId, batchRows[1].projectId);
     const cachePressure = Array.from({ length: 257 }, (_, index) => temp + '/.'.repeat(index + 1));
     const pressured = makeProjectResolver({ now: () => 1000, execute: async (...args) => {
       if (args[1][1] === await fs.realpath(temp)) throw new Error('Fixture folder is not a checkout');
