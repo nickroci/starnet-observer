@@ -58,6 +58,21 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
         const boot = '<script nonce="' + nonce + '">window.__OBSERVER_TOKEN__=' + JSON.stringify(token) + ';window.__OBSERVER_THEME__=' + JSON.stringify(theme).replace(/</g, '\\u003c') + ';</script>';
         data = Buffer.from(data.toString().replace('</head>', boot + '</head>'));
       }
+      // Stable asset filenames require byte revalidation; HTML and its aliases
+      // retain no-store, including pages containing per-launch bootstrap secrets.
+      if (!/\.html?$/i.test(file) && !/\.html?$/i.test(canonical)) {
+        const etag = '"' + crypto.createHash('sha256').update(data).digest('hex') + '"';
+        res.setHeader('Cache-Control', 'private, no-cache');
+        res.setHeader('ETag', etag);
+        const matches = (req.headers['if-none-match'] || '').split(',').some(value => {
+          const candidate = value.trim();
+          return candidate === '*' || candidate.replace(/^W\//, '') === etag;
+        });
+        if (matches) {
+          res.writeHead(304);
+          return res.end();
+        }
+      }
       res.writeHead(200, { 'Content-Type': MIME[path.extname(canonical)] || 'application/octet-stream' });
       res.end(data);
     } catch (error) {
