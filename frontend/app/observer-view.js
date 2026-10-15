@@ -239,7 +239,7 @@ const ObserverView = (() => {
   }
   function paintWalkway(ctx, walkway) {
     // A relay lane (a room whose agents the relay carries, and its way to the mailroom) wears the relay's amber rails.
-    const r = walkway.rect, rail = walkway.relay ? C.amber : C.rail;
+    const r = walkway.rect, rail = walkway.relay === 'unverified' ? C.dim : walkway.relay ? C.amber : C.rail;
     prism(ctx, corners(r), 0, -0.35, { top: C.grate, left: C.hullLeft, right: C.hullRight });
     ctx.save(); ctx.globalAlpha = 0.5;
     for (let x = r.x + 0.5; x < r.x + r.w; x += 0.5) line(ctx, { x, y: r.y }, { x, y: r.y + r.h }, C.grateDark);
@@ -945,25 +945,6 @@ const ObserverView = (() => {
       if (live) glow(ctx, { ...link.to, z: 2.2 }, 14, C.cyan, animate ? 0.3 + 0.25 * Math.sin(now / 600) : 0.4);
       ctx.restore();
     }
-    /* llm-bus relay highway: a raised deck from mailroom to mailroom, the path relayed couriers fly (they fly at its deck
-       height). Pylons stand on the two mailrooms. Its centre chevrons march while its observed end saw relay activity
-       in the last 15 minutes, stand still while quiet, and turn grey while that bus is unreadable. Painted over the
-       decks it crosses, as an overpass. */
-    function paintHighway(link, now, animate) {
-      const unknown = link.state === 'unknown', active = link.state === 'active', edge = unknown ? C.idle : C.amber;
-      const dx = link.b.x - link.a.x, dy = link.b.y - link.a.y, length = Math.max(0.001, Math.hypot(dx, dy)), nx = -dy / length * 0.8, ny = dx / length * 0.8, z = 2.2;
-      const at = (t, side, height = z) => P({ x: link.a.x + dx * t + nx * side, y: link.a.y + dy * t + ny * side, z: height });
-      for (const t of [0, 1]) for (const side of [-1, 1]) { const top = at(t, side), foot = at(t, side, 0); ctx.save(); ctx.strokeStyle = C['walkway-support']; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(foot.x, foot.y); ctx.stroke(); ctx.restore(); }
-      const deck = [at(0, -1), at(1, -1), at(1, 1), at(0, 1)], under = [at(0, 1, z - 0.4), at(1, 1, z - 0.4)];
-      poly(ctx, [deck[3], deck[2], under[1], under[0]], C.hullRight);
-      poly(ctx, deck, C.grate, C.grateDark);
-      for (const side of [-1, 1]) line(ctx, { x: link.a.x + nx * side, y: link.a.y + ny * side, z: z + 0.35 }, { x: link.b.x + nx * side, y: link.b.y + ny * side, z: z + 0.35 }, edge, 2, 0.9);
-      // Centre chevrons: one per tile, offset by time while live.
-      const shift = active && animate ? (now / 900) % 1 : 0;
-      ctx.save(); ctx.globalAlpha = unknown ? 0.5 : active ? 0.95 : 0.6; ctx.fillStyle = edge;
-      for (let d = shift; d < length; d += 1.5) { const t = d / length, p = at(t, 0, z + 0.02), q = at(Math.min(1, t + 0.5 / length), 0, z + 0.02); ctx.beginPath(); ctx.arc((p.x + q.x) / 2, (p.y + q.y) / 2, 2.2, 0, Math.PI * 2); ctx.fill(); }
-      ctx.restore();
-    }
     // ---------- FX: glow and sparks on the station itself (world space, deterministic) ----------
     // A burst of rising pixel sparks around a screen point. Each spark loops on its own phase so there is no state.
     function sparks(x, y, key, now, { count = 6, color = C.spark, alt = null, rise = 18, spread = 14, life = 1400, size = 2, gravity = 0 } = {}) {
@@ -1339,14 +1320,15 @@ const ObserverView = (() => {
         plates.push(textPlate(live ? 'ssh · observing' : link.health === 'stale' ? 'ssh · stale' : 'ssh · unreachable', mid.x, mid.y - 4,
           { accent: live ? C.cyan : C.idle, size: 12, color: live ? C.cyan : C.idle, priority: 46, dash: [2, 2] }));
       }
-      // Relay link labels: which relay carries the mail, and what the observed end's bus says about it.
+      // Highway labels, on the highway's lane: which relay, what the observed end's bus says, whether mail has ever
+      // crossed it (until then only the relay roster proves the far machine), and how many agents here are on it.
       for (const relay of scene.relays || []) for (const link of relay.links) {
-        // Just short of the far mailroom: the gap before that ship, clear of the decks the link passes over.
-        const t = Math.max(0.5, 1 - 7 / Math.max(1, Math.hypot(link.b.x - link.a.x, link.b.y - link.a.y))), live = link.state === 'active';
-        const mid = screen({ x: link.a.x + (link.b.x - link.a.x) * t, y: link.a.y + (link.b.y - link.a.y) * t, z: 2.2 });
-        const note = live ? 'live' : link.state === 'unknown' ? 'bus unreadable' : Number.isFinite(link.lastActivityAt) ? 'quiet · ' + Model.age(link.lastActivityAt) : 'quiet';
-        plates.push(textPlate(clipText('RELAY ' + relay.relay + ' · ' + note + ' · ' + link.carried + ' on it here', viewport.width * 0.6, 12), mid.x, mid.y - 14,
-          { accent: link.state === 'unknown' ? C.idle : C.amber, size: 12, color: live ? C.amber : C.dim, priority: 46, dash: live ? null : [3, 3] }));
+        const lane = link.path.length > 3 ? { x: (link.path.at(-3).x + link.path.at(-4).x) / 2, y: link.path.at(-3).y } : { x: link.path[1].x, y: (link.path[1].y + link.path[2].y) / 2 };
+        const mid = screen({ ...lane, z: 0.6 }), live = link.state === 'active';
+        const note = live ? 'live' : link.state === 'unknown' ? 'bus unreadable' : Number.isFinite(link.lastActivityAt) ? 'quiet ' + Model.age(link.lastActivityAt) : 'quiet';
+        const proof = link.verified ? 'mail has crossed' : 'unverified · roster only, no mail yet';
+        plates.push(textPlate(clipText('RELAY ' + relay.relay + ' · ' + note + ' · ' + proof + ' · ' + link.carried + ' agents here on it', viewport.width * 0.7, 12), mid.x, mid.y - 6,
+          { accent: link.state === 'unknown' || !link.verified ? C.idle : C.amber, size: 12, color: live && link.verified ? C.amber : C.dim, priority: 46, dash: link.verified ? null : [3, 3] }));
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
       plates.push(textPlate('MAILROOM · llm-bus', hubAt.x, hubAt.y, { accent: C.amber, size: signSize(18), color: C.window, priority: 45 }));
@@ -1479,7 +1461,6 @@ const ObserverView = (() => {
         items.push({ depth: region.rect.x + region.rect.y + 1, draw: () => A.apron(ctx, region) });
       items.sort((a, b) => a.depth - b.depth || String(a.tie || '').localeCompare(String(b.tie || '')));
       for (const item of items) item.draw();
-      for (const relay of scene.relays || []) for (const link of relay.links) paintHighway(link, now, animate);
       /* The selected repository's crew, roots and helpers alike, each get a ring; a worker whose own fresh status is
          working gets a thicker double ring and a glow. Read from the controller per paint; nothing accumulates. */
       const selectedRepo = repositorySelection();

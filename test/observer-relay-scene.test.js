@@ -52,28 +52,36 @@ const shadowHost = (net, shadow, member) => ({ id: shadow.host, shadow: true, he
   for (const worker of crew) assert.deepEqual(worker.route.at(-1), shadow.mail.hub, 'ghost crew walk to their own mailroom');
   const local = scene.workers.find(worker => worker.id === 'obs_a'), alone = plain.workers.find(worker => worker.id === 'obs_a');
   assert.deepEqual(local.route, alone.route, 'observed crew routes are unchanged');
-  assert.deepEqual(scene.relays[0].links.map(link => [link.from, link.to, link.shadow, link.a.z]), [[null, 'relay:whitenoise', true, 2.2]], 'one relay link, mailroom to mailroom, above the decks');
+  assert.deepEqual(scene.relays[0].links.map(link => [link.from, link.to, link.shadow, link.verified]), [[null, 'relay:whitenoise', true, false]], 'one highway, mailroom to mailroom, unverified until mail crosses');
+  const link = scene.relays[0].links[0];
+  assert.deepEqual([link.path[0], link.path.at(-1)], [scene.mail.hub, shadow.mail.hub], 'it runs from this mailroom to the shadow mailroom');
+  const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  const highway = scene.walkways.filter(walkway => walkway.kind === 'relay-highway');
+  for (const segment of highway) for (const solid of [...scene.platforms.map(p => p.rect), scene.observatory.rect]) assert.ok(!overlap(segment.rect, solid), 'around every floor and the observatory');
+  for (let index = 1; index < link.path.length; index++) assert.ok(link.path[index].x === link.path[index - 1].x || link.path[index].y === link.path[index - 1].y, 'axis-aligned like every walkway');
 
   // Couriers: desk → this mailroom → across the relay link → the far mailroom → the far agent's desk, and back.
   const fake = { seatFor: id => (scene.workers.some(w => w.id === id) ? 0 : undefined), pageFor: () => 0, colorFor: () => ({ accent: '#fff' }) };
   const target = crew[0].id, sent = state => ({ from: 'obs_a', to: 'external', acknowledgedAt: null, wake: 'unsupported', relay: { direction: 'out', machine: 'whitenoise', repo: 'llm-bus', peer: target, state } });
   const out = Scene.route(scene, fake, sent('accepted_remote'), []);
   assert.equal(out.key, 'obs_a>' + target);
-  assert.deepEqual(out.to.slice(-2), [shadow.mail.hub, scene.mail.hub], 'the outbound leg crosses from this hub to the far hub');
+  assert.deepEqual(out.to.at(-1), scene.mail.hub, 'the outbound leg starts at this hub');
+  assert.ok(out.to.some(point => point.x === shadow.mail.hub.x && point.y === shadow.mail.hub.y), 'passes through the far hub');
+  for (const point of link.path.slice(1, -1)) assert.ok(out.to.some(value => value.x === point.x && value.y === point.y), 'and follows the highway');
   assert.deepEqual(out.to[0], crew[0].route[0], 'and ends at the far agent\'s chair');
   assert.deepEqual(out.from.at(-1), scene.mail.hub);
   const inbound = Scene.route(scene, fake, { from: 'external', to: 'obs_a', relay: { direction: 'in', machine: 'whitenoise', repo: 'llm-bus', peer: target, state: 'delivered_local' } }, []);
   assert.equal(inbound.key, target + '>obs_a'); assert.deepEqual(inbound.from[0], crew[0].route[0]);
   const unknown = Scene.route(scene, fake, { ...sent('accepted_remote'), relay: { ...sent('accepted_remote').relay, peer: 'peer_' + 'f'.repeat(24) } }, []);
-  assert.deepEqual(unknown.to, [shadow.mail.hub, scene.mail.hub], 'an agent the roster no longer lists: that machine\'s mailroom');
+  assert.deepEqual([unknown.to[0], unknown.to.at(-1)], [{ ...shadow.mail.hub, z: 0 }, { ...scene.mail.hub, z: 0 }], 'an agent the roster no longer lists: that machine\'s mailroom, along the highway');
   assert.equal(Scene.route(scene, fake, { from: 'obs_a', to: 'external' }, []).key, 'obs_a>chute', 'unrelayed outside mail still uses the chute');
   assert.equal(Scene.route(scene, fake, { ...sent('queued_local'), relay: { ...sent('queued_local').relay, machine: 'elsewhere' } }, []).key, 'obs_a>chute', 'a machine with no relay link: chute');
 
   // Pending: where llm-bus last proved it is.
   const at = state => Scene.pending(scene, fake, [sent(state)]);
   assert.ok(inside(at('queued_local')[0].point, scene.mail.rect), 'queued: still in this mailroom');
-  const mid = at('accepted_remote')[0].point, link = scene.relays[0].links[0];
-  assert.deepEqual([mid.x, mid.y], [(link.a.x + link.b.x) / 2, (link.a.y + link.b.y) / 2], 'held by the relay: halfway along the link');
+  const mid = at('accepted_remote')[0].point;
+  assert.ok(highway.some(segment => inside(mid, segment.rect)), 'held by the relay: on the highway');
   assert.deepEqual([at('delivered_local')[0].point.x, at('delivered_local')[0].point.y], [crew[0].route[0].x, crew[0].route[0].y], 'delivered: at the far agent\'s desk');
   assert.deepEqual(at('expired'), [], 'expired is not pending anywhere');
   assert.equal(at('accepted_remote')[0].mark, true, 'relay sends never wake locally: marked like any unsupported wake');
@@ -86,11 +94,22 @@ const shadowHost = (net, shadow, member) => ({ id: shadow.host, shadow: true, he
   const scene = Scene.build(layout.onPage(0), 0, { hosts: [{ id: 'vm', health: 'available', agents: 1 }], relays: nets }), vmShip = scene.ships.find(ship => ship.id === 'vm');
   assert.deepEqual(nets[0].shadows, [], 'both machines are observed: no shadows');
   assert.deepEqual(scene.relays[0].links.map(link => [link.from, link.to, link.shadow]), [[null, 'vm', false]]);
+  const column = scene.walkways.filter(walkway => walkway.kind === 'relay-highway');
+  assert.ok(column.length === 1 && column[0].rect.x + column[0].rect.w / 2 === scene.mail.hub.x, 'member to member: straight down the centre line between the banks');
   const fake = { seatFor: id => (['obs_l', 'obs_v'].includes(id) ? 0 : undefined), pageFor: () => 0, colorFor: () => ({ accent: '#fff' }) };
   const vmOut = Scene.route(scene, fake, { from: 'obs_v', to: 'external', relay: { direction: 'out', machine: 'mac', repo: 'llm-bus', state: 'accepted_remote' } }, [], 'vm');
-  assert.deepEqual(vmOut.to, [scene.mail.hub, vmShip.mail.hub], 'the vm half flies from the vm mailroom to this machine\'s');
+  assert.deepEqual([vmOut.to[0], vmOut.to.at(-1)], [{ ...scene.mail.hub, z: 0 }, { ...vmShip.mail.hub, z: 0 }], 'the vm half runs from the vm mailroom to this machine\'s');
   assert.deepEqual(vmOut.from.at(-1), vmShip.mail.hub);
   assert.deepEqual(Scene.pending(scene, fake, [{ to: 'external', acknowledgedAt: null, relay: { direction: 'out', machine: 'mac', repo: 'llm-bus', state: 'delivered_local' } }], 'vm'), [],
     'delivered to an observed machine: its own mailroom shows the copy, so none is drawn here');
+}
+// Evidence: a highway is verified once mail demonstrably crossed with that machine (received from, or delivered to).
+{
+  const base = remote('mac', { peers: [peer('whitenoise', [agent('a')])] });
+  const crossed = messages => Scene.relayNetworks([[null, { health: 'available', messages, remote: base }]], NOW)[0].members[0].crossed;
+  assert.deepEqual(crossed([]), []);
+  assert.deepEqual(crossed([{ relay: { direction: 'out', machine: 'whitenoise', state: 'accepted_remote' } }]), [], 'held by the relay is not proof of the far end');
+  assert.deepEqual(crossed([{ relay: { direction: 'out', machine: 'whitenoise', state: 'delivered_local' } }]), ['whitenoise']);
+  assert.deepEqual(crossed([{ relay: { direction: 'in', machine: 'whitenoise', state: 'delivered_local' } }]), ['whitenoise']);
 }
 console.log('relay scene: networks and shadows from bus bindings, ghost crew rows, shadow ships docked beside their member, unchanged crew and ssh links, desk-to-desk relay couriers and truthful pending spots OK');
