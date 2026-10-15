@@ -54,4 +54,4 @@ Next action: Ask what work to track next before creating a milestone or phase.
 
 | Work | Status | Directory |
 | --- | --- | --- |
-| Standalone theme framework and local appearance comparisons | Task 1 infrastructure reviewed; frontend handoff pending | .planning/quick/261014-wv3-standalone-theme-framework-and-local-app |
+| Standalone theme framework and local appearance comparisons | Task 1 complete; Task 2 crew runtime next | .planning/quick/261014-wv3-standalone-theme-framework-and-local-app |

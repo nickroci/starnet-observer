@@ -60,8 +60,7 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       if (canonical === path.join(ROOT, 'observer.html')) {
         const boot = '<script nonce="' + nonce + '">window.__OBSERVER_TOKEN__=' + JSON.stringify(token) + ';window.__OBSERVER_THEME__=' + JSON.stringify(theme).replace(/</g, '\\u003c') + ';window.__OBSERVER_THEME_DEFAULT__=' + JSON.stringify(canonicalTheme).replace(/</g, '\\u003c') + ';window.__OBSERVER_THEME_PACK__=' + JSON.stringify(themePack).replace(/</g, '\\u003c') + ';</script>';
         const html = data.toString();
-        // The old template remains runnable until the frontend handoff adds its fixed head marker.
-        data = Buffer.from(html.includes('<!--observer-boot-->') ? html.replace('<!--observer-boot-->', boot) : html.replace('</head>', boot + '</head>'));
+        data = Buffer.from(html.replace('<!--observer-boot-->', boot));
       }
       res.writeHead(200, { 'Content-Type': MIME[path.extname(canonical)] || 'application/octet-stream' });
       res.end(data);
