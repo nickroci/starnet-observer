@@ -7,6 +7,7 @@ const ObserverMail = require('../frontend/app/observer-mail.js');
 const ObserverInspector = require('../frontend/app/observer-inspector.js');
 const ObserverMailInspector = require('../frontend/app/observer-mail-inspector.js');
 const ObserverScene = require('../frontend/app/observer-scene.js');
+const ThemePack = require('../frontend/app/theme-pack.js');
 let document;
 // DOM double with real move semantics: inserting an attached node detaches it first, as the browser does.
 let created = 0, listenersAdded = 0;
@@ -35,7 +36,7 @@ function boot({ theme = {}, saved = {}, broken = false } = {}) {
   const ObserverView = { create() { return { setFx(on) { fxOn = on; fx.push(on); }, fx() { return fxOn; }, update(scene) { updates.push(scene); }, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate() {} }; } };
   const localStorage = broken ? { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); } }
     : { getItem: key => Object.hasOwn(saved, key) ? saved[key] : null, setItem: (key, value) => { stored.push([key, value]); saved[key] = value; } };
-  const context = { console, Date, Set, Map, Number, document, setTimeout: () => 0, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, encodeURIComponent,
+  const context = { console, Date, Set, Map, Number, document, setTimeout: () => 0, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ObserverView, ThemePack, encodeURIComponent,
     window: { __OBSERVER_THEME__: theme, localStorage, addEventListener() {} },
     SPRITES: { init: async () => {} }, Harness: { api: { get: () => new Promise(() => {}) } },
     QuerySpine: { define() {}, invalidate: () => Promise.resolve(), subscribe(key, fn) { if (key === 'observer.sessions') listener = fn; return () => {}; } } };

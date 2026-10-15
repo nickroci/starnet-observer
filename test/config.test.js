@@ -34,6 +34,10 @@ try {
   for (const bad of [{ theme: { arrange: 'yes' } }, { roomsFile: '' }, { roomsFile: 3 }, { roomsFile: 'a\u0000b' }]) assert.throws(() => validateConfig(bad));
   assert.throws(() => loadConfig(['--fx', '--no-fx'], missing));
   for (const theme of [null, [], { fx: 'false' }, { scripts: 'bad' }, { colors: { accent: 'red' } }, { colors: { accent: '#123' } }, { colors: { custom: '#123456' } }]) assert.throws(() => validateConfig({ theme }));
+  assert.deepEqual(validateConfig({ theme: { pack: 'starnet' } }), { theme: { pack: 'starnet' } });
+  write({ theme: { pack: 'sample', fx: false } });
+  assert.deepEqual(loadConfig(['--fx'], file).theme, { pack: 'sample', fx: true });
+  for (const pack of ['', '../sample', 'Sample', '-sample', 'a'.repeat(33), null, 1]) assert.throws(() => validateConfig({ theme: { pack } }), /theme.pack/);
   const basic = loadConfig(['--config', path.join(__dirname, '../themes/basic.json')], missing);
   assert.equal(basic.presentation, false); assert.equal(basic.theme.fx, false);
   const helio = loadConfig(['--config', path.join(__dirname, '../themes/helioforge.json')], missing);
@@ -59,6 +63,10 @@ try {
   const server = path.join(__dirname, '../server.js');
   const invalid = spawnSync(process.execPath, ['--no-env-file', server, '--config', file], { cwd: folder, encoding: 'utf8', timeout: 3000 });
   assert.equal(invalid.status, 1); assert.match(invalid.stderr, /config/); assert.doesNotMatch(invalid.stdout, /Local Observer:/);
+  write({ theme: { pack: 'uninstalled-test-pack' } });
+  const missingPack = spawnSync(process.execPath, ['--no-env-file', server, '--config', file], { cwd: folder, encoding: 'utf8', timeout: 3000 });
+  assert.equal(missingPack.status, 1); assert.match(missingPack.stderr, /Unknown or uninstalled theme pack/);
+  assert.doesNotMatch(missingPack.stdout, /Local Observer:/);
   const help = spawnSync(process.execPath, ['--no-env-file', server, '--help'], { cwd: folder, encoding: 'utf8', timeout: 3000 });
   assert.equal(help.status, 0); assert.match(help.stdout, /--no-presentation/);
   assert.match(help.stdout, /Usage: bun --no-env-file server\.js/);
@@ -72,10 +80,11 @@ try {
   validateConfig(example);
   // Remotes: validated ids, ssh targets that can never be read as ssh options, plain dirs, defaults.
   assert.deepEqual(loadConfig([], missing).remotes, []);
-  write({ remotes: [{ id: 'herdr-dev-2', ssh: 'nick@34.153.167.160' }, { id: 'box', ssh: 'devbox', dir: '/srv/observer', mail: 'relay' }, { id: 'c', ssh: 'c', mail: 'separate' }] });
-  assert.deepEqual(loadConfig([], file).remotes, [{ id: 'herdr-dev-2', ssh: 'nick@34.153.167.160', dir: '~/starnet-observer', mail: 'separate' },
-    { id: 'box', ssh: 'devbox', dir: '/srv/observer', mail: 'relay' }, { id: 'c', ssh: 'c', dir: '~/starnet-observer', mail: 'separate' }], 'mail defaults to separate; relay is kept');
-  for (const mail of ['shared', 'RELAY', '', true, null, ['relay']]) assert.throws(() => validateConfig({ remotes: [{ id: 'a', ssh: 'h', mail }] }), /mail must be "separate" or "relay"/, String(mail));
+  write({ remotes: [{ id: 'herdr-dev-2', ssh: 'nick@34.153.167.160' }, { id: 'box', ssh: 'devbox', dir: '/srv/observer' }] });
+  assert.deepEqual(loadConfig([], file).remotes, [{ id: 'herdr-dev-2', ssh: 'nick@34.153.167.160', dir: '~/starnet-observer' },
+    { id: 'box', ssh: 'devbox', dir: '/srv/observer' }]);
+  // Mail topology is never configured: relays are drawn only from each bus's own binding.
+  assert.throws(() => validateConfig({ remotes: [{ id: 'a', ssh: 'h', mail: 'relay' }] }), /mail/);
   for (const remotes of [{}, Array.from({ length: 17 }, (_, i) => ({ id: 'h' + i, ssh: 'h' })), [{ id: 'A', ssh: 'h' }], [{ id: 'local', ssh: 'h' }],
     [{ id: 'a', ssh: 'h' }, { id: 'a', ssh: 'g' }], [{ id: 'a', ssh: '-oProxyCommand=touch /tmp/x' }], [{ id: 'a', ssh: 'h; rm' }], [{ id: 'a', ssh: 'u@h@x' }],
     [{ id: 'a', ssh: 'h', dir: '~/x; rm -rf ~' }], [{ id: 'a', ssh: 'h', dir: '../up' }], [{ id: 'a', ssh: 'h', dir: '$HOME' }], [{ id: 'a', ssh: 'h', port: 22 }]])

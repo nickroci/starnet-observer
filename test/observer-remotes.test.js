@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sanitizeBus, relayObserved, sshArgs, remoteCommand, reasonFrom, MAX_LINE, BACKOFF } = require('../sidecar/observer-remotes.js');
+const { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sanitizeBus, sshArgs, remoteCommand, reasonFrom, MAX_LINE, BACKOFF } = require('../sidecar/observer-remotes.js');
 const { startStream } = require('../scripts/stream.js');
 const { PANE } = require('../sidecar/control.js');
 
@@ -156,8 +156,20 @@ function fakeTimers() {
   const other = sanitizeSnapshot('vm2', { sessions: [row()], bus: { health: 'available', messages: [{ id: 5, from: 'obs_' + 'a'.repeat(24), to: 'external' }] } }, 1);
   assert.notEqual(other.bus.messages[0].from, five.from, 'the same remote session on two hosts never shares an endpoint');
   assert.equal(other.bus.messages[0].key, '5@vm2', 'the same id on two hosts has two keys');
-  // Relay hook: nothing relays today, whatever the bus says.
-  assert.deepEqual(relayObserved('vm', snap.bus), { observed: 'none', lastRelayedAt: null });
+  // Relay metadata crosses only in its closed vocabulary; anything else is dropped, never guessed.
+  const relayed = sanitizeSnapshot('vm', { sessions: [row()], bus: { health: 'available', messages: [
+    { id: 7, from: row().id, to: 'external', relay: { direction: 'out', machine: 'whitenoise', repo: 'llm-bus', provider: 'codex', state: 'accepted_remote', body: 'PRIVATE' } },
+    { id: 8, from: 'external', to: row().id, relay: { direction: 'in', machine: 'bad machine', repo: 'llm-bus', state: 'acknowledged' } },
+    { id: 9, from: 'external', to: row().id, relay: { direction: 'in', machine: 'whitenoise', repo: 'llm-bus', provider: 'gemini', state: 'teleported' } }],
+    remote: { relay: 'llm-bus-relay.example.dev', machine: 'friend-1', lastActivityAt: 5, token: 'PRIVATE', peers: [
+      { machine: 'whitenoise', repos: ['llm-bus', '../etc'], agents: 5, lastSeen: 4, native_address: 'codex:PRIVATE' }, { machine: 'friend-1', agents: 1 }, { machine: 'no spaces' }] } } }, 1);
+  assert.deepEqual(relayed.bus.messages[0].relay, { direction: 'out', machine: 'whitenoise', repo: 'llm-bus', provider: 'codex', state: 'accepted_remote' });
+  assert.equal(relayed.bus.messages[1].relay, undefined, 'an invalid machine id drops the relay field');
+  assert.deepEqual(relayed.bus.messages[2].relay, { direction: 'in', machine: 'whitenoise', repo: 'llm-bus', provider: null, state: 'unknown' });
+  assert.deepEqual(relayed.bus.remote, { relay: 'llm-bus-relay.example.dev', machine: 'friend-1', lastActivityAt: 5, peers: [{ machine: 'whitenoise', repos: ['llm-bus'], agents: 5, lastSeen: 4 }] },
+    'own machine and malformed peers dropped; no unknown fields cross');
+  assert.equal(JSON.stringify(relayed).includes('PRIVATE'), false);
+  assert.equal(sanitizeSnapshot('vm', { sessions: [], bus: { health: 'available', messages: [], remote: { relay: 'https://x/y', machine: 'm' } } }, 1).bus.remote, undefined, 'a relay must be a bare host name');
 }
 
 // ── Federation: never awaits ssh; merged aggregate; remote inspect; local unchanged.
@@ -183,7 +195,7 @@ function fakeTimers() {
   assert.equal(second.aggregate.agents.observed, 2, 'aggregate is recomputed over the merged roster');
   assert.deepEqual(second.bus, { health: 'available', messages: [] }, 'bus keeps its local shape');
   assert.deepEqual(second.hostBus, {}, 'a remote that published no bus has no hostBus entry');
-  assert.deepEqual(second.sources.hosts.vm.mail, { mode: 'separate', observed: 'none', lastRelayedAt: null }, 'mail defaults to separate');
+  assert.equal(second.sources.hosts.vm.mail, undefined, 'mail topology is never configured');
   silent.children[0].stdout.emit('data', JSON.stringify({ sessions: [row()], bus: { health: 'available', window: 100, messages: [{ id: 9, from: row().id, to: 'external', sentAt: 1, acknowledgedAt: null, wake: 'none' }] } }) + '\n');
   const third = await federated.get();
   assert.equal(third.hostBus.vm.messages[0].key, '9@vm'); assert.equal(third.hostBus.vm.messages[0].from, third.sessions[1].id, 'remote mail names the hub row');
@@ -193,12 +205,6 @@ function fakeTimers() {
   assert.equal(inspected.health, 'unavailable'); assert.equal(inspected.reason, 'remote-inspect');
   assert.deepEqual(await federated.inspect(localRow.id), { id: localRow.id, local: true });
   federated.close(); assert.equal(silent.children[0].killed, 'SIGTERM'); assert.equal(silent.children[0].stdinEnded, true);
-  // Config "relay" alone never claims relayed traffic: observed stays 'none' (the page then draws only a broken line).
-  const relaySpawn = fakeSpawn();
-  const relayHosts = makeRemoteHosts({ remotes: [{ id: 'r', ssh: 'r', mail: 'relay' }], spawn: relaySpawn.spawn, now: () => 5, setTimer: () => ({}), clearTimer: () => {} });
-  relaySpawn.children[0].stdout.emit('data', JSON.stringify({ sessions: [row()], bus: { health: 'available', messages: [{ id: 1, from: row().id, to: 'external' }] } }) + '\n');
-  assert.deepEqual(relayHosts.snapshot().sources.r.mail, { mode: 'relay', observed: 'none', lastRelayedAt: null });
-  relayHosts.close();
 
   // ── Remote stream side: one line per tick, written and awaited before the next is scheduled; stop is final.
   const writes = [], ticks = fakeTimers();
@@ -268,16 +274,7 @@ function fakeTimers() {
   assert.deepEqual(multi.links.map(link => [link.host, link.health]), [['vm', 'stale'], ['empty', 'unavailable']], 'link state is the real stream health');
   assert.equal(multi.links[0].from.y, flag.y + flag.h); assert.equal(multi.links[0].to.y, vmShip.rect.y);
   assert.equal(multi.links[1].from.y, vmShip.rect.y + vmShip.rect.h); assert.equal(multi.links[1].to.y, emptyShip.rect.y);
-  assert.deepEqual(multi.relays, [], 'mail "separate" (default): no mail link at all');
-  // Relay mode: configured but unobserved → only a broken "configured" line; observed → active. Config alone never activates it.
-  const relayed = mail => Scene.build(rooms, 0, { hosts: [{ id: 'vm', health: 'available', agents: 2, mail }] });
-  assert.deepEqual(relayed({ mode: 'relay', observed: 'none', lastRelayedAt: null }).relays.map(relay => relay.state), ['configured']);
-  assert.deepEqual(relayed({ mode: 'relay', observed: 'active', lastRelayedAt: 5 }).relays.map(relay => relay.state), ['active']);
-  assert.deepEqual(relayed({ mode: 'relay' }).relays.map(relay => relay.state), ['configured'], 'relay without an observation is never active');
-  assert.deepEqual(relayed({ mode: 'separate', observed: 'active' }).relays, [], 'separate never draws a mail link');
-  assert.equal(Scene.build(rooms, 0, { hosts: [{ id: 'vm', health: 'available', agents: 2, mail: { mode: 'relay', observed: 'none' } }] }).links[0].health, 'available', 'the observation link follows stream health, not config');
-  const relay = relayed({ mode: 'relay', observed: 'none' }).relays[0], relayShip = relayed({ mode: 'relay', observed: 'none' }).ships[1];
-  assert.equal(relay.from.y, multi.mail.rect.y + multi.mail.rect.h); assert.equal(relay.to.y, relayShip.mail.rect.y, 'a relay line runs mailroom to mailroom');
+  assert.equal(multi.relays, undefined, 'no relay without a bus that reports one');
   assert.ok(multi.bounds.maxY > single.bounds.maxY, 'the camera fits every ship');
   const localCrew = multi.workers.find(worker => !worker.row.host), alone = single.workers.find(worker => worker.id === localCrew.id);
   assert.deepEqual(localCrew.route, alone.route, 'local crew routes are unchanged by remotes');

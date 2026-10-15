@@ -149,8 +149,9 @@ The configuration fields are:
 | `company` | Company name in the presentation header. |
 | `repoPrefix` | Prefix for generated repo aliases. With built-in room lists, it also updates the built-in aliases. Explicit `rooms[].repos` names stay verbatim. |
 | `rooms` | Ordered room objects with `name` and optional `repos` arrays. Overrides the built-in room list. Aliases are allocated by opaque source IDs; allocation stays stable during one server run. |
-| `theme.fx` | Boolean; initial sky/station FX. The standard interface starts with FX off on every page load unless set here or overridden with `--fx` or `--no-fx`. The FX button changes effects for the current visit; its choice is not saved. |
-| `theme.colors` | Optional interface colors: `accent`, `background`, `panel`, `text`, each a six-digit hex color. Omitted colors use the original defaults. The station geometry, crew sprites, and observed status colors keep their original styling. |
+| `theme.pack` | Installed data-only pack ID; omitted selects `starnet`. Restart and reload after changing it. |
+| `theme.fx` | Boolean; initial sky/station FX. CLI overrides configuration; omitted defaults to off. The FX button changes the current page without browser persistence. |
+| `theme.colors` | Optional interface colors: `accent`, `background`, `panel`, `text`, each a six-digit hex color. Omitted colors inherit the selected pack. These four overrides change interface colors only. |
 
 Names must be nonempty text without control characters, at most 80 characters. Room names and explicit repo names must be unique, ignoring case. `repoPrefix` is 1–32 lowercase letters, digits, or hyphens, starting with a letter or digit. Additional rooms/repos get unique generated names. Unknown fields, invalid values, missing explicit files, and malformed JSON stop startup instead of silently applying a different mode. Files are limited to 64 KiB.
 
@@ -164,6 +165,63 @@ bun --no-env-file server.js --help
 ```
 
 Use either `--presentation` or `--no-presentation`, and either `--fx` or `--no-fx`; conflicting pairs are rejected. `--company` and `--repo-prefix` customize labels but do not enable presentation mode. Port selection remains `PORT=4320 bun run start`.
+
+### Local theme packs
+
+`theme.pack` selects one installed pack. Omit it to use `starnet`. A pack is a data-only directory at `frontend/assets/themes/<id>/theme.json`; IDs contain 1–32 lowercase letters, digits, or hyphens, starting with a letter or digit. Installation registers the directory automatically. There is no browser picker or saved pack preference: edit configuration, restart the server, and reload the page.
+
+For a minimal local pack, create `frontend/assets/themes/example/theme.json`:
+
+```json
+{
+  "version": 1,
+  "id": "example",
+  "extends": "starnet",
+  "ui": { "colors": { "phosphor": "#abcdef" } }
+}
+```
+
+Select it with `"theme": { "pack": "example" }` in the ignored local configuration. Add your private pack directory and any private presets/references to local Git ignore rules before adding artwork. Only the canonical `starnet` pack is bundled. Validate installed directories before restarting:
+
+```sh
+bun run validate:themes
+# An isolated authoring fixture can use its own public frontend root:
+bun --no-env-file scripts/validate-theme-packs.mjs /absolute/path/to/frontend
+```
+
+The author validator examines at most 16 immediate non-symlink pack directories and rejects invalid directory IDs. Startup reads only the selected pack and required default resources. A missing selected manifest stops startup. An existing selected pack with malformed data, invalid assets, or a resource-budget violation uses the complete default pack and supplies one bounded warning with requested/effective IDs. An invalid default installation stops startup. Warning metadata never contains private filesystem paths. Browser image/font decode has its own fallback checks; a valid PNG header does not prove an image can decode.
+
+The canonical [default manifest](frontend/assets/themes/starnet/theme.json) is the complete inventory of accepted color keys and values. Unknown fields and color keys are rejected. Missing custom fields inherit the default; supplied crew groups and office art maps must be complete. Custom packs extend only `starnet`; inheritance chains, JavaScript, CSS, HTML, remote resources, authored geometry, selectors, and callbacks are not supported.
+
+The semantic color responsibilities are:
+
+| Inventory | Roles |
+| --- | --- |
+| `ui.colors` existing variable names | `bg`, `panel`, `row`, `line`, `chrome`, `phosphor`, `glow`, `alien`, `alien-dim`, `ink`, `dim`, `working`, `blocked`, `stale`, `focus`, and `tab-ink` retain the corresponding interface variable roles. |
+| Interface surfaces | `body-halo`, `control-bg`, `control-hover`, `topbar-grid`, `topbar-top`, `topbar-bottom`, `panel-outline`, `panel-inset`, `toolbar-top`, `stage-bg`, `footer-bg`, `filter-hover`, `row-hover`, `row-selected`, `inspect-control-bg`, `modal-backdrop`, and `tool-bg` name background/gradient/frame surfaces. |
+| Interface text and state effects | `control-ink`, `heading-ink`, `totals-ink`, `filter-ink`, `provider-ink`, `provider-claude`, `summary-ink`, and `unknown-role` name text roles. `selected-inset`, `selected-hover`, `mail-glow`, `stale-glow`, `repo-glow`, `scanline`, and `vignette` name selected/decorative effects. `danger`, `danger-ink`, `danger-tab-ink`, `danger-glow`, `danger-notice-ink`, and `danger-notice-glow` colour the opt-in close control and error notices. |
+| `scene.colors` base palette | `space`, `hullTop`, `hullSeam`, `hullLeft`, `hullRight`, `wall`, `wallCap`, `grate`, `grateDark`, `window`, `amber`, `cyan`, `rail`, `console`, `consoleTop`, `chair`, `glass`, `ink`, `dim`, `focus`, and `repo` name the original station palette. |
+| Scene status | `working`, `blocked`, `idle`, `done`, `unknown`, and `stale` keep status identities. Default canvas `stale` intentionally uses the blocked hue; interface `stale` remains separate. |
+| Scene materials | `furnishing-*`, `rack-shelf`, `wall-screen-face`, `vent-*`, `board-*`, `tank-*`, `planter-*`, `plant-leaf`, `crate-*`, `crate-stack-*`, `walkway-support`, `hub-*`, `pod-*`, `chute-*`, `tower-*`, `observatory-*`, `telescope-shell`, `telescope-core`, `desk-*`, `monitor-*`, `chair-*`, `partition-*`, `planning-desk-*`, and `deck-*` name fixed material faces, edges, and insets. Prefixes are documentation shorthand; only exact keys in the manifest are accepted. |
+| Scene lighting and sky | `star-*`, `shooting-star-*`, `plain-star`, `nebula-*`, `rain-*`, `pixie-*`, `planet-*`, `shuttle-body`, `spark`, `rim-spark`, `platform-spark`, `screen-spark`, `furniture-spark`, `vent-spark`, `tank-spark`, `mast-*`, `apron-spark`, `walkway-light-head`, `tower-spark`, `pod-spark`, `observatory-spark`, `telescope-spark`, `desk-spark`, `desk-spark-alt`, and `aura-*` name effect colors. Dynamic opacity/timing remains application-owned. |
+| Scene labels, crew fallback, and mail | `glow-transparent`, `contact-shadow`, `viewer-body`, `body-outline`, `office-backdrop`, `mail-pending`, `mail-acknowledged`, `mail-unassigned`, `envelope-outline`, `envelope-mark`, `drone-shadow`, `drone-body`, `drone-wing`, `plate-scanline`, `repo-label`, `viewer-label`, `radar-sweep`, and `stale-overlay` name their individual appearance roles. |
+
+Colors accept six-digit hex or numeric `rgba(r,g,b,a)` only: integer RGB channels 0–255 and alpha 0–1. `scene.projectAccents` contains exactly ten ordered hex colors, retaining the cobalt, teal, verdant, moss, amber, ember, crimson, orchid, violet, and indigo slot identities. They recolor only each slot's displayed accent (deck edges, signs, partitions, tethers, room swatches and courier parcels); project-to-slot assignment, floor names and geometry are unchanged. Scene colors apply per station view, so a themed view never changes another view on the same page. Legacy `theme.colors` overrides apply last to interface colors only: accent sets phosphor/chrome and derives the `.22` alpha glow from its RGB channels; background sets bg, panel sets panel, and text sets ink. It never recolors scene or crew.
+
+Other accepted data groups:
+
+- `ui.typography`: fixed `classic`, `dm-sans`, or `pixel` profile and scale 0.9–1.1. Interface font metrics belong to the application; canvas labels and numeric terminal readouts retain VT323. The `dm-sans` profile requires local `fonts/dm-sans.woff2` and `fonts/DM-Sans-OFL.txt`. Inspect the actual file's family, weights 500/600, provenance, and redistribution license before distributing it. The validator checks bounded WOFF2 structure and OFL text; browser font loading proves usability. No manifest font path or remote import is accepted. `classic` keeps the original chrome metrics; `dm-sans` applies the application's fixed table (body 14px/1.45, title 500 20px without uppercase, section headings 600 24px/1.1, metadata 500 13px/1.3, buttons 500 13px/1.1 without tracking or uppercase, tags/eyebrows 600 11px/1.6, project headings 600 14px/1.2). Scale multiplies only those chrome sizes. The deck number, station totals, session counts, timestamps, inspector stat values and every canvas label keep their existing VT323 metrics. The browser installs server-derived local faces with `font-display: swap`; pending faces use their CSS fallback, and a failed face adds one deduplicated `font-load` warning.
+- The `pixel` typography profile requires both `fonts/jersey-10.woff2` with `fonts/Jersey-10-OFL.txt` and `fonts/silkscreen.woff2` with `fonts/Silkscreen-OFL.txt`. Verify the actual families and regular 400 weight, provenance, and redistribution licenses. Jersey 10 supplies interface text with `system-ui` fallback; Silkscreen supplies small tags and metadata with `ui-monospace` fallback. Both use weight 400, disable synthetic styles and ligatures, and use application-owned sizes multiplied by the same scale. Fixed numeric readouts, canvas labels, and tool/code text retain their existing fonts. Selecting typography does not recolor scene art or change crew assets.
+- `ui.chrome`: `classic` (default) or `pixel`, independent of the typography profile. Pixel chrome supplies fixed square, stepped frames, bevels, and a dotted page background using the selected colors. Its decorative frame layers do not intercept pointer events or clip controls, scrolling regions, or focus outlines. Existing shape/decor settings and semantic status cues remain separate.
+- `ui.shapes`: `control`, `input`, `panel`, `sessionRow`, `mailRow`, `tag`, and `eyebrow` each accept four clockwise corner radii in pixels, 0–24. `badgeCut` accepts `classic` or `none`. These choices do not change hit areas or geometry. Radii map to buttons, the search input, station/console/inspector panels, session rows, mail rows, the READ ONLY tag and section eyebrows; defaults reproduce the original corners. `badgeCut: "none"` removes the chamfer clips from the tag and eyebrows.
+- `ui.decor`: boolean `scanlines`, `glyphStrip`, `cornerBrackets`, and `glow`. Decorations remain separate from the scene FX toggle and functional status/focus cues. `false` removes, respectively, the stage scanline/vignette overlay, the decorative glyph strip, the panel corner brackets, and decorative heading, panel, legend and hover glows. Focus outlines, status words, selected states, stale cues, icons and source health stay visible.
+- `ui.logo`: null or `{ "image": "branding/logo.png", "alt": "Example Brand" }`. Alt is nonempty plain text up to 80 characters. Logos use contained PNGs; rasterize source SVG before installation and retain provenance. After the local image decodes, classic chrome shows it within 112×24 CSS pixels beside the heading. Pixel chrome uses a 42px-high box, at most 312px wide, with pixelated rendering. A 14px-high source displays at integer 3× scale when its width fits; other source sizes are fitted by that fixed box, not an automatic integer-scale algorithm. These application-owned display metrics do not change the PNG validation bounds below. Until decoding succeeds, the original mark stays. Browser decode failure retains the original decorative mark and heading and adds one `logo-load` warning.
+- `scene.art`: `{ "style": "station" }`, or `home-office` with a complete `assets` map for the 34 roles in [scene-art-roles.js](frontend/app/scene-art-roles.js). That application-owned table supplies exact native PNG dimensions, foot anchors, extents, orientation, repetition, and depth passes. Floor/corridor diamonds are 48×24; `helperChair` has its own native size for the existing 0.72 helper footprint. Authors supply `scene/*.png` paths only. Office mode requires both `backgroundFx` and `ambientFx` to be `none`; station permits `rain`/`none` and `station`/`none`, respectively. Scene effects do not supply a new initial FX preference. With the FX toggle on, `backgroundFx: "rain"` paints the matrix rain behind the station and `none` omits only that layer. `ambientFx: "none"` omits the starfield, nebulae, planet, shuttle, shooting stars and pixies, and the decorative deck, furniture, mailroom, desk and crew glows and sparks, leaving the `space` backdrop. Contact shadows, status lamps and words, selection, focus and hover markers, stale cues and helper tethers stay visible in every mode. The FX toggle keeps its existing default and behavior.
+- `crew`: logical IDs `blank`, `blank_blue`, and `blank_amber`. Each supplied group contains `tracks` only, with eight rotation tracks of one frame, eight walking tracks of six frames, four cardinal seated tracks of one frame, and `type.north` with four frames: 21 tracks and 64 frames. Use the exact suffixes in the default manifest and contained `crew/*.png` paths. Geometry remains fixed at scale 0.25, standing height 76, and review presentation; replacement set names derive from pack/logical IDs.
+
+Asset paths use lowercase simple components with no schemes, leading slash, dot segments, escapes, backslashes, query, or fragment. Real-path checks prevent symlink escapes. Manifests are at most 64 KiB. Crew PNGs are exactly 144×144, at most 128 KiB each, and at most 4 MiB per pack. Selected/default fallback crew uses at most 384 unique resources and 32 MiB decoded RGBA. Scene PNGs use the exact role dimensions, at most 512×512 and 256 KiB each, at most 34 unique resources, 6 MiB file bytes, and 36 MiB decoded RGBA. Combined crew/scene decoded memory is capped at 68 MiB. Logo PNGs are at most 128 KiB and 1024×256; each font is at most 512 KiB (one face for `dm-sans`, two faces totaling at most 1 MiB for `pixel`). Shared paths are deduplicated for budgets.
+
+Scene art decodes as a complete set: pending or failed office art retains complete procedural station art with canonical station crew. Valid selected chrome, colors, project/mail accents, and effect modes remain selected. Crew decode failure falls back by complete logical group, with one `crew-load` or `crew-dimensions` warning naming the pack and logical group; active office art uses procedural human fallback bodies. Logo and font failures retain their readable local fallback. These runtime warnings are theme metadata and do not change observed source health or session status. The header's theme status region lists them as plain text, together with requested/effective pack IDs when a requested pack fell back; it stays hidden when there is nothing to report and shows at most eight warnings, one per code, pack and group.
 
 ## Optional Codex desktop observation
 
@@ -211,7 +269,7 @@ Agents on other machines (for example a VPS running Herdr) can appear as their o
 station. Install the observer on each remote as usual, then list the remotes in `observer.config.json`:
 
 ```json
-{ "remotes": [{ "id": "vm1", "ssh": "nick@203.0.113.10", "dir": "~/starnet-observer", "mail": "separate" }] }
+{ "remotes": [{ "id": "vm1", "ssh": "nick@203.0.113.10", "dir": "~/starnet-observer" }] }
 ```
 
 The hub keeps one `ssh -o BatchMode=yes` stream per remote running `bun --no-env-file scripts/stream.js`, which prints
@@ -222,9 +280,30 @@ transcript or message inspection never reaches a remote.
 llm-bus is per host, so each remote ship has its own mailroom showing that host's own bus; its couriers and crew stay
 on their own ship, and the Live sessions mailroom section lists the selected host's mail. Remote messages keep their
 host's numeric id and also carry a hub-wide `key` (`5@vm1`). The ships are joined only by a dashed "ssh · observing"
-line: the hub's observation stream, coloured by its real health, never a mail path. `mail` is `"separate"` (default,
-no mail link) or `"relay"`: a relay between buses is expected, but until relayed traffic is actually observed the page
-draws only a broken "relay configured · not seen" line between the mailrooms (nothing relays today).
+line: the hub's observation stream, coloured by its real health, never a mail path.
+
+### llm-bus relays
+
+llm-bus can relay mail between machines through a relay it is bound to ([remote bus](https://github.com/wnz99/llm-bus/blob/main/docs/remote-bus.md)).
+Nothing about this is configured in the observer: every observed bus, local or remote, reports its own binding, and the
+station draws exactly that. The observer reads only routing metadata from the bus's `remote_*` tables: the relay's
+host name and this machine's id, each relayed message's direction, peer machine, shared repo and delivery state, and
+the relay's cached roster counted per machine. It never reads tokens, URL paths, native session ids or message bodies
+for this.
+
+- A relay is a satellite in open space beside the mailrooms it serves, labelled with its host name.
+- Each bound mailroom's tower beams up to its relay. The beam marches while that bus saw relay activity in the last
+  15 minutes, is still and dashed while quiet, and is grey while that bus is unreadable. The roster cache alone is not
+  proof that a bridge is running.
+- Machines the relay's roster names that this observer does not watch appear as dashed outposts beyond the relay,
+  with one pip per listed agent and the label "not observed". Their rooms are never drawn. An observed machine (this
+  one, or a configured remote bound to the same relay) is never an outpost.
+- Couriers for relayed mail fly between the mailroom and the relay. Unacknowledged outgoing mail waits where llm-bus
+  last proved it is: in the mailroom while `queued_local`, at the relay once `accepted_remote`, and at the far
+  machine's outpost once `delivered_local`. Each machine observes only its own half of a crossing.
+- Ledger rows name the far side, for example "Codex on whitenoise · llm-bus (via relay)", with the synchronised relay
+  state ("held at the relay", "delivered to the far machine, not acknowledged"). The bus status names the binding.
+- Presentation mode replaces relay hosts, machine ids and shared repo ids with fictional names.
 
 With `OBSERVER_CONTROL=1`, control actions also work on remote agents: `⇱`, `✕` and the project `+` run `herdr` on
 that host over the same non-interactive ssh (every argument validated and single-quoted; hosts not listed in

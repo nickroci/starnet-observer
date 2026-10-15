@@ -17,6 +17,12 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
   const section = id => { if (!sections.has(id)) sections.set(id, 'Section ' + (sections.size + 1)); return sections.get(id); };
   const arrangementOf = value => value && typeof value === 'object' && typeof value.roomId === 'string' && typeof value.sectionId === 'string'
     ? { roomId: value.roomId, room: value.roomId === 'unassigned' ? 'Unassigned' : bay(value.roomId), sectionId: value.sectionId, section: value.sectionId === 'unassigned' ? '' : section(value.sectionId) } : null;
+  // llm-bus relay names (relay host, machine ids, shared repo ids) are real names too: each gets a stable fictional alias.
+  const aliases = new Map(), alias = (kind, prefix, id) => { const key = kind + '\0' + id; if (!aliases.has(key)) aliases.set(key, prefix + ' ' + ([...aliases.keys()].filter(k => k.startsWith(kind + '\0')).length + 1)); return aliases.get(key); };
+  const relayOf = relay => relay ? { direction: relay.direction, machine: alias('machine', 'Machine', relay.machine), repo: alias('repo', 'Shared repo', relay.repo), provider: relay.provider, state: relay.state } : undefined;
+  const remoteOf = remote => remote ? { relay: alias('relay', 'Relay', remote.relay), machine: alias('machine', 'Machine', remote.machine), lastActivityAt: remote.lastActivityAt,
+    peers: (remote.peers || []).map(peer => ({ machine: alias('machine', 'Machine', peer.machine), repos: (peer.repos || []).map(repo => alias('repo', 'Shared repo', repo)), agents: peer.agents, lastSeen: peer.lastSeen })) } : undefined;
+  const mailOf = (message, extra = {}) => { const relay = relayOf(message.relay); return { id: message.id, ...extra, from: message.from, to: message.to, sentAt: message.sentAt, acknowledgedAt: message.acknowledgedAt, wake: message.wake, ...(relay ? { relay } : {}) }; };
   const roomNames = new Set(labels.rooms.map(room => room.name.toLowerCase()));
   const repoNames = new Set(labels.rooms.flatMap(room => room.repos).map(name => name.toLowerCase()));
   function project(id) {
@@ -90,12 +96,12 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
         error: inventory.error ? 'Local session inventory unavailable' : null,
         sources: { herdr: source(inventory.sources?.herdr), desktop: source(inventory.sources?.desktop),
           ...(inventory.sources?.hosts ? { hosts: Object.fromEntries(Object.entries(inventory.sources.hosts).map(([id, value]) =>
-            [id === 'local' ? 'local' : host(id), { health: value.health, observedAt: value.observedAt, agents: value.agents, ...(value.mail ? { mail: { mode: value.mail.mode, observed: value.mail.observed, lastRelayedAt: value.mail.lastRelayedAt } } : {}) }])) } : {}) },
+            [id === 'local' ? 'local' : host(id), { health: value.health, observedAt: value.observedAt, agents: value.agents }])) } : {}) },
         bus: bus ? { health: bus.health, reason: bus.reason, observedAt: bus.observedAt, window: bus.window,
-          messages: bus.messages.map(message => ({ id: message.id, from: message.from, to: message.to, sentAt: message.sentAt, acknowledgedAt: message.acknowledgedAt, wake: message.wake })) } : null,
+          messages: bus.messages.map(message => mailOf(message)), ...(bus.remote ? { remote: remoteOf(bus.remote) } : {}) } : null,
         // Each remote host's own mail, masked like local mail and keyed by the host's fictional ship name.
         ...(inventory.hostBus ? { hostBus: Object.fromEntries(Object.entries(inventory.hostBus).map(([id, value]) => [host(id), { health: value.health, observedAt: value.observedAt, window: value.window,
-          messages: (value.messages || []).map(message => ({ id: message.id, key: message.id + '@' + host(id), host: host(id), from: message.from, to: message.to, sentAt: message.sentAt, acknowledgedAt: message.acknowledgedAt, wake: message.wake })) }])) } : {})
+          messages: (value.messages || []).map(message => mailOf(message, { key: message.id + '@' + host(id), host: host(id) })), ...(value.remote ? { remote: remoteOf(value.remote) } : {}) }])) } : {})
       };
     },
     async inspect(id) { return unavailable(id, 'presentation-mode', now()); },
