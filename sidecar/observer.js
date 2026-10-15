@@ -107,7 +107,7 @@ function makeObserver(options = {}) {
   const overseerState = options.overseerState || makeOverseerState({ endpoint });
   if (overseerState.endpoint !== undefined && overseerState.endpoint !== endpoint) throw new Error('overseer-unavailable');
   const identities = options.identities || makeIdentityResolver({ execute, now, endpoint, readConfiguration: options.readIdentityConfiguration, readProcessBirth: options.readProcessBirth });
-  let identityProofs = new Map();
+  let identityProofs = new Map(), controlTargets = new Map();
   let lastGood = [], coreRows = [], refreshStartedAt = null, pending = null, mail = null;
   let closed = false, enrichment = null, enrichmentTarget = null, lineage = null;
   let desktopPending = null, busPending = null;
@@ -158,6 +158,7 @@ function makeObserver(options = {}) {
       }
       if (closed) return;
       identityProofs = proofs; identities.retain?.(seen);
+      controlTargets = new Map(panes.map(pane => [pane.pane_id, { ...structuredClone(pane), endpoint, observedAt: inventoryAt }]));
       coreRows = rows; sources.herdr = { health: 'available', observedAt: inventoryAt, reason: null };
     } catch (_) {
       // Process stderr, raw inventory and transcript contents are never sent to the browser.
@@ -468,6 +469,10 @@ function makeObserver(options = {}) {
     }
     return closePromise;
   }
-  return { get, inspect: (id, expectedIdentity) => inspect(id, expectedIdentity), inspectMessage: (id, expectedIdentity) => closed ? Promise.resolve({ id, health: 'unavailable', reason: 'unreadable', text: null }) : bus.inspect(id, expectedIdentity), close };
+  function controlTarget(paneId) {
+    const proof = controlTargets.get(paneId);
+    return !closed && sources.herdr.health === 'available' && proof && freshObservation(proof.observedAt, now()) ? structuredClone(proof) : null;
+  }
+  return { get, controlTarget, inspect: (id, expectedIdentity) => inspect(id, expectedIdentity), inspectMessage: (id, expectedIdentity) => closed ? Promise.resolve({ id, health: 'unavailable', reason: 'unreadable', text: null }) : bus.inspect(id, expectedIdentity), close };
 }
 module.exports = { makeObserver };

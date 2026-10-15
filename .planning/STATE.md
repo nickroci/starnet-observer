@@ -31,7 +31,7 @@ Last activity: 2026-10-15 — Completed loading-performance quick work for PR #7
 
 | # | Description | Status | Directory |
 | --- | --- | --- | --- |
-| 261015-l8s | PR4 mandatory control correctness and integration | Executing — M1/M2 reviewed; PR #4 | .planning/quick/261015-l8s-pr4-mandatory-control-correctness-and-in |
+| 261015-l8s | PR4 mandatory control correctness and integration | Executing — M1–M3 reviewed; PR #4 | .planning/quick/261015-l8s-pr4-mandatory-control-correctness-and-in |
 
 ## Quick Tasks Completed
 

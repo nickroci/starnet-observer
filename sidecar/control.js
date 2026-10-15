@@ -5,8 +5,8 @@
      attach(paneId)  open a macOS Terminal window running `herdr agent attach <pane>`
      spawn(paneId)   new tab in that pane's workspace and cwd, start Claude there, then attach a Terminal to it
      close(paneId)   close the pane (ends the agent); the page asks the user to confirm first
-   Every target is validated against the same pane-id shape the reader accepts, and attach/close additionally
-   require Herdr to report an agent in that pane, so an arbitrary pane id cannot be closed through here. */
+   Every target is validated against the same pane-id shape the reader accepts. Ordinary actions require a fresh
+   private observer proof matched against current Herdr inventory and native agent/pane identities before mutation. */
 const path = require('node:path');
 const fsp = require('node:fs/promises');
 const { stationChildEnv } = require('./child-env.js');
@@ -66,13 +66,28 @@ function makeControl(options = {}) {
     return parsed.result;
   }
   const validPane = id => typeof id === 'string' && PANE.test(id);
+  const targetUnavailable = () => Object.assign(new Error('target-unavailable'), { status: 409 });
   async function agentIn(paneId) {
     if (!validPane(paneId)) throw badRequest('invalid-pane');
+    const proof = await options.target?.(paneId);
+    if (!proof || proof.endpoint !== endpoint || !Number.isFinite(proof.observedAt) || now() - proof.observedAt > 6000 || now() < proof.observedAt) throw targetUnavailable();
+    const matches = native => {
+      if (!native || !['codex', 'claude'].includes(proof.agent) ||
+          ![proof.pane_id, proof.workspace_id, proof.terminal_id].every(value => typeof value === 'string' && PANE.test(value))) return false;
+      return proof.pane_id === paneId && ['pane_id', 'workspace_id', 'terminal_id', 'agent'].every(key => native[key] === proof[key]) &&
+        ['agent', 'kind', 'value'].every(key => (native.agent_session?.[key] ?? null) === (proof.agent_session?.[key] ?? null)) &&
+        (native.foreground_cwd || native.cwd) === (proof.foreground_cwd || proof.cwd);
+    };
+    const inventory = await herdr(['agent', 'list'], 5000);
+    const candidates = inventory?.agents?.filter?.(pane => pane?.pane_id === paneId);
+    if (!Array.isArray(candidates) || candidates.length !== 1 || !matches(candidates[0])) throw targetUnavailable();
     const result = await herdr(['agent', 'get', paneId], 5000);
-    if (!result || !result.agent) throw badRequest('no-agent-in-pane');
+    if (!matches(result?.agent)) throw targetUnavailable();
+    const got = await herdr(['pane', 'get', paneId], 5000);
+    if (!matches(got?.pane) || now() - proof.observedAt > 6000) throw targetUnavailable();
     const loaded = await overseerState.read();
     if (loaded.record?.paneId === paneId && !await overseerState.match(result.agent, loaded)) throw Object.assign(new Error('overseer-unavailable'), { status: 409 });
-    return result.agent;
+    return { agent: result.agent, pane: got.pane };
   }
   async function openTerminal(paneId) {
     if (platform !== 'darwin') throw new Error('Opening a terminal is only implemented on macOS');
@@ -87,22 +102,22 @@ function makeControl(options = {}) {
   }
 
   async function attach(paneId) {
-    const agent = await agentIn(paneId);
+    const { agent } = await agentIn(paneId);
     await openTerminal(paneId);
     return { ok: true, action: 'attach', paneId, name: agent.name || null };
   }
   async function spawn(paneId) {
-    if (!validPane(paneId)) throw badRequest('invalid-pane');
-    const got = await herdr(['pane', 'get', paneId], 5000), pane = got && got.pane;
-    if (!pane || typeof pane.cwd !== 'string' || !pane.cwd || typeof pane.workspace_id !== 'string') throw new Error('pane has no cwd or workspace');
+    const { pane } = await agentIn(paneId);
+    const cwd = pane.foreground_cwd || pane.cwd;
+    if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || cwd.length > 4096) throw targetUnavailable();
     const stamp = new Date(now()).toTimeString().slice(0, 8).replace(/:/g, '');
-    const name = ((path.basename(pane.cwd) || 'agent').replace(/[^A-Za-z0-9_-]/g, '-')) + '-' + stamp;
-    const created = await herdr(['tab', 'create', '--workspace', pane.workspace_id, '--cwd', pane.cwd, '--label', name, '--no-focus'], 10000);
+    const name = ((path.basename(cwd) || 'agent').replace(/[^A-Za-z0-9_-]/g, '-')) + '-' + stamp;
+    const created = await herdr(['tab', 'create', '--workspace', pane.workspace_id, '--cwd', cwd, '--label', name, '--no-focus'], 10000);
     const target = created && created.root_pane && created.root_pane.pane_id;
     if (!validPane(target)) throw new Error('tab create returned no pane');
     await startIn(target, name);
     await openTerminal(target);
-    return { ok: true, action: 'spawn', paneId: target, name, project: path.basename(pane.cwd) };
+    return { ok: true, action: 'spawn', paneId: target, name, project: path.basename(cwd) };
   }
   // Start Claude in that pane, tolerating a startup dialog the same way spawn does.
   async function startIn(target, name) {
@@ -157,7 +172,7 @@ function makeControl(options = {}) {
     }
   }
   async function close(paneId) {
-    const agent = await agentIn(paneId);
+    const { agent } = await agentIn(paneId);
     await herdr(['pane', 'close', paneId], 10000);
     return { ok: true, action: 'close', paneId, name: agent.name || null };
   }

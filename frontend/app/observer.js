@@ -76,7 +76,7 @@
   function select(id, scroll = false) {
     if (!byId.has(id)) return;
     selected = id;
-    const target = layout.pageFor(id); if (Number.isInteger(target)) setPage(target);   // the overseer sits on every page
+    const target = layout.pageFor(id); if (byId.get(id).role !== 'overseer' && Number.isInteger(target)) setPage(target);   // the overseer sits on every page
     render(latest, true);
     view.focus(id);
     if (scroll) rowNodes.get(id)?.button.scrollIntoView({ block: 'nearest' });
@@ -435,7 +435,7 @@
       const spawn = text('button', 'project-spawn', '+'); spawn.type = 'button'; spawn.title = 'Start a new Claude agent in this project (new Herdr tab, terminal opens)';
       spawn.setAttribute('aria-label', 'Start a new Claude agent in this project');
       spawn.addEventListener('click', () => {
-        const seed = (lastGroups.get(key) || []).find(row => row.source === 'herdr' && row.paneId);
+        const seed = (lastGroups.get(key) || []).find(row => row.source === 'herdr' && row.paneId && !rowStale(row));
         if (!seed) { notice('No Herdr pane in this project to start from', true); return; }
         controlAction(spawn, 'spawn', seed.paneId, 'Starting a new agent next to ' + seed.paneId + '…');
       });
@@ -481,12 +481,12 @@
     let attach = null, close = null;
     if (CONTROL) {
       attach = text('button', 'row-attach', '⇱'); attach.type = 'button'; attach.title = 'Open a terminal attached to this agent'; attach.setAttribute('aria-label', 'Open a terminal attached to this agent');
-      attach.addEventListener('click', () => { const row = byId.get(id); if (row && row.source === 'herdr' && row.paneId) controlAction(attach, 'attach', row.paneId, 'Opening a terminal for ' + row.paneId + '…'); });
+      attach.addEventListener('click', () => { const row = byId.get(id); if (row && row.source === 'herdr' && row.paneId && !rowStale(row)) controlAction(attach, 'attach', row.paneId, 'Opening a terminal for ' + row.paneId + '…'); });
       close = text('button', 'row-close', '✕'); close.type = 'button'; close.title = 'Stop this agent (closes its Herdr pane)'; close.setAttribute('aria-label', 'Stop this agent');
       close.addEventListener('click', () => {
-        const row = byId.get(id); if (!row || row.source !== 'herdr' || !row.paneId) return;
+        const row = byId.get(id); if (!row || row.source !== 'herdr' || !row.paneId || rowStale(row)) return;
         const what = (workerName(row) || 'this agent') + (row.title ? ' · ' + row.title : '');
-        if (!window.confirm('Stop ' + what + ' in pane ' + row.paneId + '?\n\nThis closes the Herdr pane and ends the Claude session. Unsaved conversation state is kept in its transcript; you can resume it later with claude --resume.')) return;
+        if (!window.confirm('Stop ' + what + ' in pane ' + row.paneId + '?\n\nThis closes the Herdr pane and ends the ' + (PROVIDERS[row.provider] || 'agent') + ' session.')) return;
         controlAction(close, 'close', row.paneId, 'Closing ' + row.paneId + '…');
       });
       item.append(attach, close);
@@ -713,7 +713,7 @@
     const data = state.data, rows = data?.sessions || [];
     const brand = document.querySelector?.('.brand h1'), badge = document.querySelector?.('.read-only');
     if (brand) setText(brand, data?.presentation ? data.presentation.company + ' · Observer' : 'Local observer');
-    if (badge) setText(badge, data?.presentation ? 'LIVE · FICTIONAL LABELS' : 'READ ONLY');
+    if (badge) setText(badge, data?.presentation ? 'LIVE · FICTIONAL LABELS' + (CONTROL ? ' · CONTROLS ON' : '') : CONTROL ? 'CONTROLS ON' : 'READ ONLY');
     // A repository whose last row left clears its highlight.
     if (selectedRepoId !== null && !rows.some(row => row.repoId === selectedRepoId)) selectedRepoId = null;
     const overseerRow = rows.find(row => row.role === 'overseer' && row.source === 'herdr') || null;

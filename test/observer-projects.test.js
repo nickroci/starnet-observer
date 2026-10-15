@@ -18,11 +18,21 @@ assert.throws(() => makeProjectResolver({ execute: execFile }), /requires an inj
     const root = path.join(temp, 'a', 'same name'), other = path.join(temp, 'b', 'same name');
     await repository(root, true); await fs.mkdir(path.join(root, 'nested')); await repository(other);
     const worktree = path.join(temp, 'linked checkout'); await git(root, ['worktree', 'add', '-q', '--detach', worktree]);
+    await fs.mkdir(path.join(worktree, 'nested', 'child'), { recursive: true });
     const batch = makeProjectResolver({ now: () => 1000, execute: execFile });
     const batchRows = await batch.resolveMany([worktree, root, worktree]);
     assert.equal(batchRows[0].repoId, batchRows[1].repoId, 'linked-first batch uses observed main proof');
     assert.deepEqual(batchRows[0], batchRows[2], 'duplicate cwd keeps input alignment');
     assert.equal(batchRows[0].worktree, 'linked checkout');
+    assert.equal(batchRows[0].folder, '', 'linked checkout root has no subfolder');
+    assert.equal((await batch.resolve(path.join(worktree, 'nested', 'child'))).folder, 'nested/child');
+    const sameLinked = path.join(temp, 'c', 'same name'); await git(root, ['worktree', 'add', '-q', '--detach', sameLinked]);
+    await fs.mkdir(path.join(sameLinked, 'nested'));
+    const sameLinkedRow = await batch.resolve(path.join(sameLinked, 'nested'));
+    assert.equal(sameLinkedRow.repoId, batchRows[1].repoId); assert.equal(sameLinkedRow.folder, 'nested', 'equal checkout basenames do not change folder coordinates');
+    const linkedAlias = path.join(temp, 'linked-alias'); await fs.symlink(worktree, linkedAlias);
+    assert.equal((await batch.resolve(path.join(linkedAlias, 'nested'))).folder, 'nested');
+    assert.equal((await batch.resolve(path.join(root, 'nested'))).folder, 'nested');
     const cachePressure = Array.from({ length: 257 }, (_, index) => temp + '/.'.repeat(index + 1));
     const pressured = makeProjectResolver({ now: () => 1000, execute: async (...args) => {
       if (args[1][1] === await fs.realpath(temp)) throw new Error('Fixture folder is not a checkout');

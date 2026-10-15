@@ -8,7 +8,7 @@ const { createServer } = require('../server.js');
   const closeGate = new Promise(resolve => { releaseClose = resolve; });
   const secret = 'PRIVATE-COMPANY-CANARY';
   const parent = { id: 'obs_' + 'a'.repeat(24), provider: 'codex', source: 'herdr', status: 'working', projectId: 'prj_1', project: secret,
-    repoId: 'repo_1', repo: secret, worktree: secret, paneId: secret, title: secret, sessionId: secret, inspectionIdentity: secret,
+    repoId: 'repo_1', repo: secret, worktree: secret, paneId: 'w1:p2', role: 'overseer', title: secret, sessionId: secret, inspectionIdentity: secret,
     inventoryHealth: 'available', observedAt: 1000, presence: 'pane', tool: { available: true, observedAt: 1000, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: 1000, text: secret }, raw: secret }, unexpected: secret };
   const helper = { ...parent, id: 'obs_' + 'b'.repeat(24), source: 'helper', parentId: parent.id, status: 'idle', lineageState: 'open',
     taskEvidence: { state: 'available', summary: secret, source: secret }, taskStatusEvidence: { status: 'completed', source: secret },
@@ -21,6 +21,7 @@ const { createServer } = require('../server.js');
   const first = await presentation.get();
   assert.equal(JSON.stringify(first).includes(secret), false, 'mask names, task text, nicknames, identities, diagnostics, bodies, and unknown fields');
   assert.deepEqual(inventory, original, 'masking never mutates live identities or source snapshots');
+  assert.equal(first.sessions[1].paneId, 'w1:p2'); assert.equal(first.sessions[1].role, 'overseer');
   assert.deepEqual(first.aggregate, inventory.aggregate);
   assert.deepEqual(first.sessions.map(row => [row.id, row.parentId, row.status, row.observedAt]), inventory.sessions.map(row => [row.id, row.parentId, row.status, row.observedAt]));
   assert.equal(first.sessions[1].project, 'Product'); assert.equal(first.sessions[1].repo, 'helio-web');

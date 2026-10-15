@@ -16,6 +16,14 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 const SESSION_IDENTITY = /^(?:(?:codex|claude):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|(?:helper:)?obs_[a-f0-9]{24})(?:\|obs_[a-f0-9]{24})?$/i;
 
 function createServer({ observer = makeObserver({ now: Date.now }), token = crypto.randomBytes(32).toString('hex'), theme = {}, control = null } = {}) {
+  const presentation = observer.presentation === true;
+  const safePane = value => typeof value === 'string' && PANE.test(value) ? value : undefined;
+  const publicErrors = new Set(['invalid-pane', 'target-unavailable', 'overseer-unavailable', 'overseer-exists']);
+  function controlResult(action, result, error) {
+    if (!presentation) return redact(error ? { error: String(error.message), paneId: safePane(error.paneId) } : result);
+    if (error) return { error: publicErrors.has(error.message) ? error.message : 'control-unavailable', paneId: error.message === 'overseer-exists' ? safePane(error.paneId) : undefined };
+    return { ok: result?.ok === true, action, paneId: safePane(result?.paneId) };
+  }
   const server = http.createServer(async (req, res) => {
     const port = server.address()?.port;
     const hosts = new Set(['127.0.0.1:' + port, 'localhost:' + port]);
@@ -34,12 +42,12 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
     if (action) {
       if (!authorized()) return json(403, { error: 'Observer token required; reload the page' });
       if (!/^application\/json\b/.test(String(req.headers['content-type'] || ''))) return json(400, { error: 'JSON body required' });
-      let raw = '';
-      try { for await (const chunk of req) { raw += chunk; if (raw.length > 4096) return json(413, { error: 'Body too large' }); } } catch (_) { return json(400, { error: 'Body unreadable' }); }
-      let body; try { body = JSON.parse(raw || '{}'); } catch (_) { return json(400, { error: 'Invalid JSON' }); }
+      let chunks = [], bytes = 0;
+      try { for await (const chunk of req) { bytes += chunk.length; if (bytes > 4096) return json(413, { error: 'Body too large' }); chunks.push(chunk); } } catch (_) { return json(400, { error: 'Body unreadable' }); }
+      let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch (_) { return json(400, { error: 'Invalid JSON' }); }
       if (action[1] !== 'overseer' && (!body || typeof body.paneId !== 'string' || !PANE.test(body.paneId))) return json(400, { error: 'paneId required' });
-      try { return json(200, action[1] === 'overseer' ? await control.overseer() : await control[action[1]](body.paneId)); }
-      catch (error) { const status = Number.isInteger(error.status) ? error.status : 500; if (status >= 500) console.warn('[observer control]', redact(String(error.message))); return json(status, { error: redact(String(error.message)), paneId: typeof error.paneId === 'string' ? error.paneId : undefined }); }
+      try { const result = action[1] === 'overseer' ? await control.overseer() : await control[action[1]](body.paneId); return json(200, controlResult(action[1], result)); }
+      catch (thrown) { const error = thrown instanceof Error ? thrown : new Error(String(thrown)); const status = Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 500; if (status >= 500) console.warn('[observer control]', presentation ? controlResult(action[1], null, error).error : redact(String(error.message))); return json(status, controlResult(action[1], null, error)); }
     }
     try {
       const url = new URL(req.url, 'http://' + req.headers.host);
@@ -125,7 +133,7 @@ if (require.main === module) {
   const endpoint = resolveEndpoint({});
   const overseerState = makeOverseerState({ endpoint });
   const observer = makeObserver({ now: Date.now, warmDetails: !config.presentation, endpoint, overseerState });
-  const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ endpoint, overseerState, claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean) }) : null;
+  const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ endpoint, overseerState, target: paneId => observer.controlTarget(paneId), claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean) }) : null;
   const server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme, control });
   server.on('error', error => { console.error('[observer]', redact(String(error.message))); process.exitCode = 1; });
   server.listen(port, '127.0.0.1', () => console.log('Local Observer: http://127.0.0.1:' + port + '\nPrivate labels: ' + (config.presentation ? 'on (' + config.labels.company + ')' : 'off') + (control ? '\nControl actions: on (OBSERVER_CONTROL=1): attach, spawn and close Herdr agents from the page.' : '\nRead only.') + ' Stop with Ctrl+C.'));
