@@ -105,6 +105,7 @@ const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status:
   await usageAggregate();
   await aggregateAgeAndOverflow();
   await aggregateOptionalEvidence();
+  await optionalToolObservationFallback();
   await claudeHelperNamespaces();
   await footerInspection();
   await footerFinalValidationRace();
@@ -874,6 +875,7 @@ async function aggregateOptionalEvidence() {
     assert.equal(result.aggregate.agents.observed, 2, 'duplicate roots count once alongside helper');
     assert.equal(result.aggregate.agents.statuses.working, 2, 'fresh helper inventory keeps its status');
     assert.deepEqual(result.aggregate.usage.inputTokens, { value: 42, state: 'partial' });
+    assert.equal(result.aggregate.usageObservedAt, 9000, 'excluded old duplicate/helper usage cannot age counted fresh totals');
     assert.equal(result.aggregate.coverage.conflicting, 0, 'expired duplicate usage cannot conflict with fresh evidence');
     assert.equal(result.aggregate.coverage.stale, 1, 'new helper inventory cannot refresh its old bound usage');
     assert.equal(result.aggregate.coverage.counters.inputTokens.stale, 1);
@@ -882,6 +884,7 @@ async function aggregateOptionalEvidence() {
     const conflicting = await observer.get();
     assert.equal(conflicting.aggregate.coverage.conflicting, 1, 'contradictory fresh duplicate usage still fails closed');
     assert.equal(conflicting.aggregate.usage.inputTokens.value, null);
+    assert.equal(conflicting.aggregate.usageObservedAt, null, 'no usable contribution has no usage observation');
   } finally { await observer.close(); }
 }
 
@@ -1193,6 +1196,8 @@ async function progressiveOptionalFreshness() {
         assert.equal(live.sessions[0].observedAt, clock);
         assert.equal(live.sessions[0].tool.available, true, 'optional evidence is live through exactly six seconds');
         assert.equal(live.aggregate.usage.inputTokens.value, 42);
+        assert.equal(live.aggregate.usageObservedAt, 1000);
+        assert.equal(live.sessions[0].tool.observedAt, 1000, 'public tool evidence preserves source/read-start time');
       }
       clock = 7001;
       const expired = await observer.get();
@@ -1501,4 +1506,23 @@ async function progressiveGrouping() {
     assert.equal(enriched.sessions[2].parentId, undefined, 'capped ownership still advertises no guessed helper parent');
     assert.equal(enriched.sessions[3].observedAt, 777);
   } finally { helperGate.resolve(); await observer.close(); }
+}
+
+async function optionalToolObservationFallback() {
+  let clock = 1000;
+  const helper = deferred();
+  const observer = makeCoreObserver(progressiveOptions({ now: () => clock,
+    helpers: { prepareChildren: async () => { await helper.promise; return { rows: [], annotations: new Map(), overflow: new Map() }; } }
+  }));
+  try {
+    await observer.get();
+    const accepted = await inventoryWhen(observer, data => data.sessions[0].tool.available);
+    assert.equal(accepted.sessions[0].tool.observedAt, 1000, 'tool-only adapter exports captured read start');
+    clock = 7000;
+    const boundary = await observer.get();
+    assert.equal(boundary.sessions[0].tool.observedAt, 1000, 'healthy core does not restamp tool-only evidence');
+    assert.equal(boundary.sessions[0].tool.available, true);
+    clock++;
+    assert.equal((await observer.get()).sessions[0].tool.available, false);
+  } finally { helper.resolve(); await observer.close(); }
 }

@@ -39,6 +39,7 @@ function aggregateRows(rows, now) {
   const coverage = { ...emptyCoverage(), conflicting: 0,
     counters: Object.fromEntries(COUNTERS.map(key => [key, emptyCoverage()])) };
   const totals = Object.fromEntries(COUNTERS.map(key => [key, null]));
+  const counterObservedAt = Object.fromEntries(COUNTERS.map(key => [key, null]));
   const overflow = new Set();
   const fresh = row => row.inventoryHealth === 'available' && freshObservation(row.observedAt, now);
   const freshUsage = row => fresh(row) && freshObservation(usageObservation(row), now);
@@ -70,6 +71,8 @@ function aggregateRows(rows, now) {
         counter.unavailable++; continue;
       }
       counter[item.state]++; usable++;
+      const observedAt = usageObservation(row);
+      counterObservedAt[key] = counterObservedAt[key] === null ? observedAt : Math.min(counterObservedAt[key], observedAt);
       if (item.state === 'available') complete++;
       const sum = (totals[key] ?? 0) + item.value;
       if (!Number.isSafeInteger(sum)) overflow.add(key);
@@ -83,7 +86,9 @@ function aggregateRows(rows, now) {
     return [key, { value, state: value === null ? 'unavailable' :
       counter.partial || counter.unavailable || counter.stale || coverage.conflicting ? 'partial' : 'available' }];
   }));
-  return { agents, usage, coverage };
+  // Only contributors to published numeric counters set the browser's optional-evidence deadline.
+  const observations = COUNTERS.filter(key => usage[key].value !== null).map(key => counterObservedAt[key]);
+  return { agents, usage, coverage, usageObservedAt: observations.length ? Math.min(...observations) : null };
 }
 
 function makeObserver(options = {}) {
@@ -375,7 +380,7 @@ function makeObserver(options = {}) {
     const at = now();
     const sessions = lastGood.map(row => {
       const observedAt = row.usage?.observedAt ?? (row.source === 'herdr' ? summaries.get(row.id)?.observedAt : row.observedAt);
-      return row.tool?.available && !freshObservation(observedAt, at) ? { ...row, tool: { ...row.tool, available: false } } : row;
+      return row.tool?.available ? { ...row, tool: { ...row.tool, observedAt, available: freshObservation(observedAt, at) } } : row;
     });
     return { sessions, aggregate: aggregateRows(sessions, at), observedAt: times.length ? Math.max(...times) : null,
       health: available ? 'available' : 'unavailable', error: available ? null : sources.herdr.reason,
