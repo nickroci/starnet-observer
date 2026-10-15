@@ -76,20 +76,124 @@ const browser = { window: {} };
 vm.runInNewContext(fs.readFileSync(path.join(root, 'app/theme-pack.js'), 'utf8') + '\nwindow.readDefault = () => ThemePack.getDefault();', browser);
 browser.window.__OBSERVER_THEME_DEFAULT__ = clone(defaults);
 assert.equal(browser.window.readDefault().id, 'starnet', 'helper may load before nonce data');
-const fakeDocument = () => { const styles = new Map(); return { styles, documentElement: { style: { setProperty(key, value) { styles.set(key, value); } } } }; };
+// Minimal DOM double: root properties/attributes, elements by id, fonts and DOMContentLoaded.
+function fakeElement(attributes = {}) {
+  return { hidden: false, textContent: '', children: [], attributes: { ...attributes },
+    setAttribute(key, value) { this.attributes[key] = String(value); }, removeAttribute(key) { delete this.attributes[key]; },
+    replaceChildren(...nodes) { this.children = nodes; } };
+}
+const fakeDocument = ({ elements = {}, FontFace, readyState = 'complete' } = {}) => {
+  const styles = new Map(), events = {}, fonts = [];
+  const root = fakeElement(); root.style = { setProperty(key, value) { styles.set(key, value); } };
+  return { styles, events, fonts: { add(face) { fonts.push(face); } }, faces: fonts, readyState, defaultView: { FontFace }, documentElement: root,
+    getElementById: id => elements[id] || null, querySelector: selector => selector === '.brand-mark' ? elements.mark || null : null,
+    createElement: () => fakeElement(), addEventListener(name, fn) { events[name] = fn; } };
+};
 const colorKeys = Object.keys(defaults.ui.colors);
 assert.equal(colorKeys.length, 48);
-const applied = snapshot => { const doc = fakeDocument(); ThemePack.applyInterface(snapshot, doc); return doc.styles; };
-assert.deepEqual(applied(defaults), new Map(colorKeys.map(key => ['--' + key, defaults.ui.colors[key]])), 'default binds exactly the canonical inventory');
+const SHAPE_PROPERTIES = { control: '--shape-control', input: '--shape-input', panel: '--shape-panel', sessionRow: '--shape-session-row', mailRow: '--shape-mail-row', tag: '--shape-tag', eyebrow: '--shape-eyebrow' };
+const DECOR_ATTRIBUTES = { scanlines: 'data-decor-scanlines', glyphStrip: 'data-decor-glyph-strip', cornerBrackets: 'data-decor-corner-brackets', glow: 'data-decor-glow' };
+const fixedCount = 1 + Object.keys(SHAPE_PROPERTIES).length;
+const appliedDocument = (snapshot, options) => { const doc = fakeDocument(options); ThemePack.applyInterface(snapshot, doc); return doc; };
+const applied = snapshot => appliedDocument(snapshot).styles;
+const radii = values => values.map(value => value + 'px').join(' ');
+const defaultStyles = new Map([...colorKeys.map(key => ['--' + key, defaults.ui.colors[key]]), ['--type-scale', '1'],
+  ...Object.entries(SHAPE_PROPERTIES).map(([key, property]) => [property, radii(defaults.ui.shapes[key])])]);
+const defaultAttributes = { 'data-type-profile': 'classic', 'data-badge-cut': 'classic', 'data-decor-scanlines': 'on', 'data-decor-glyph-strip': 'on', 'data-decor-corner-brackets': 'on', 'data-decor-glow': 'on' };
+assert.deepEqual(applied(defaults), defaultStyles, 'default binds exactly the canonical inventory plus fixed type scale and radii');
+assert.deepEqual(appliedDocument(defaults).documentElement.attributes, defaultAttributes, 'default selects classic type, classic badges and all decoration');
+assert.equal(defaultStyles.get('--shape-panel'), '3px 16px 3px 16px'); assert.equal(defaultStyles.get('--shape-session-row'), '2px 10px 2px 2px');
+assert.equal(defaultStyles.get('--shape-mail-row'), '2px 8px 2px 2px'); assert.equal(defaultStyles.get('--shape-tag'), '0px 0px 0px 0px');
+assert.equal(defaults.ui.logo, null);
 const overridden = applied({ ui: { colors: { ...defaults.ui.colors, phosphor: '#123456', glow: 'rgba(18,52,86,.22)', madeUp: '#abcdef' } } });
 assert.equal(overridden.get('--phosphor'), '#123456'); assert.equal(overridden.get('--glow'), 'rgba(18,52,86,.22)');
-assert.equal(overridden.has('--madeUp'), false, 'unknown snapshot keys never become properties'); assert.equal(overridden.size, 48);
+assert.equal(overridden.has('--madeUp'), false, 'unknown snapshot keys never become properties'); assert.equal(overridden.size, 48 + fixedCount);
 const sparse = applied({ ui: { colors: { ink: '#aabbcc' } } });
-assert.equal(sparse.get('--ink'), '#aabbcc'); assert.equal(sparse.get('--bg'), defaults.ui.colors.bg, 'missing keys fall back to the default'); assert.equal(sparse.size, 48);
+assert.equal(sparse.get('--ink'), '#aabbcc'); assert.equal(sparse.get('--bg'), defaults.ui.colors.bg, 'missing keys fall back to the default'); assert.equal(sparse.size, 48 + fixedCount);
+// Each fixed brand capacity reaches only its own binding.
+const shapes = Object.fromEntries(Object.keys(SHAPE_PROPERTIES).map((key, index) => [key, [index, index + 1, index + 2, index + 3]]));
+const shaped = appliedDocument({ ui: { shapes: { ...shapes, badgeCut: 'none' } } });
+for (const [key, property] of Object.entries(SHAPE_PROPERTIES)) assert.equal(shaped.styles.get(property), radii(shapes[key]), key + ' radius binds its property');
+assert.equal(shaped.documentElement.attributes['data-badge-cut'], 'none');
+for (const [flag, attribute] of Object.entries(DECOR_ATTRIBUTES)) {
+  const decorated = appliedDocument({ ui: { decor: { [flag]: false } } }).documentElement.attributes;
+  assert.deepEqual(decorated, { ...defaultAttributes, [attribute]: 'off' }, flag + ' off suppresses only its decoration');
+}
+const injected = appliedDocument({ ui: { typography: { profile: 'remote', scale: 1.05 }, shapes: { badgeCut: 'custom' } } });
+assert.deepEqual([injected.documentElement.attributes['data-type-profile'], injected.documentElement.attributes['data-badge-cut'], injected.styles.get('--type-scale')], ['classic', 'classic', '1.05'], 'only fixed enum values become attributes');
+// DM Sans: fixed family from the server-derived local path, swap display; a failed load keeps the fallback with one warning.
+const faces = [];
+class FakeFace { constructor(family, source, descriptors) { this.family = family; this.source = source; this.descriptors = descriptors; faces.push(this); } load() { return this.result; } }
+const fontPath = '/assets/themes/sample/fonts/dm-sans.woff2';
+const dmSans = { requestedId: 'sample', effectiveId: 'sample', ui: { typography: { profile: 'dm-sans', scale: 1.1, font: fontPath } } };
+FakeFace.prototype.result = Promise.resolve();
+const fontDoc = appliedDocument(dmSans, { FontFace: FakeFace });
+assert.equal(fontDoc.documentElement.attributes['data-type-profile'], 'dm-sans'); assert.equal(fontDoc.styles.get('--type-scale'), '1.1');
+assert.deepEqual([faces.length, faces[0].family, faces[0].source, faces[0].descriptors.display, fontDoc.faces[0]], [1, 'DM Sans', 'url("' + fontPath + '") format("woff2")', 'swap', faces[0]]);
+for (const font of [undefined, 'https://fonts.example/dm.woff2', '/assets/themes/sample/fonts/other.woff2', fontPath + '")']) {
+  appliedDocument({ ui: { typography: { profile: 'dm-sans', font } } }, { FontFace: FakeFace });
+}
+assert.equal(faces.length, 1, 'no font face without the exact local server-derived path');
+appliedDocument({ ui: { typography: { profile: 'classic', font: fontPath } } }, { FontFace: FakeFace });
+assert.equal(faces.length, 1, 'classic never installs DM Sans');
+const statusDocument = (extra = {}) => {
+  const region = fakeElement({ role: 'status' }); region.hidden = true;
+  const image = fakeElement(); image.hidden = true; const mark = fakeElement();
+  return fakeDocument({ elements: { 'theme-status': region, 'brand-logo': image, mark, health: fakeElement() }, ...extra });
+};
+const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+const brandChecks = (async () => {
+FakeFace.prototype.result = Promise.reject(new Error('/private/path decode error')); FakeFace.prototype.result.catch(() => {});
+const failedFont = statusDocument({ FontFace: FakeFace }); ThemePack.start(dmSans, failedFont); await settle();
+const fontRegion = failedFont.getElementById('theme-status');
+assert.equal(fontRegion.hidden, false);
+assert.deepEqual(fontRegion.children.map(line => line.textContent), ['Theme pack sample font did not load; using the system font.'], 'one bounded font warning without the raw exception');
+assert.equal(failedFont.getElementById('health').textContent, '', 'theme warnings never touch source health');
+// Logo: the mark stays until decode succeeds; failure restores it and warns once.
+const logoSnapshot = { requestedId: 'sample', effectiveId: 'sample', ui: { logo: { image: '/assets/themes/sample/branding/logo.png', alt: 'Example <b>Brand</b>' } } };
+let decodeResult;
+const logoDoc = statusDocument(); logoDoc.getElementById('brand-logo').decode = () => decodeResult;
+let resolveDecode; decodeResult = new Promise(resolve => { resolveDecode = resolve; });
+ThemePack.start(logoSnapshot, logoDoc);
+const logo = logoDoc.getElementById('brand-logo'), mark = logoDoc.querySelector('.brand-mark');
+assert.deepEqual([logo.attributes.alt, logo.attributes.src, logo.hidden, mark.hidden], ['Example <b>Brand</b>', '/assets/themes/sample/branding/logo.png', true, false], 'mark stays visible while the logo decodes');
+resolveDecode(); await settle();
+assert.deepEqual([logo.hidden, mark.hidden, logoDoc.getElementById('theme-status').hidden], [false, true, true], 'decoded logo replaces only the mark');
+const brokenLogo = statusDocument(); brokenLogo.getElementById('brand-logo').decode = () => Promise.reject(new Error('decode'));
+ThemePack.start(logoSnapshot, brokenLogo); await settle();
+const brokenImage = brokenLogo.getElementById('brand-logo');
+assert.deepEqual([brokenImage.hidden, 'src' in brokenImage.attributes, brokenLogo.querySelector('.brand-mark').hidden], [true, false, false], 'failed logo restores the mark');
+assert.deepEqual(brokenLogo.getElementById('theme-status').children.map(line => line.textContent), ['Theme pack sample logo did not load; showing the default mark.']);
+for (const image of ['https://example.com/logo.png', 'branding/logo.png', '/assets/themes/sample/branding/logo.svg']) {
+  const remote = statusDocument(); let decoded = false; remote.getElementById('brand-logo').decode = () => { decoded = true; return Promise.resolve(); };
+  ThemePack.start({ ui: { logo: { image, alt: 'Brand' } } }, remote); await settle();
+  assert.deepEqual([decoded, 'src' in remote.getElementById('brand-logo').attributes], [false, false], 'only local server-derived logo URLs load');
+}
+const noLogo = statusDocument(); ThemePack.start(defaults, noLogo);
+assert.deepEqual([noLogo.getElementById('brand-logo').hidden, 'src' in noLogo.getElementById('brand-logo').attributes, noLogo.getElementById('theme-status').hidden], [true, false, true], 'default has no logo and no status');
+// Warning region: requested/effective IDs and warnings as text only, bounded and deduplicated, mounted after the body exists.
+const hostile = '<img src=x onerror="alert(1)">';
+const fallbackSnapshot = { requestedId: 'sample', effectiveId: 'starnet', warnings: [{ code: 'theme-pack-invalid', pack: 'sample', message: hostile }] };
+const loading = statusDocument({ readyState: 'loading' }); const loadingStatus = ThemePack.start(fallbackSnapshot, loading);
+assert.equal(loading.getElementById('theme-status').hidden, true, 'nothing renders before DOMContentLoaded');
+ThemePack.reportWarning({ code: 'crew-load', pack: 'sample', group: 'blank', message: 'Theme pack sample crew blank did not load.' });
+loading.events.DOMContentLoaded();
+const region = loading.getElementById('theme-status');
+assert.deepEqual(region.children.map(line => line.textContent), ['Theme pack sample requested; showing starnet.', hostile, 'Theme pack sample crew blank did not load.'], 'requested/effective, snapshot and queued runtime warnings render as text');
+assert.ok(region.children.every(line => line.children.length === 0 && !('innerHTML' in line)), 'warning text is never parsed');
+assert.ok(!fs.readFileSync(path.join(root, 'app/theme-pack.js'), 'utf8').includes('innerHTML'));
+for (let i = 0; i < 20; i++) loadingStatus.report({ code: 'crew-load', pack: 'sample', group: 'g' + i, message: 'x'.repeat(500) });
+loadingStatus.report({ code: 'crew-load', pack: 'sample', group: 'blank', message: 'duplicate' });
+assert.equal(region.children.length, 9, 'requested/effective line plus at most eight warnings');
+assert.ok(region.children.every(line => line.textContent.length <= 200), 'warning text is bounded');
+assert.ok(!region.children.some(line => line.textContent === 'duplicate'), 'one warning per code/pack/group');
+})();
+brandChecks.catch(error => { console.error(error); process.exitCode = 1; });
 for (const pack of [undefined, { ...clone(defaults), ui: { ...clone(defaults.ui), colors: { ...defaults.ui.colors, phosphor: '#654321' } } }]) {
-  const doc = fakeDocument(), page = { window: { __OBSERVER_THEME_DEFAULT__: clone(defaults), __OBSERVER_THEME_PACK__: pack }, document: doc };
+  const doc = statusDocument(), page = { window: { __OBSERVER_THEME_DEFAULT__: clone(defaults), __OBSERVER_THEME_PACK__: pack }, document: doc };
   vm.runInNewContext(fs.readFileSync(path.join(root, 'app/theme-pack.js'), 'utf8'), page);
-  assert.equal(doc.styles.size, 48);
+  assert.equal(doc.styles.size, 48 + fixedCount);
+  assert.deepEqual(doc.documentElement.attributes, defaultAttributes);
   assert.equal(doc.styles.get('--phosphor'), pack ? '#654321' : defaults.ui.colors.phosphor, 'load applies the selected snapshot or the default');
   if (pack) assert.ok(Object.isFrozen(page.window.__OBSERVER_THEME_PACK__.ui.colors), 'load freezes the selected snapshot');
 }
@@ -104,6 +208,22 @@ for (const [filename, inventory] of [['css/observer.css', defaults.ui.colors], [
   const literals = fs.readFileSync(path.join(root, filename), 'utf8').match(/#[a-f0-9]{3,6}\b|rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*(?:\d*\.)?\d+\s*\)/gi) || [];
   const values = new Set([...Object.values(inventory), ...defaults.scene.projectAccents]);
   assert.deepEqual([...new Set(literals.map(normalize))].filter(value => !values.has(value)), [], filename + ' has unextracted fixed colors');
+}
+// Stylesheet: color literals live only in :root defaults; every interface role is consumed through its variable.
+// Retained non-theme keywords: `transparent` (gradient/background compositing endpoints) and `currentColor` (status dot halo).
+const stylesheet = fs.readFileSync(path.join(root, 'css/observer.css'), 'utf8');
+const rootBlock = stylesheet.match(/:root \{[^}]*\}/)[0], outsideRoot = stylesheet.replace(rootBlock, '');
+assert.deepEqual(outsideRoot.match(/#[a-f0-9]{3,8}\b|rgba?\([^)]*\)|hsla?\([^)]*\)/gi) || [], [], 'no color literal outside :root');
+assert.deepEqual(Object.keys(defaults.ui.colors).filter(key => !stylesheet.includes('var(--' + key + ')')), [], 'every ui.colors role is consumed');
+for (const property of ['--shape-control', '--shape-input', '--shape-panel', '--shape-session-row', '--shape-mail-row', '--shape-tag', '--shape-eyebrow', '--type-scale']) assert.ok(stylesheet.includes('var(' + property + ')'), property + ' is consumed');
+assert.deepEqual(stylesheet.match(/url\([^)]*\)/g), ["url('../assets/fonts/vt323.woff2')"], 'the stylesheet loads only the bundled VT323 face');
+assert.ok(!/https?:|@import/.test(stylesheet), 'no remote stylesheet resources');
+// Numeric readouts keep their fixed VT323 metrics in every profile and scale.
+for (const rule of ['#page-label { min-width:3.6em; text-align:center; font:24px/1 var(--term);', '.station-stats { margin-top:5px; font:15px/1.2 var(--term);',
+  'font:15px/1.2 var(--term); letter-spacing:.04em; font-variant-numeric:tabular-nums; }', '#counts { color:var(--dim); font:16px/1.2 var(--term);',
+  '.stat dd { margin:0; font:12px/1.3 ui-monospace,monospace;', '#observed { color:var(--dim); font:17px var(--term);']) assert.ok(stylesheet.includes(rule), 'fixed readout: ' + rule);
+for (const fixed of ['#page-label', '.station-stats', '.station-totals', '#counts', '.mail-counts', '.stat dd', '#observed', 'canvas']) {
+  assert.ok(!stylesheet.split('\n').filter(line => line.includes('data-type-profile')).some(line => line.includes(fixed)), fixed + ' has no profile override');
 }
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'observer-theme-test-'));
 const frontend = path.join(temporary, 'frontend');
@@ -225,4 +345,4 @@ try {
   const invalid = spawnSync(process.execPath, [validator, frontend], { encoding: 'utf8' }); assert.equal(invalid.status, 1);
   assert.ok(!invalid.stderr.includes(temporary));
 } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
-console.log('theme packs: inventory, inheritance, schema, native roles, bounded IO, containment, crew/logo/font/office resources, fallback and author validation passed');
+brandChecks.then(() => console.log('theme packs: inventory, inheritance, schema, native roles, bounded IO, containment, crew/logo/font/office resources, fallback and author validation passed'));

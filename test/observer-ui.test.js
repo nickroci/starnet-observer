@@ -30,6 +30,19 @@ const fireTimers = () => { const due = [...timers.values()]; timers.clear(); for
 // Panels are built per stack entry with numbered ids; tests find a named part of a panel (default: the top one).
 const findPart = (node, name) => { if (new RegExp('^' + name + '-\\d+$').test(node.id || '')) return node; for (const child of node.children || []) { const hit = findPart(child, name); if (hit) return hit; } return null; };
 const panelPart = (host, name, index = -1) => { const root = host.children.at(index); return root ? findPart(root, name) : null; };
+// Theme status and logo slots: fixed markup, separate from source health, empty and hidden until a theme reports.
+{
+  const page = fs.readFileSync(require.resolve('../frontend/observer.html'), 'utf8');
+  const status = page.match(/<div id="theme-status"[^>]*><\/div>/)?.[0] || '';
+  assert.ok(/role="status"/.test(status) && /aria-live="polite"/.test(status) && / hidden>/.test(status), 'theme status is a polite, initially hidden status region');
+  const health = page.match(/<p id="health"[^>]*>[^<]*<\/p>/)[0], connection = page.match(/<div class="connection">.*?<\/div>/)[0];
+  assert.ok(connection.includes(health) && !connection.includes('theme-status') && page.indexOf(status) > page.indexOf(connection), 'theme status sits outside #health and the connection group');
+  assert.ok(page.indexOf('id="source-health"') > page.indexOf(status), 'console source health stays a separate region');
+  const brand = page.match(/<div class="brand">.*?<\/div>/)[0];
+  assert.ok(brand.includes('<span class="brand-mark" aria-hidden="true">✦</span><img id="brand-logo" class="brand-logo" alt="" hidden><h1>Local observer</h1><span class="read-only">READ ONLY</span>'), 'logo slot follows the mark without replacing heading or READ ONLY label');
+  const controller = fs.readFileSync(require.resolve('../frontend/app/observer.js'), 'utf8');
+  assert.ok(!controller.includes('theme-status') && !controller.includes('brand-logo'), 'the session controller never writes theme slots');
+}
 (async () => {
   const elements = Object.fromEntries(['world', 'health', 'observed', 'sessions', 'empty', 'filters', 'overview', 'previous-page', 'next-page', 'search', 'page-label', 'room-count', 'counts',
     'zoom-in', 'zoom-out', 'fx-toggle', 'mail-health', 'mail-counts', 'mail-ledger', 'mail-empty', 'mail-detail', 'inspector', 'inspector-log', 'inspector-title', 'inspector-status', 'inspector-task', 'inspector-meta',
