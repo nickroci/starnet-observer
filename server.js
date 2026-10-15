@@ -132,7 +132,7 @@ if (require.main === module) {
   const server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme, control });
   server.on('error', error => { console.error('[observer]', redact(String(error.message))); process.exitCode = 1; });
   server.listen(port, '127.0.0.1', () => console.log('Local Observer: http://127.0.0.1:' + port + '\nPrivate labels: ' + (config.presentation ? 'on (' + config.labels.company + ')' : 'off') + (control ? '\nControl actions: on (OBSERVER_CONTROL=1): attach, spawn and close Herdr agents from the page.' : '\nRead only.') +
-    (remoteHosts ? '\nRemote hosts (read-only, over ssh): ' + config.remotes.map(remote => remote.id + ' = ' + remote.ssh).join(', ') + '. Control never reaches them.' : '') + ' Stop with Ctrl+C.'));
+    (remoteHosts ? '\nRemote hosts (over ssh): ' + config.remotes.map(remote => remote.id + ' = ' + remote.ssh).join(', ') + (control ? '. Control actions reach them too.' : '. Read only.') : '') + ' Stop with Ctrl+C.'));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { remoteHosts?.close(); server.close(); server.closeAllConnections(); });
 }
 module.exports = { createServer };
