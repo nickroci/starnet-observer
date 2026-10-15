@@ -56,3 +56,9 @@ Last session: 2026-10-15
 Stopped at: Stale-refresh implementation and review complete (PR #5)
 Resume file: None
 Next action: Continue registered work or discuss the next request.
+
+## Registered Work
+
+| # | Description | Date | Status | Directory |
+| --- | --- | --- | --- | --- |
+| 261015-flf | Migrate Local Observer runtime and SQLite to Bun | 2026-10-15 | Task 1 review; Task 2 pending | [261015-flf](./quick/261015-flf-migrate-local-observer-runtime-and-sqlit/) |
