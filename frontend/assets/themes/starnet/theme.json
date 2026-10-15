@@ -2,6 +2,7 @@
   "version": 1,
   "id": "starnet",
   "ui": {
+    "chrome": "classic",
     "colors": {
       "bg": "#020604",
       "panel": "#04100a",

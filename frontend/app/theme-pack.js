@@ -5,9 +5,9 @@ const ThemePack = (() => {
   const SHAPES = { control: '--shape-control', input: '--shape-input', panel: '--shape-panel', sessionRow: '--shape-session-row',
     mailRow: '--shape-mail-row', tag: '--shape-tag', eyebrow: '--shape-eyebrow' };
   const DECOR = { scanlines: 'data-decor-scanlines', glyphStrip: 'data-decor-glyph-strip', cornerBrackets: 'data-decor-corner-brackets', glow: 'data-decor-glow' };
-  const PROFILES = ['classic', 'dm-sans'], BADGE_CUTS = ['classic', 'none'];
+  const PROFILES = ['classic', 'dm-sans', 'pixel'], CHROME = ['classic', 'pixel'], BADGE_CUTS = ['classic', 'none'];
   // Server-derived local resource URLs only; anything else (remote, relative, quoted) is ignored.
-  const FONT_URL = /^\/assets\/themes\/[a-z0-9][a-z0-9-]{0,31}\/fonts\/dm-sans\.woff2$/;
+  const FONT_URL = /^\/assets\/themes\/[a-z0-9][a-z0-9-]{0,31}\/fonts\/(dm-sans|jersey-10|silkscreen)\.woff2$/;
   const LOGO_URL = /^\/assets\/themes\/[a-z0-9][a-z0-9-]{0,31}\/branding\/(?:[a-z0-9][a-z0-9_-]*\/)*[a-z0-9][a-z0-9_-]*\.png$/;
   const MAX_WARNINGS = 8, MAX_TEXT = 200;
   function freezeSnapshot(snapshot) {
@@ -24,11 +24,24 @@ const ThemePack = (() => {
   }
   const packId = snapshot => typeof snapshot?.effectiveId === 'string' ? snapshot.effectiveId : 'starnet';
   function installFont(snapshot, doc, report) {
-    const url = snapshot?.ui?.typography?.font, FontFaceType = (doc.defaultView || globalThis).FontFace;
-    if (typeof url !== 'string' || !FONT_URL.test(url) || !doc.fonts || typeof FontFaceType !== 'function') return;
-    const fail = () => report({ code: 'font-load', pack: packId(snapshot), message: 'Theme pack ' + packId(snapshot) + ' font did not load; using the system font.' });
-    try {
-      const face = new FontFaceType('DM Sans', 'url("' + url + '") format("woff2")', { display: 'swap', weight: '500 600', style: 'normal' });
+    const typography = snapshot?.ui?.typography || {}, FontFaceType = (doc.defaultView || globalThis).FontFace;
+    if (!doc.fonts || typeof FontFaceType !== 'function') return;
+    const definitions = typography.profile === 'dm-sans' ? [['DM Sans', 'dm-sans', typography.font, '500 600']]
+      : typography.profile === 'pixel' ? [['Jersey 10', 'jersey-10', typography.fonts?.jersey10, '400'], ['Silkscreen', 'silkscreen', typography.fonts?.silkscreen, '400']] : [];
+    if (typography.profile === 'pixel' && (!typography.fonts || typeof typography.fonts !== 'object' || Array.isArray(typography.fonts)
+      || Object.keys(typography.fonts).length !== 2 || !Object.hasOwn(typography.fonts, 'jersey10') || !Object.hasOwn(typography.fonts, 'silkscreen'))) return;
+    if (definitions.some(([, filename, url]) => {
+      const match = typeof url === 'string' ? url.match(FONT_URL) : null;
+      return !match || match[0] !== url || match[1] !== filename;
+    })) return;
+    let warned = false;
+    const fail = () => {
+      if (warned) return;
+      warned = true;
+      report({ code: 'font-load', pack: packId(snapshot), message: 'Theme pack ' + packId(snapshot) + ' font did not load; using the system font.' });
+    };
+    for (const [family, , url, weight] of definitions) try {
+      const face = new FontFaceType(family, 'url("' + url + '") format("woff2")', { display: 'swap', weight, style: 'normal' });
       doc.fonts.add(face);
       face.load().then(null, fail);
     } catch { fail(); }
@@ -43,6 +56,7 @@ const ThemePack = (() => {
     const typography = { ...base.typography, ...ui.typography };
     const profile = PROFILES.includes(typography.profile) ? typography.profile : base.typography.profile;
     const scale = Number.isFinite(typography.scale) ? Math.min(1.1, Math.max(0.9, typography.scale)) : base.typography.scale;
+    root.setAttribute('data-chrome', CHROME.includes(ui.chrome) ? ui.chrome : base.chrome);
     root.setAttribute('data-type-profile', profile);
     root.style.setProperty('--type-scale', String(scale));
     const shapes = { ...base.shapes, ...ui.shapes };
@@ -53,7 +67,7 @@ const ThemePack = (() => {
     root.setAttribute('data-badge-cut', BADGE_CUTS.includes(shapes.badgeCut) ? shapes.badgeCut : base.shapes.badgeCut);
     const decor = { ...base.decor, ...ui.decor };
     for (const [key, attribute] of Object.entries(DECOR)) root.setAttribute(attribute, decor[key] === false ? 'off' : 'on');
-    if (profile === 'dm-sans') installFont(snapshot, doc, report);
+    if (profile !== 'classic') installFont(snapshot, doc, report);
   }
   /* Theme status: requested/effective IDs, transient non-warning notices (e.g. office art still loading) and snapshot
      and runtime asset warnings, rendered as text only. A notice is replaced or removed by its code. */
