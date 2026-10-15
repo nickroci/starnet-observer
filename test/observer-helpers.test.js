@@ -28,6 +28,17 @@ const message = text => ({ type: 'response_item', payload: { type: 'message', ro
     let edges = [{ parent_thread_id: ID, child_thread_id: CHILD, status: 'open' }];
     const helpers = makeHelperObserver({ now, transcripts, readEdges: () => ({ rows: edges }) });
     const before = await transcripts.inspect(parent.id, 'codex', ID);
+    const prepared = await helpers.prepareChildren([parent]);
+    assert.equal(prepared.rows.length, 1);
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, false, 'preparation does not publish bindings');
+    prepared.commitBindings(new Set());
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, false, 'rejected helper binding never becomes inspectable');
+    prepared.commitBindings(new Set([prepared.rows[0].id]));
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, true);
+    const clearing = await helpers.prepareChildren([]);
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, true, 'another preparation leaves the live map intact');
+    clearing.commitBindings(new Set());
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, false, 'publication replaces bindings atomically');
     let result = await helpers.children([parent]);
     assert.equal(result.rows.length, 1);
     const child = result.rows[0];

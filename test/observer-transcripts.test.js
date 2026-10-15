@@ -205,6 +205,7 @@ const call = (id, name = 'exec_command') => ({ type: 'response_item', timestamp:
     assert((await observer.inspectChild('bound', binding)).turns.some(turn => turn.text === 'BOUND CHILD'));
     await fs.writeFile(file, line(meta(ID)) + line(message('assistant', 'UNBOUND')));
     assert.equal((await observer.inspectChild('bound', binding)).available, false);
+    await observerWarmReuse(root);
     await metadataReadBudget(root);
     await childDiscoveryWindows(root);
     await nativeHelperProjection(root);
@@ -479,4 +480,63 @@ async function nativeHelperProjection(temp) {
     assert.equal(bound.usage.inputTokens.value, padded ? 7 : 12, 'prefix usage outside selected bounded tail is excluded');
   }
 
+}
+
+async function observerWarmReuse(temp) {
+  const { makeObserver } = require('../sidecar/observer.js');
+  const directory = path.join(temp, 'warm-reuse'); await fs.mkdir(directory);
+  const file = path.join(directory, ID + '.jsonl');
+  const body = text => line(meta(ID)) + line({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: text } });
+  await fs.writeFile(file, body('WARM CONTENT'));
+  let clock = 1000, reads = 0, detailedReads = 0, warmStartReads = 0, release, entered;
+  const opening = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const transcripts = makeTranscriptObserver({ now: () => clock, roots: { codex: directory }, fs: {
+    ...fs, open: async (...args) => {
+      const handle = await fs.open(...args);
+      return { stat: () => handle.stat(), close: () => handle.close(), read: async (...args) => {
+        reads++; return handle.read(...args);
+      } };
+    }
+  } });
+  const inspect = transcripts.inspect;
+  const observer = makeObserver({ now: () => clock,
+    identities: { resolveMany: async () => [{ sessionId: ID, source: 'native' }] },
+    execute: async () => ({ stdout: JSON.stringify({ result: { agents: [{ pane_id: 'warm', agent: 'codex', cwd: directory }] } }) }),
+    projects: { resolveMany: async () => [{}] }, desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) },
+    helpers: { prepareChildren: async () => ({ rows: [], annotations: new Map(), overflow: new Map(), commitBindings() {} }) },
+    bus: { read: () => ({ health: 'available', rows: [] }) },
+    transcripts: { ...transcripts, inspect: async (...args) => {
+      detailedReads++;
+      if (detailedReads === 1) warmStartReads = reads;
+      const pending = inspect(...args);
+      if (detailedReads === 1) { entered(); await gate; }
+      return pending;
+    } }
+  });
+  try {
+    const initial = await observer.get(); const row = initial.sessions[0];
+    await opening;
+    // The warm path has entered the actual detail reader. Explicit demand shares its pending key.
+    const concurrent = observer.inspect(row.id, 'codex:' + ID);
+    release(); const warmed = await concurrent;
+    assert(warmed.turns.some(turn => turn.text === 'WARM CONTENT'));
+    assert.equal(reads - warmStartReads, 3, 'overlapping warm and explicit reads share one cold projection read');
+    const before = reads;
+    const reused = await observer.inspect(row.id, 'codex:' + ID);
+    assert.equal(reads - before, 2, 'warm projection needs only fresh prefix/window validation on click');
+    assert.equal(reused.generation, warmed.generation);
+    clock += 60001;
+    const beforeExpiry = reads;
+    const expired = await transcripts.inspect(row.id, 'codex', ID);
+    assert.notEqual(expired.generation, reused.generation, 'an expired detail projection is rebuilt');
+    assert.equal(reads - beforeExpiry, 3, 'expiry takes the bounded cold path rather than a second response cache');
+    await fs.writeFile(file + '.new', body('REPLACEMENT'));
+    await fs.rename(file + '.new', file);
+    const replaced = await observer.inspect(row.id, 'codex:' + ID);
+    assert(!JSON.stringify(replaced).includes('WARM CONTENT')); assert(replaced.turns.some(turn => turn.text === 'REPLACEMENT'));
+    await fs.unlink(file);
+    assert.equal((await observer.inspect(row.id, 'codex:' + ID)).health, 'unavailable', 'warm projection cannot outlive deleted source');
+    console.log('observer warm projection: cached click performs 2 validation reads; replacement and deletion revoke old content');
+  } finally { release(); await observer.close(); }
 }

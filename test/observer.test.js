@@ -1,6 +1,30 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { makeObserver } = require('../sidecar/observer.js');
+const { makeObserver: makeCoreObserver } = require('../sidecar/observer.js');
+// Legacy scenarios assert completed source observations. Track only injected fixture work;
+// the progressive fixtures below exercise the production core-return boundary directly.
+function makeObserver(options) {
+  if (!options) return makeCoreObserver();
+  const work = new Set();
+  const tracked = { ...options, warmDetails: false };
+  for (const [name, methods] of [['transcripts', ['read']], ['helpers', ['children', 'prepareChildren']], ['desktop', ['inventory']], ['bus', ['read']]]) {
+    if (!options[name]) continue;
+    tracked[name] = { ...options[name] };
+    for (const method of methods) if (typeof options[name][method] === 'function') tracked[name][method] = (...args) => {
+      const promise = Promise.resolve().then(() => options[name][method](...args));
+      work.add(promise);
+      promise.then(() => work.delete(promise), () => work.delete(promise));
+      return promise;
+    };
+  }
+  const observer = makeCoreObserver(tracked);
+  let pending;
+  const get = () => pending || (pending = observer.get().then(async () => {
+    while (work.size) await Promise.allSettled([...work]);
+    return observer.get();
+  }).finally(() => { pending = null; }));
+  return { ...observer, get, inspect: async (...args) => { await get(); return observer.inspect(...args); } };
+}
 const { makeDesktopObserver } = require('../sidecar/observer-desktop.js');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -10,6 +34,13 @@ const ID = '00000000-0000-0000-0000-000000000001';
 const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status: 'working',
   terminal_title_stripped: 'Title', cwd: '/private/project', agent_session: { agent: 'codex', kind: 'id', value: session } });
 (async () => {
+  await progressivePublication();
+  await progressiveOwnership();
+  await boundedWarmup();
+  await queuedWarmOwnership();
+  await progressiveClose();
+  await helperFailureTruthfulness();
+  await progressiveGrouping();
   let now = 1000, count = 0, inventory = [{ ...pane('one'), terminal_title_stripped: 'Check sk-ant-123456789ABC password="multi word canary"' }, pane('two')], fail = false;
   let release;
   const reads = []; let inspectRelease = null;
@@ -139,7 +170,8 @@ async function independentDesktop() {
     execute: async () => { if (fail) throw Error('private'); return { stdout: JSON.stringify({ result: { agents: [pane('legacy')] } }) }; } });
   const first = await observer.get();
   assert.equal(first.sources.desktop.health, 'available'); assert.equal(first.sessions.length, 2);
-  assert.deepEqual(retained[0], [first.sessions.find(row => row.source === 'herdr').id], 'desktop IDs never enter transcript cache');
+  assert.deepEqual(retained.at(-1), [first.sessions.find(row => row.source === 'herdr').id]);
+  assert(retained.every(ids => !ids.includes(rows[0].id)), 'desktop IDs never enter transcript cache');
   clock = 4000; fail = true;
   const mixed = await observer.get();
   assert.equal(mixed.health, 'available'); assert.equal(mixed.sources.herdr.health, 'unavailable');
@@ -718,13 +750,13 @@ async function usageAggregate() {
   assert.equal(conflicting.aggregate.usage.inputTokens.value, 20, 'conflicting duplicates excluded once from every count');
   clock += 3000; fail = true;
   const stale = await observer.get();
-  assert.equal(stale.aggregate.coverage.stale, 3);
-  assert.equal(stale.aggregate.usage.inputTokens.value, 7, 'stale values never enter live totals');
+  assert.equal(stale.aggregate.coverage.stale, 4);
+  assert.equal(stale.aggregate.usage.inputTokens.value, null, 'unavailable ancestor makes helper values stale too');
   assert.equal(stale.aggregate.agents.statuses.working, 0);
 }
 
 async function aggregateAgeAndOverflow() {
-  let clock = 1000, slow = false, overflow = false;
+  let clock = 1000, overflow = false;
   const second = '00000000-0000-0000-0000-000000000002';
   const observer = makeObserver({ now: () => clock,
     identities: { resolve: async row => ({ sessionId: row.agent_session.value, source: 'herdr' }) },
@@ -737,7 +769,6 @@ async function aggregateAgeAndOverflow() {
       cacheWriteTokens: { value: 0, state: 'available' }
     } }) },
     desktop: { inventory: async () => {
-      if (slow) { await new Promise(resolve => setImmediate(resolve)); clock += 6001; }
       return { health: 'available', observedAt: clock, windows: [{ id: 'app', status: 'idle' }] };
     } }
   });
@@ -746,12 +777,6 @@ async function aggregateAgeAndOverflow() {
   result = await observer.get();
   assert.deepEqual(result.aggregate.usage.inputTokens, { value: null, state: 'unavailable' }, 'overflow never returns an imprecise counter');
   assert.deepEqual(result.aggregate.usage.outputTokens, { value: 2, state: 'available' }, 'other counters remain usable');
-  clock += 3000; slow = true;
-  result = await observer.get();
-  assert.equal(result.health, 'available'); assert.equal(result.aggregate.agents.stale, 2);
-  assert.equal(result.aggregate.coverage.stale, 2);
-  assert.equal(result.aggregate.usage.inputTokens.value, null, 'fresh Desktop cannot renew older Herdr usage');
-  assert.equal(result.aggregate.agents.statuses.working, 0); assert.equal(result.aggregate.agents.statuses.idle, 1);
 }
 
 async function claudeHelperNamespaces() {
@@ -799,19 +824,19 @@ async function identityEnrichmentOrdering() {
   const observer = makeObserver({ now: () => clock, endpoint: 'ordering', identities,
     execute: async () => ({ stdout: JSON.stringify({ result: { agents: inventory } }) }),
     desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) }, bus: { read: () => ({ rows: [] }) },
-    transcripts: { retain() {}, read: async () => { events.push('transcript'); await new Promise(resolve => setImmediate(resolve)); return {}; } },
+    transcripts: { retain() {}, read: async () => { events.push('transcript'); await new Promise(resolve => setImmediate(resolve)); return { available: true }; } },
     projects: { resolve: async () => { events.push('project'); await new Promise(resolve => setImmediate(resolve)); return {}; } },
     helpers: { children: async parents => { events.push('helpers:' + parents.length); return { rows: [], annotations: new Map(), overflow: new Map() }; } } });
-  assert.equal((await observer.get()).sessions.length, 2);
+  assert.equal((await inventoryWhen(observer, data => data.sessions.length === 2 && data.sessions.every(row => row.tool.available))).sessions.length, 2);
   assert.equal(events[0], 'identities:2', 'identities finish before enrichment');
-  assert.equal(events.at(-1), 'helpers:2', 'helpers follow completed root enrichment');
+  assert.equal(events.at(-1), 'helpers:2', 'helper discovery starts alongside summaries after core proof');
   assert.deepEqual(events.slice(1, -1).sort(), ['project', 'project', 'transcript', 'transcript']);
   events.length = 0; inventory = [pane('a'), pane('a')]; clock += 3000;
   assert.equal((await observer.get()).sources.herdr.health, 'unavailable');
-  assert.deepEqual(events, ['helpers:2'], 'duplicate inventory rejected before any identity or enrichment calls');
+  assert.deepEqual(events, [], 'duplicate inventory rejected before any identity or enrichment calls');
   events.length = 0; inventory = [pane('a'), pane('bad id')]; clock += 3000;
   assert.equal((await observer.get()).sources.herdr.health, 'unavailable');
-  assert.deepEqual(events, ['helpers:2'], 'invalid pane ID rejected before any identity or enrichment calls');
+  assert.deepEqual(events, [], 'invalid pane ID rejected before any identity or enrichment calls');
   events.length = 0; inventory = []; clock += 3000;
   assert.deepEqual((await observer.get()).sessions, []); assert.deepEqual(events, ['identities:0', 'helpers:0']);
   events.length = 0; delete identities.resolveMany; inventory = [pane('a'), pane('b')]; clock += 3000;
@@ -825,11 +850,11 @@ async function refreshStartCache() {
   for (const completionAt of [3000, 100]) {
     let clock = 0, reads = 0, release;
     const gate = new Promise(resolve => { release = resolve; });
-    const observer = makeObserver({ now: () => clock,
+    const observer = makeCoreObserver({ now: () => clock,
       readIdentityConfiguration: async () => 'unconfigured',
-      execute: async () => { reads++; return { stdout: JSON.stringify({ result: { agents: [] } }) }; },
+      execute: async () => { reads++; await gate; return { stdout: JSON.stringify({ result: { agents: [] } }) }; },
       desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) },
-      helpers: { children: async () => { await gate; return { rows: [], annotations: new Map(), overflow: new Map() }; } },
+      helpers: { children: async () => { return { rows: [], annotations: new Map(), overflow: new Map() }; } },
       transcripts: { retain() {} }, bus: { read: () => ({ rows: [] }) }
     });
     const first = observer.get();
@@ -838,7 +863,7 @@ async function refreshStartCache() {
       clock = completionAt;
       assert.equal(observer.get(), first, 'pending refresh coalesces even after cache lifetime expires');
     } finally { release(); await first; }
-    assert.equal((await first).sources.herdr.observedAt, 0, 'completion preserves inventory timestamp at zero');
+    assert.equal((await first).sources.herdr.observedAt, completionAt, 'inventory timestamp is captured when its source completes');
     if (completionAt < 2000) {
       clock = 1999; await observer.get();
       assert.equal(reads, 1, 'refresh starting at zero remains cached through 1999');
@@ -896,7 +921,7 @@ async function pollingFreshness() {
       return { result: { read: { pane_id: id, source: 'recent', format: 'text', text: '\n  ' + ID + ' · model\n  ? for shortcuts\n' } } };
     }
   });
-  const observer = makeObserver({ now: () => clock, identities,
+  const observer = makeCoreObserver({ now: () => clock, identities,
     execute: async () => {
       starts.push(clock); rpcCounts.clear(); birthCounts.clear();
       if (inventoryMode === 'failed') throw Error('synthetic outage');
@@ -939,22 +964,18 @@ async function pollingFreshness() {
       assert.equal(publication.data.sessions.find(row => row.source === 'desktop').observedAt, -7000);
       assert(clock - publication.data.sources.desktop.observedAt > 6000, 'fresh Herdr never renews old Desktop');
     }
-    const beforeDelay = Q.state('observer.sessions').data;
     holdHelpers = true;
-    await advance(14001);
-    assert.equal(Q.state('observer.sessions').pending, true);
-    assert.equal(Q.state('observer.sessions').data, beforeDelay, 'pending refresh preserves last published observation');
-    assert.equal(beforeDelay.sources.herdr.observedAt, 6000);
-    assert(herdrRows(beforeDelay).every(row => row.observedAt === 6000 && clock - row.observedAt > 6000));
-    assert(clock - beforeDelay.sources.herdr.observedAt > 6000, 'slow work remains truthfully stale beyond deadline');
+    await advance(13700);
+    const duringHelpers = Q.state('observer.sessions').data;
+    assert.equal(duringHelpers.sources.herdr.observedAt, 12000, 'held helpers do not delay subsequent core observations');
+    assert(herdrRows(duringHelpers).every(row => row.observedAt === 12000));
     holdHelpers = false; releaseHelpers(); await advance(14100);
-    assert.equal(Q.state('observer.sessions').data.sources.herdr.observedAt, 8000, 'late completion never substitutes completion time');
     inventoryMode = 'failed'; await advance(16100);
     const unavailable = Q.state('observer.sessions').data;
     assert.equal(unavailable.sources.herdr.health, 'unavailable');
-    assert.equal(unavailable.sources.herdr.observedAt, 8000);
+    assert.equal(unavailable.sources.herdr.observedAt, 14000);
     assert.equal(herdrRows(unavailable).length, 20);
-    assert(herdrRows(unavailable).every(row => row.observedAt === 8000 && row.inventoryHealth === 'unavailable'));
+    assert(herdrRows(unavailable).every(row => row.observedAt === 14000 && row.inventoryHealth === 'unavailable'));
     inventoryMode = 'empty'; await advance(18100);
     assert.equal(Q.state('observer.sessions').data.sources.herdr.health, 'available');
     assert.equal(Q.state('observer.sessions').data.sources.herdr.observedAt, 18000);
@@ -981,4 +1002,340 @@ async function pollingFreshness() {
       events.length = 0;
     }
   }
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+async function progressivePublication() {
+  const summary = deferred(), desktopGate = deferred(), helperGate = deferred(), busGate = deferred();
+  const started = new Set();
+  const observer = makeCoreObserver({ now: () => 1000, warmDetails: false,
+    identities: { resolveMany: async rows => rows.map(() => ({ sessionId: ID, source: 'native' })) },
+    projects: { resolveMany: async rows => rows.map(() => ({ projectId: 'fixture' })) },
+    execute: async () => ({ stdout: JSON.stringify({ result: { agents: [pane('early')] } }) }),
+    transcripts: { retain() {}, read: async () => { started.add('summary'); await summary.promise; return { available: true, usage: { observedAt: 777 } }; },
+      inspect: async () => ({ available: true, health: 'available', turns: [] }) },
+    helpers: { prepareChildren: async () => { started.add('helper'); await helperGate.promise; return { rows: [], annotations: new Map(), overflow: new Map(), commitBindings() {} }; } },
+    desktop: { inventory: async () => { started.add('desktop'); await desktopGate.promise; return { health: 'available', windows: [] }; } },
+    bus: { read: async () => { started.add('bus'); await busGate.promise; return { health: 'available', rows: [], observedAt: 800 }; } }
+  });
+  let published = false;
+  const first = observer.get().then(value => { published = true; return value; });
+  await new Promise(resolve => setImmediate(resolve));
+  try {
+    assert.equal(published, true, 'core rooms publish while every optional source remains blocked');
+    const core = await first;
+    assert.equal(core.sessions.length, 1); assert.equal(core.sessions[0].tool.available, false);
+    assert.equal(core.sessions[0].usage, null); assert.equal(core.bus, null);
+    assert.deepEqual([...started].sort(), ['bus', 'desktop', 'helper', 'summary']);
+    assert.equal((await observer.inspect(core.sessions[0].id, 'codex:' + ID)).health, 'available', 'explicit inspection ignores unrelated optional gates');
+    summary.resolve(); await summary.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await observer.get()).sessions[0].tool.available, true, 'summary publication does not wait for helpers');
+    assert.equal(core.sessions[0].tool.available, false, 'published snapshots remain immutable');
+  } finally {
+    summary.resolve(); desktopGate.resolve(); helperGate.resolve(); busGate.resolve(); await first; await observer.close();
+  }
+}
+
+async function inventoryWhen(observer, predicate) {
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const snapshot = await observer.get();
+    if (predicate(snapshot)) return snapshot;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.fail('fixture did not publish the expected inventory');
+}
+
+function progressiveOptions(overrides = {}) {
+  return { now: () => 1000, warmDetails: false,
+    identities: { resolveMany: async rows => rows.map(row => ({ sessionId: row.agent_session.value, source: 'native' })) },
+    projects: { resolveMany: async rows => rows.map(() => ({ projectId: 'fixture' })) },
+    execute: async () => ({ stdout: JSON.stringify({ result: { agents: [pane('root')] } }) }),
+    transcripts: { retain() {}, read: async () => ({ available: true }), inspect: async () => ({ available: true, health: 'available', turns: [] }) },
+    helpers: { prepareChildren: async () => ({ rows: [], annotations: new Map(), overflow: new Map(), commitBindings() {} }) },
+    desktop: { inventory: async () => ({ health: 'unavailable', windows: [] }) },
+    bus: { read: async () => ({ health: 'available', rows: [], observedAt: 900 }) }, ...overrides };
+}
+async function progressiveOwnership() {
+  for (const change of ['unchanged', 'session', 'process', 'removed', 'unavailable']) {
+    let clock = 1000, session = ID, pid = 7, present = true, failed = false, revision = 0, sweeps = 0;
+    const summary = deferred(), helper = deferred(), warm = [], bindings = new Set();
+    const child = 'obs_' + 'c'.repeat(24), grandchild = 'obs_' + 'd'.repeat(24);
+    const observer = makeCoreObserver(progressiveOptions({ now: () => clock, warmDetails: true,
+      execute: async () => { if (failed) throw Error('fixture unavailable'); return { stdout: JSON.stringify({ result: { agents: present ? [pane('root', session)] : [] } }) }; },
+      identities: { resolveMany: async rows => rows.map(row => ({ sessionId: row.agent_session.value, source: 'footer',
+        proof: { paneId: 'root', terminalId: 'terminal', sessionId: row.agent_session.value, revision: ++revision,
+          birth: { pid, startSeconds: 1, startMicroseconds: 2 } } })), revalidateAll: async () => true },
+      transcripts: { retain() {}, read: async () => { await summary.promise; return { available: true, usage: { observedAt: 700 } }; },
+        inspect: async id => { warm.push(id); return { available: true, health: 'available', turns: [] }; } },
+      helpers: { prepareChildren: async parents => {
+        const sweep = ++sweeps;
+        await helper.promise;
+        // Later changed-owner sweeps supply their own empty result; old work must not leak through.
+        const rows = sweep === 1 || change === 'unchanged' ? [
+          { id: child, source: 'helper', provider: 'codex', sessionId: 'child', parentId: parents[0].id,
+            inventoryHealth: 'available', inspectionIdentity: 'helper:' + child, observedAt: 777, tool: { available: false } },
+          { id: grandchild, source: 'helper', provider: 'codex', sessionId: 'grandchild', parentId: child,
+            inventoryHealth: 'available', inspectionIdentity: 'helper:' + grandchild, observedAt: 778, tool: { available: false } }
+        ] : [];
+        return { rows, annotations: new Map(), overflow: new Map(), commitBindings(ids) {
+          bindings.clear(); for (const row of rows) if (ids.has(row.id)) bindings.add(row.id);
+        } };
+      }, inspect: async row => {
+        assert(bindings.has(row.id), 'visible helper and binding publish together'); warm.push(row.id);
+        return { available: true, health: 'available', turns: [] };
+      } }
+    }));
+    try {
+      const first = await observer.get(); const root = first.sessions[0].id;
+      for (let round = 0; round < 3; round++) {
+        clock += 2000;
+        if (round === 1) {
+          if (change === 'session') session = '00000000-0000-0000-0000-000000000002';
+          if (change === 'process') pid++;
+          if (change === 'removed') present = false;
+          if (change === 'unavailable') failed = true;
+        }
+        await observer.get();
+      }
+      assert.equal(sweeps, 1, 'polling never overlaps or cancels an active sweep');
+      summary.resolve(); helper.resolve();
+      if (change === 'unchanged') {
+        const enriched = await inventoryWhen(observer, data => data.sessions.length === 3 && warm.includes(grandchild));
+        assert.equal(enriched.sessions[0].observedAt, 7000);
+        assert.equal(enriched.sessions[0].usage.observedAt, 700);
+        assert.equal(enriched.sessions[1].observedAt, 777); assert.equal(enriched.sessions[2].observedAt, 778);
+        assert.equal(sweeps, 1, 'unchanged ownership retains enrichment across three generations');
+        assert.deepEqual([...bindings], [child, grandchild]);
+        assert.equal((await observer.inspect(grandchild, 'helper:' + grandchild + '|' + child)).health, 'available');
+        clock += 2000; await observer.get();
+        const retained = await observer.get();
+        assert.equal(retained.sessions[1].observedAt, 777, 'a later core cannot restamp helper evidence');
+        assert.equal(retained.sessions[0].usage.observedAt, 700);
+      } else {
+        // Synchronize on actual fixture work; get exposes only public snapshots.
+        await summary.promise; await helper.promise;
+        await new Promise(resolve => setImmediate(resolve));
+        const latest = await observer.get();
+        assert.equal(latest.sessions.some(row => row.id === child || row.id === grandchild), false, change + ': obsolete ancestry rejected');
+        assert.equal(bindings.size, 0); assert(!warm.includes(child)); assert(!warm.includes(grandchild));
+        if (change === 'removed') assert(!warm.includes(root));
+      }
+    } finally { summary.resolve(); helper.resolve(); await observer.close(); }
+  }
+}
+async function boundedWarmup() {
+  let clock = 1000, inventoryReads = 0, active = 0, maximum = 0;
+  const panes = Array.from({ length: 40 }, (_, index) => pane('warm-' + index,
+    '00000000-0000-0000-0000-' + String(index + 1).padStart(12, '0')));
+  const jobs = [], observers = [];
+  const observer = makeCoreObserver(progressiveOptions({ now: () => clock, warmDetails: true,
+    execute: async () => { inventoryReads++; return { stdout: JSON.stringify({ result: { agents: panes } }) }; },
+    transcripts: { retain() {}, read: async () => ({ available: true, usage: { observedAt: clock } }), inspect: async id => {
+      const gate = deferred(); active++; maximum = Math.max(maximum, active); jobs.push({ id, gate });
+      await gate.promise; active--;
+      return { available: false };
+    } }
+  }));
+  observers.push(observer);
+  try {
+    await observer.get();
+    await inventoryWhen(observer, data => jobs.length === 2 && data.sessions.every(row => row.usage?.observedAt === clock));
+    assert.equal(active, 2);
+    for (let round = 0; round < 3; round++) {
+      clock += 2000; await observer.get();
+      await inventoryWhen(observer, data => data.sessions.every(row => row.usage?.observedAt === clock));
+    }
+    // Advance beyond cooldown while reads are held. Warmup must never request new inventory itself.
+    clock += 61000;
+    const demands = inventoryReads;
+    for (let completed = 0; completed < 32; completed++) {
+      await fixtureUntil(() => !!jobs[completed], 'warm job ' + completed + ', total=' + jobs.length);
+      jobs[completed].gate.resolve(); await jobs[completed].gate.promise;
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(jobs.length, 32, 'one bounded sweep prepares at most 32 stable roster identities');
+    assert.equal(maximum, 2); assert.equal(active, 0);
+    assert.equal(new Set(jobs.map(job => job.id)).size, 32, 'unchanged queued targets are never duplicated across core generations');
+    assert.equal(inventoryReads, demands, 'background work alone cannot trigger inventory or restart expired warmup');
+    // A caller resumes polling: expired attempts may be scheduled again.
+    await observer.get();
+    await inventoryWhen(observer, () => jobs.length === 34);
+    assert.equal(inventoryReads, demands + 1);
+    for (let index = 32; index < 34; index++) {
+      await fixtureUntil(() => !!jobs[index], 'second warm job ' + index + ', total=' + jobs.length);
+      jobs[index].gate.resolve();
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    await observer.get();
+    assert.equal(jobs.length, 34, 'unavailable attempts also obey the 60-second cooldown from their actual start');
+    const hidden = makeCoreObserver(progressiveOptions({ warmDetails: false,
+      transcripts: { retain() {}, read: async () => ({ available: true }), inspect: async () => { assert.fail('disabled warmup read content'); } } }));
+    observers.push(hidden); await hidden.get(); await new Promise(resolve => setImmediate(resolve)); await hidden.get();
+  } finally {
+    for (const job of jobs) job.gate.resolve();
+    await Promise.all(observers.map(value => value.close()));
+  }
+}
+
+async function fixtureUntil(predicate, label) {
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    if (predicate()) return;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.fail(label);
+}
+
+async function queuedWarmOwnership() {
+  let clock = 1000, parentIndex = 0, thirdSession = '00000000-0000-0000-0000-000000000003', fourth = true;
+  const child = 'obs_' + 'e'.repeat(24), gates = [], reads = [], helperParents = [];
+  const observer = makeCoreObserver(progressiveOptions({ now: () => clock, warmDetails: true,
+    execute: async () => ({ stdout: JSON.stringify({ result: { agents: [pane('a'),
+      pane('b', '00000000-0000-0000-0000-000000000002'), pane('c', thirdSession),
+      ...(fourth ? [pane('d', '00000000-0000-0000-0000-000000000004')] : [])] } }) }),
+    transcripts: { retain() {}, read: async () => ({ available: true, usage: { observedAt: clock } }), inspect: async (id, provider, session) => {
+      reads.push(session);
+      if (reads.length <= 2) { const gate = deferred(); gates.push(gate); await gate.promise; }
+      return { available: true, health: 'available', turns: [] };
+    } },
+    helpers: { prepareChildren: async parents => ({ rows: [{ id: child, source: 'helper', provider: 'codex', sessionId: 'child',
+      inspectionIdentity: 'helper:' + child, parentId: parents[parentIndex].id, inventoryHealth: 'available', observedAt: 900 }],
+      annotations: new Map(), overflow: new Map(), commitBindings() {} }),
+      inspect: async row => { helperParents.push(row.parentId); return { available: true, health: 'available', turns: [] }; } }
+  }));
+  try {
+    const core = await observer.get();
+    await inventoryWhen(observer, data => data.sessions.some(row => row.id === child) && gates.length === 2);
+    for (const [session, parent] of [['00000000-0000-0000-0000-000000000005', 1], ['00000000-0000-0000-0000-000000000006', 0]]) {
+      clock += 2000; thirdSession = session; parentIndex = parent; fourth = false;
+      await observer.get();
+      await inventoryWhen(observer, data => data.sessions.find(row => row.id === child)?.parentId === core.sessions[parent].id &&
+        data.sessions.filter(row => row.source === 'herdr').every(row => row.usage?.observedAt === clock));
+    }
+    for (const gate of gates) gate.resolve();
+    await fixtureUntil(() => helperParents.length === 1 && reads.includes(thirdSession), 'latest queued ownership did not warm');
+    assert.deepEqual(reads, [ID, '00000000-0000-0000-0000-000000000002', thirdSession], 'removed and superseded queued identities never read content');
+    assert.deepEqual(helperParents, [core.sessions[0].id], 'only the latest complete helper ancestry reaches a queued read');
+  } finally { for (const gate of gates) gate.resolve(); await observer.close(); }
+}
+async function progressiveClose() {
+  const summary = deferred(), helpers = deferred(), bus = deferred(), desktop = deferred();
+  let reads = 0, helperCloses = 0;
+  const observer = makeCoreObserver(progressiveOptions({ warmDetails: true,
+    transcripts: { retain() {}, read: async () => { await summary.promise; return { available: true }; }, inspect: async () => { reads++; } },
+    helpers: { prepareChildren: async () => { await helpers.promise; return { rows: [], annotations: new Map(), overflow: new Map(), commitBindings() { assert.fail('closed observer committed helper bindings'); } }; },
+      close: async () => { helperCloses++; } },
+    bus: { read: async () => { await bus.promise; return { rows: [], health: 'available' }; } },
+    desktop: { inventory: async () => { await desktop.promise; return { windows: [], health: 'available' }; } }
+  }));
+  const before = await observer.get();
+  const closing = observer.close(); assert.equal(observer.close(), closing);
+  let complete = false; closing.then(() => { complete = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(complete, false, 'close waits for accepted bounded work');
+  summary.resolve(); helpers.resolve(); bus.resolve(); desktop.resolve(); await closing;
+  const after = await observer.get();
+  assert.deepEqual(after, before, 'late optional results cannot publish after close');
+  assert.equal(reads, 0); assert.equal(helperCloses, 1);
+  assert.equal((await observer.inspect(before.sessions[0].id)).health, 'unavailable');
+  // A second observer closes with active reads and a queue, not only pending metadata.
+  const jobs = [], activeObserver = makeCoreObserver(progressiveOptions({ warmDetails: true,
+    execute: async () => ({ stdout: JSON.stringify({ result: { agents: Array.from({ length: 4 }, (_, index) =>
+      pane('close-' + index, '00000000-0000-0000-0000-' + String(index + 1).padStart(12, '0'))) } }) }),
+    transcripts: { retain() {}, read: async () => ({ available: true }), inspect: async () => {
+      const job = deferred(); jobs.push(job); await job.promise; return { available: true, turns: [] };
+    } }
+  }));
+  try {
+    await activeObserver.get(); await fixtureUntil(() => jobs.length === 2, 'two warm jobs did not start');
+    const stopping = activeObserver.close();
+    jobs.forEach(job => job.resolve()); await stopping;
+    assert.equal(jobs.length, 2, 'teardown clears queued targets before active work settles');
+  } finally { jobs.forEach(job => job.resolve()); await activeObserver.close(); }
+  const stuck = deferred();
+  const bounded = makeCoreObserver(progressiveOptions({ transcripts: { retain() {}, read: async () => { await stuck.promise; return { available: true }; } } }));
+  await bounded.get();
+  let published;
+  const setTimer = globalThis.setTimeout, clearTimer = globalThis.clearTimeout;
+  let deadline, unref = 0, cleared = 0;
+  try {
+    globalThis.setTimeout = (callback, milliseconds) => {
+      assert.equal(milliseconds, 10000); deadline = callback;
+      return { unref() { unref++; } };
+    };
+    globalThis.clearTimeout = () => { cleared++; };
+    const stopping = bounded.close();
+    published = await bounded.get();
+    assert.equal(typeof deadline, 'function'); deadline(); await stopping;
+    assert.equal(unref, 1); assert.equal(cleared, 1, 'close deadline cannot retain a timer after settlement');
+  } finally { globalThis.setTimeout = setTimer; globalThis.clearTimeout = clearTimer; stuck.resolve(); await bounded.close(); }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(await bounded.get(), published, 'uncooperative optional work may settle later without publishing');
+}
+
+async function helperFailureTruthfulness() {
+  let clock = 1000, mode = 'available', coreFails = false;
+  const child = 'obs_' + 'b'.repeat(24), bindings = new Set(), recovery = deferred();
+  const observer = makeCoreObserver(progressiveOptions({ now: () => clock,
+    execute: async () => { if (coreFails) throw Error('fixture unavailable'); return { stdout: JSON.stringify({ result: { agents: [pane('root')] } }) }; },
+    helpers: { prepareChildren: async parents => {
+      if (mode === 'recovering') await recovery.promise;
+      return { health: mode === 'failed' ? 'unavailable' : 'available', reason: mode === 'failed' ? 'unreadable' : null,
+        rows: mode === 'failed' ? [] : [{ id: child, source: 'helper', provider: 'codex', inspectionIdentity: 'helper:' + child,
+          parentId: parents[0].id, inventoryHealth: 'available', observedAt: 777 }],
+        annotations: new Map(), overflow: new Map(), commitBindings(ids) { bindings.clear(); for (const id of ids) bindings.add(id); } };
+    }, inspect: async () => ({ available: true, health: 'available', turns: [] }) }
+  }));
+  try {
+    await observer.get();
+    await inventoryWhen(observer, data => data.sessions.some(row => row.id === child));
+    clock += 2000; mode = 'failed'; await observer.get();
+    const stale = await inventoryWhen(observer, data => data.sessions.find(row => row.id === child)?.inventoryHealth === 'unavailable');
+    assert.equal(stale.sessions.find(row => row.id === child).observedAt, 777);
+    assert.equal((await observer.inspect(child)).reason, 'inventory-unavailable'); assert.equal(bindings.size, 0);
+    clock += 2000; coreFails = true; await observer.get();
+    assert.equal((await observer.get()).sessions.find(row => row.id === child).inventoryHealth, 'unavailable');
+    clock += 2000; coreFails = false; mode = 'recovering'; await observer.get();
+    assert.equal((await observer.inspect(child)).reason, 'inventory-unavailable', 'a surviving parent cannot revive an older helper binding');
+    recovery.resolve();
+    await inventoryWhen(observer, data => data.sessions.find(row => row.id === child)?.inventoryHealth === 'available');
+  } finally { recovery.resolve(); await observer.close(); }
+}
+
+async function progressiveGrouping() {
+  let clock = 1000, cwd = 'old-room';
+  const helperGate = deferred(), child = 'obs_' + 'f'.repeat(24);
+  const observer = makeCoreObserver(progressiveOptions({ now: () => clock,
+    execute: async () => ({ stdout: JSON.stringify({ result: { agents: [
+      { ...pane('root'), cwd }, { ...pane('child', '00000000-0000-0000-0000-000000000002'), cwd: 'child-room' },
+      { ...pane('capped', '00000000-0000-0000-0000-000000000003'), cwd: 'capped-room' }
+    ] } }) }),
+    projects: { resolveMany: async cwds => cwds.map(value => ({ projectId: value, project: value, repoId: value + '-repo', worktree: value + '-tree' })) },
+    helpers: { prepareChildren: async parents => {
+      await helperGate.promise;
+      const oldGrouping = { projectId: parents[0].projectId, project: parents[0].project, repoId: parents[0].repoId, worktree: parents[0].worktree };
+      return { rows: [{ id: child, source: 'helper', provider: 'codex', inspectionIdentity: 'helper:' + child,
+        inventoryHealth: 'available', parentId: parents[1].id, observedAt: 777, ...oldGrouping }],
+        annotations: new Map([[parents[1].id, { parentId: parents[0].id, ...oldGrouping }], [parents[2].id, oldGrouping]]),
+        groupOwners: new Map([[parents[2].id, parents[0].id]]), overflow: new Map(), commitBindings() {} };
+    } }
+  }));
+  try {
+    const first = await observer.get(); assert.equal(first.sessions[0].projectId, 'old-room');
+    clock += 2000; cwd = 'new-room'; const core = await observer.get();
+    assert.equal(core.sessions[0].projectId, 'new-room');
+    helperGate.resolve();
+    const enriched = await inventoryWhen(observer, data => data.sessions.length === 4);
+    for (const row of enriched.sessions) {
+      assert.equal(row.projectId, 'new-room', 'captured enrichment must inherit the current owner room');
+      assert.equal(row.repoId, 'new-room-repo'); assert.equal(row.worktree, 'new-room-tree');
+    }
+    assert.equal(enriched.sessions[0].projectId, core.sessions[0].projectId, 'lineage cannot overwrite latest core grouping');
+    assert.equal(enriched.sessions[2].parentId, undefined, 'capped ownership still advertises no guessed helper parent');
+    assert.equal(enriched.sessions[3].observedAt, 777);
+  } finally { helperGate.resolve(); await observer.close(); }
 }

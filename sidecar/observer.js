@@ -6,7 +6,7 @@ const childProcess = require('./child-env.js').guardChildProcess(require('node:c
 const { makeDesktopObserver } = require('./observer-desktop.js');
 const { makeProjectResolver } = require('./observer-projects.js');
 const { makeTranscriptObserver } = require('./observer-transcripts.js');
-const { makeHelperObserver } = require('./observer-helpers.js');
+const { makeHelperObserver, grouping } = require('./observer-helpers.js');
 const { publicBus } = require('./observer-bus.js');
 const { makeSqliteClient } = require('./observer-sqlite-client.js');
 const { unavailable, redactText } = require('./observer-inspector.js');
@@ -96,7 +96,10 @@ function makeObserver(options = {}) {
   const endpoint = options.endpoint || process.env.HERDR_SOCKET_PATH || path.join(os.homedir(), '.config/herdr/herdr.sock');
   const identities = options.identities || makeIdentityResolver({ execute, now, endpoint, readConfiguration: options.readIdentityConfiguration, readProcessBirth: options.readProcessBirth });
   let identityProofs = new Map();
-  let lastGood = [], aggregate = aggregateRows([]), refreshStartedAt = null, pending = null, mail = null;
+  let lastGood = [], coreRows = [], aggregate = aggregateRows([]), refreshStartedAt = null, pending = null, mail = null;
+  let closed = false, enrichment = null, enrichmentTarget = null, lineage = null;
+  let desktopPending = null, busPending = null;
+  const summaries = new Map(), warmQueue = new Map(), warmScheduled = new Map(), warmRunning = new Set();
   const sources = { herdr: { health: 'unavailable', observedAt: null, reason: 'not-observed' },
     desktop: { health: 'unavailable', observedAt: null, reason: 'not-observed' } };
   const rowsBySource = { herdr: [], desktop: [], helper: [] };
@@ -128,59 +131,215 @@ function makeObserver(options = {}) {
       }
       const cwds = panes.map(pane => pane.foreground_cwd || pane.cwd);
       const projectRows = projects.resolveMany ? await projects.resolveMany(cwds) : new Array(panes.length);
-      let next = 0;
-      async function readNext() {
-        while (next < panes.length) {
-          const index = next++, pane = panes[index];
-          const id = 'obs_' + crypto.createHash('sha256').update(endpoint + '\0' + pane.pane_id).digest('hex').slice(0, 24);
-          const identity = resolved[index];
-          const sessionId = identity.sessionId;
-          if (identity.proof) proofs.set(id, identity.proof);
-          const tool = await transcripts.read(id, pane.agent, sessionId);
-          rows[index] = { id, paneId: pane.pane_id, provider: pane.agent,
-            title: text(redactText(String(pane.terminal_title_stripped || pane.agent)), 160),
-            ...(projects.resolveMany ? projectRows[index] : await projects.resolve(cwds[index])),
-            status: STATUSES.has(pane.agent_status) ? pane.agent_status : 'unknown', sessionId,
-            identitySource: identity.source, identityHealth: sessionId ? 'available' : 'unavailable',
-            tool, usage: tool.usage || null, source: 'herdr', observedAt: inventoryAt, inventoryHealth: 'available',
-            inspectionIdentity: sessionId ? pane.agent + ':' + sessionId : null, presence: 'pane' };
-        }
+      for (const [index, pane] of panes.entries()) {
+        const id = 'obs_' + crypto.createHash('sha256').update(endpoint + '\0' + pane.pane_id).digest('hex').slice(0, 24);
+        const identity = resolved[index], sessionId = identity.sessionId;
+        if (identity.proof) proofs.set(id, identity.proof);
+        rows.push({ id, paneId: pane.pane_id, provider: pane.agent,
+          title: text(redactText(String(pane.terminal_title_stripped || pane.agent)), 160),
+          ...(projects.resolveMany ? projectRows[index] : await projects.resolve(cwds[index])),
+          status: STATUSES.has(pane.agent_status) ? pane.agent_status : 'unknown', sessionId,
+          identitySource: identity.source, identityHealth: sessionId ? 'available' : 'unavailable',
+          tool: { available: false }, usage: null, source: 'herdr', observedAt: inventoryAt, inventoryHealth: 'available',
+          inspectionIdentity: sessionId ? pane.agent + ':' + sessionId : null, presence: 'pane' });
       }
-      await Promise.all(Array.from({ length: Math.min(4, panes.length) }, readNext));
+      if (closed) return;
       identityProofs = proofs; identities.retain?.(seen);
-      rowsBySource.herdr = rows; sources.herdr = { health: 'available', observedAt: inventoryAt, reason: null };
+      coreRows = rows; sources.herdr = { health: 'available', observedAt: inventoryAt, reason: null };
     } catch (_) {
       // Process stderr, raw inventory and transcript contents are never sent to the browser.
+      if (closed) return;
       retainUnavailable('herdr', 'Local session inventory unavailable. Check that Herdr is running and on PATH.');
+      coreRows = coreRows.map(row => ({ ...row, inventoryHealth: 'unavailable' }));
     }
   }
   async function refreshDesktop() {
     try {
       const data = await desktop.inventory();
+      if (closed) return;
       if (!data || data.health !== 'available' || !Array.isArray(data.windows)) {
         retainUnavailable('desktop', data?.reason || 'native-reader-unavailable'); return;
       }
       const observedAt = data.observedAt ?? now();
       rowsBySource.desktop = data.windows.map(row => ({ ...row, source: 'desktop', observedAt, inventoryHealth: 'available' }));
       sources.desktop = { health: 'available', observedAt, reason: data.reason || null };
-    } catch (_) { retainUnavailable('desktop', 'native-reader-unavailable'); }
+    } catch (_) { if (!closed) retainUnavailable('desktop', 'native-reader-unavailable'); }
+  }
+  // Content revisions prove a read, but do not change the owner of a session.
+  function sameProof(a, b) {
+    return !a && !b || !!a && !!b && a.paneId === b.paneId && a.terminalId === b.terminalId && a.sessionId === b.sessionId &&
+      a.birth?.pid === b.birth?.pid && a.birth?.startSeconds === b.birth?.startSeconds &&
+      a.birth?.startMicroseconds === b.birth?.startMicroseconds;
+  }
+  function sameIdentity(a, b) {
+    return !!a && !!b && a.inventoryHealth === 'available' && b.inventoryHealth === 'available' &&
+      a.id === b.id && a.source === b.source && a.provider === b.provider && a.sessionId === b.sessionId &&
+      a.inspectionIdentity === b.inspectionIdentity && a.identitySource === b.identitySource;
+  }
+  function capture(row, roster = lastGood, proofs = identityProofs) {
+    const targets = [], seen = new Set();
+    while (row) {
+      if (seen.has(row.id) || seen.size >= 64 || row.inventoryHealth !== 'available' || !row.inspectionIdentity ||
+        row.identitySource === 'footer' && !proofs.has(row.id)) return null;
+      seen.add(row.id); targets.push({ row, proof: proofs.get(row.id) });
+      if (!Object.hasOwn(row, 'parentId')) return targets;
+      row = roster.find(value => value.id === row.parentId);
+    }
+    return null;
+  }
+  function currentOwner(targets, roster = lastGood) {
+    return !!targets && targets.every(({ row, proof }) => {
+      const live = roster.find(value => value.id === row.id);
+      return sameIdentity(row, live) && row.parentId === live.parentId &&
+        Object.hasOwn(row, 'parentId') === Object.hasOwn(live, 'parentId') && sameProof(proof, identityProofs.get(row.id));
+    });
+  }
+  function publish() {
+    if (closed) return;
+    let roots = coreRows.map(row => {
+      if (row.inventoryHealth === 'available') return row;
+      const previous = rowsBySource.herdr.find(value => value.id === row.id);
+      return { ...row, tool: previous?.tool || row.tool, usage: previous?.usage || null };
+    });
+    let children = sources.herdr.health !== 'available' ? rowsBySource.helper.map(row => ({ ...row, inventoryHealth: 'unavailable' })) : [];
+    if (lineage) {
+      const candidates = new Map([...roots.map(row => [row.id, { ...row, ...lineage.result.annotations.get(row.id) }]),
+        ...lineage.result.rows.map(row => [row.id, row])]);
+      function valid(id, seen = new Set()) {
+        const row = candidates.get(id);
+        if (!row || seen.has(id) || seen.size >= 64) return false;
+        seen.add(id);
+        const parent = lineage.parents.find(value => value.id === id);
+        if (parent && (parent.identitySource === 'footer' && !lineage.proofs.has(id) || !sameIdentity(parent, coreRows.find(value => value.id === id)) ||
+          !sameProof(lineage.proofs.get(id), identityProofs.get(id)))) return false;
+        if (!parent && row.source !== 'helper') return false;
+        const ownerId = lineage.result.groupOwners?.get(id);
+        if (ownerId && !valid(ownerId, new Set(seen))) return false;
+        return Object.hasOwn(row, 'parentId') ? valid(row.parentId, seen) : !!parent;
+      }
+      const accepted = new Set([...candidates.keys()].filter(id => valid(id)));
+      function currentGrouping(id) {
+        const row = candidates.get(id);
+        const ownerId = row.parentId || lineage.result.groupOwners?.get(id);
+        return ownerId ? currentGrouping(ownerId) : grouping(coreRows.find(value => value.id === id));
+      }
+      roots = roots.map(row => !lineage.failed && accepted.has(row.id) ? { ...row, ...lineage.result.annotations.get(row.id),
+        ...currentGrouping(row.id), helperOverflow: lineage.result.overflow.get(row.id) || 0 } : row);
+      if (sources.herdr.health === 'available') children = lineage.result.rows.filter(row => accepted.has(row.id)).map(row => ({ ...row,
+        ...(lineage.failed ? { inventoryHealth: 'unavailable' } : {}), ...currentGrouping(row.id), helperOverflow: lineage.result.overflow.get(row.id) || 0 }));
+      // This synchronous install and row publication form a single observable commit.
+      if (sources.herdr.health !== 'available') lineage.failed = true;
+      lineage.result.commitBindings?.(lineage.failed ? new Set() : accepted);
+    }
+    const roster = [...roots, ...children];
+    roots = roots.map(row => {
+      const summary = summaries.get(row.id);
+      return summary && currentOwner(summary.owners, roster) ? { ...row, tool: summary.tool, usage: summary.tool.usage || null } : row;
+    });
+    rowsBySource.herdr = roots;
+    rowsBySource.helper = children;
+    lastGood = [...roots, ...rowsBySource.desktop, ...children];
+    aggregate = aggregateRows(lastGood, now());
+    const retained = new Set(lastGood.filter(row => row.source !== 'desktop').map(row => row.id));
+    transcripts.retain(retained);
+    for (const id of summaries.keys()) if (!retained.has(id)) summaries.delete(id);
+    for (const id of warmScheduled.keys()) if (!retained.has(id)) warmScheduled.delete(id);
+    for (const [id, target] of warmQueue) if (!currentOwner(target.owners)) warmQueue.delete(id);
+  }
+  function expected(row) {
+    return row.inspectionIdentity + (row.source === 'helper' || Object.hasOwn(row, 'parentId') ? '|' + row.parentId : '');
+  }
+  function scheduleWarmup(sweep) {
+    if (closed || options.warmDetails === false) return;
+    let count = 0;
+    for (const row of lastGood) {
+      if (row.source === 'desktop' || !row.inspectionIdentity || row.inventoryHealth !== 'available' ||
+        row.source !== 'helper' && !row.tool?.available) continue;
+      if (count++ >= 32) break;
+      const owners = capture(row);
+      if (!owners) continue;
+      const key = JSON.stringify(owners.map(({ row, proof }) => [row.id, row.provider, row.sessionId, row.inspectionIdentity,
+        row.source, row.identitySource, row.parentId, proof?.terminalId, proof?.sessionId, proof?.birth?.pid, proof?.birth?.startSeconds, proof?.birth?.startMicroseconds]));
+      if (sweep.warmed.has(key) || sweep.warmed.size >= 32) continue;
+      const previous = warmScheduled.get(row.id);
+      if (previous?.key === key && now() - previous.at < 60000) continue;
+      sweep.warmed.add(key);
+      warmQueue.set(row.id, { row, owners, key });
+    }
+    pumpWarmup();
+  }
+  function pumpWarmup() {
+    while (!closed && warmRunning.size < 2 && warmQueue.size) {
+      const [id, target] = warmQueue.entries().next().value;
+      warmQueue.delete(id);
+      if (!currentOwner(target.owners)) continue;
+      warmScheduled.set(id, { key: target.key, at: now() });
+      const job = Promise.resolve().then(() => currentOwner(target.owners) && !closed ? inspect(id, expected(target.row), true) : null)
+        .catch(() => {}).finally(() => { warmRunning.delete(job); pumpWarmup(); });
+      warmRunning.add(job);
+    }
+  }
+  function startEnrichment() {
+    if (closed || enrichment || !enrichmentTarget) return;
+    const target = enrichmentTarget; enrichmentTarget = null;
+    transcripts.beginDiscovery?.();
+    const summaryWork = (async () => {
+      let next = 0;
+      async function readNext() {
+        while (!closed && next < target.parents.length) {
+          const row = target.parents[next++];
+          if (row.inspectionIdentity && !currentOwner(target.owners.get(row.id))) continue;
+          let tool;
+          try { tool = await transcripts.read(row.id, row.provider, row.sessionId); } catch (_) { tool = { available: false }; }
+          if (!closed && currentOwner(target.owners.get(row.id))) {
+            summaries.set(row.id, { owners: target.owners.get(row.id), tool });
+            publish(); scheduleWarmup(target);
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(4, target.parents.length) }, readNext));
+    })();
+    const helperWork = (async () => {
+      try {
+        const result = await (helpers.prepareChildren ? helpers.prepareChildren(target.parents) : helpers.children(target.parents));
+        if (closed) return;
+        if (result.health === 'unavailable' && result.reason !== 'unsupported') {
+          result.commitBindings?.(new Set());
+          if (lineage) lineage.failed = true;
+        } else { lineage = { ...target, result }; }
+        publish(); scheduleWarmup(target);
+      } catch (_) {
+        if (!closed) {
+          if (lineage) lineage.failed = true;
+          publish();
+        }
+      }
+    })();
+    enrichment = Promise.all([summaryWork, helperWork]).finally(() => {
+      enrichment = null;
+      // A newer core only needs another sweep when its owner actually changed.
+      if (enrichmentTarget && target.parents.length === enrichmentTarget.parents.length && target.parents.every((row, index) =>
+        sameIdentity(row, enrichmentTarget.parents[index]) && sameProof(target.proofs.get(row.id), enrichmentTarget.proofs.get(row.id)))) enrichmentTarget = null;
+      startEnrichment();
+    });
+  }
+  function startIndependentSources() {
+    if (!desktopPending) desktopPending = refreshDesktop().then(publish).finally(() => { desktopPending = null; });
+    if (!busPending) busPending = (async () => {
+      try { const data = await bus.read(); if (!closed) mail = data; }
+      catch (_) { if (!closed) mail = { rows: mail ? mail.rows : [], observedAt: mail ? mail.observedAt : null, health: 'unavailable', reason: 'unreadable' }; }
+    })().finally(() => { busPending = null; });
   }
   async function refresh() {
-    transcripts.beginDiscovery?.();
-    await Promise.all([refreshHerdr(), refreshDesktop()]);
-    let lineage;
-    try { lineage = await helpers.children(rowsBySource.herdr); }
-    catch (_) { lineage = { rows: [], annotations: new Map(), overflow: new Map() }; }
-    rowsBySource.herdr = rowsBySource.herdr.map(row => {
-      const { parentId, lineageState, taskEvidence, lifecycleEvidence, taskStatusEvidence, task, helperSlot, helperOverflow, ...base } = row;
-      return { ...base, ...lineage.annotations.get(row.id), helperOverflow: lineage.overflow.get(row.id) || 0 };
-    });
-    rowsBySource.helper = lineage.rows.map(row => ({ ...row, helperOverflow: lineage.overflow.get(row.id) || 0 }));
-    lastGood = [...rowsBySource.herdr, ...rowsBySource.desktop, ...rowsBySource.helper];
-    aggregate = aggregateRows(lastGood, now());
-    transcripts.retain(new Set(lastGood.filter(row => row.source !== 'desktop').map(row => row.id)));
-    // Bus health is independent of Herdr: its own read, observedAt and stale retention.
-    try { mail = await bus.read(); } catch (_) { mail = { rows: mail ? mail.rows : [], observedAt: mail ? mail.observedAt : null, health: 'unavailable', reason: 'unreadable' }; }
+    startIndependentSources();
+    await refreshHerdr();
+    if (closed) return snapshot();
+    publish();
+    if (sources.herdr.health === 'available') {
+      enrichmentTarget = { parents: [...coreRows], warmed: new Set(), proofs: new Map(identityProofs),
+        owners: new Map(coreRows.map(row => [row.id, capture(lastGood.find(value => value.id === row.id))])) };
+      startEnrichment();
+    }
     return snapshot();
   }
   function snapshot() {
@@ -192,18 +351,20 @@ function makeObserver(options = {}) {
       bus: mail ? publicBus(mail, lastGood) : null };
   }
   function get() {
+    if (closed) return Promise.resolve(snapshot());
     if (pending) return pending;
     if (refreshStartedAt !== null && now() - refreshStartedAt < 2000) return Promise.resolve(snapshot());
     refreshStartedAt = now();
     pending = refresh().finally(() => { pending = null; });
     return pending;
   }
-  async function inspect(id, expectedIdentity) {
+  async function inspect(id, expectedIdentity, preparing = false) {
+    if (closed) return unavailable(id, 'inventory-unavailable', now());
     // Bound caller input independently of HTTP; omission preserves legacy inspection callers.
     if (expectedIdentity !== undefined && (typeof expectedIdentity !== 'string' || expectedIdentity.length > 128 ||
       !/^(?:(?:codex|claude):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|(?:helper:)?obs_[a-f0-9]{24})(?:\|obs_[a-f0-9]{24})?$/i.test(expectedIdentity)))
       return unavailable(id, 'invalid-identity', now());
-    const inventory = await get();
+    const inventory = preparing ? (pending ? await pending : snapshot()) : await get();
     const row = inventory.sessions.find(row => row.id === id);
     const reason = !row ? 'unknown-session' : row.inventoryHealth !== 'available' ? 'inventory-unavailable' :
       !row.inspectionIdentity ? 'identity-unavailable' : null;
@@ -244,16 +405,8 @@ function makeObserver(options = {}) {
         expectedIdentity !== undefined ? 'identity-mismatch' : 'identity-unavailable', now());
     if (!await validateFooter()) return unavailable(id, 'identity-unavailable', now());
     // Revalidation itself is asynchronous: check ownership again after its last await.
-    for (const target of targets) {
-      const live = rowsBySource[target.source].find(value => value.id === target.id);
-      const proof = capturedProofs.get(target.id), liveProof = identityProofs.get(target.id);
-      if (!live || live.inventoryHealth !== 'available' || live.provider !== target.provider || live.inspectionIdentity !== target.inspectionIdentity ||
-        live.parentId !== target.parentId || Object.hasOwn(live, 'parentId') !== Object.hasOwn(target, 'parentId') || live.identitySource !== target.identitySource ||
-        proof && (!liveProof || liveProof.terminalId !== proof.terminalId || liveProof.sessionId !== proof.sessionId ||
-          liveProof.birth?.pid !== proof.birth?.pid || liveProof.birth?.startSeconds !== proof.birth?.startSeconds ||
-          liveProof.birth?.startMicroseconds !== proof.birth?.startMicroseconds))
-        return unavailable(id, 'identity-unavailable', now());
-    }
+    if (closed || !currentOwner(targets.map(target => ({ row: target, proof: capturedProofs.get(target.id) }))))
+      return unavailable(id, 'identity-unavailable', now());
     if (row.source === 'desktop') return data.health === 'available' ? { ...data, id, inspectionIdentity } : unavailable(id, data.reason || 'identity-unavailable', now());
     if (!data.available || data.health === 'unavailable') return unavailable(id, 'transcript-unavailable', now());
     const { available, ...projection } = data;
@@ -262,9 +415,19 @@ function makeObserver(options = {}) {
   }
   let closePromise = null;
   function close() {
-    if (!closePromise) closePromise = Promise.all([sqlite?.close(), options.bus?.close?.(), options.helpers?.close?.()]).then(() => {});
+    if (!closePromise) {
+      closed = true; enrichmentTarget = null; warmQueue.clear();
+      closePromise = (async () => {
+        let timer;
+        try {
+          await Promise.race([Promise.allSettled([pending, enrichment, desktopPending, busPending, ...warmRunning]),
+            new Promise(resolve => { timer = setTimeout(resolve, 10000); timer.unref?.(); })]);
+        } finally { clearTimeout(timer); }
+        await Promise.all([sqlite?.close(), options.bus?.close?.(), options.helpers?.close?.()]);
+      })();
+    }
     return closePromise;
   }
-  return { get, inspect, inspectMessage: (id, expectedIdentity) => bus.inspect(id, expectedIdentity), close };
+  return { get, inspect: (id, expectedIdentity) => inspect(id, expectedIdentity), inspectMessage: (id, expectedIdentity) => closed ? Promise.resolve({ id, health: 'unavailable', reason: 'unreadable', text: null }) : bus.inspect(id, expectedIdentity), close };
 }
 module.exports = { makeObserver };
