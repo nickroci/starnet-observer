@@ -112,6 +112,24 @@ function fakeTimers() {
   timers.run(); assert.equal(children.length, before, 'nothing reconnects after close');
 }
 
+// ── Codex rows cross the hub intact: provider, identity (resolved or not), footer source, tool and usage survive.
+{
+  const usage = { inputTokens: { value: 120, state: 'available' }, outputTokens: { value: 30, state: 'partial' }, cacheReadTokens: { value: 0, state: 'available' }, cacheWriteTokens: null };
+  const codex = sanitizeRow('vm', row({ provider: 'codex', identitySource: 'footer', inspectionIdentity: 'codex:' + UUID, title: 'Reply OK | codex-check',
+    tool: { available: true, last: { name: 'exec_command', phase: 'finished', outcome: 'ok', at: '2026-10-15T10:00:00.000Z' } }, usage, lastActivityAt: 77 }), 1000);
+  assert.equal(codex.provider, 'codex'); assert.equal(codex.sessionId, UUID); assert.equal(codex.identitySource, 'footer'); assert.equal(codex.identityHealth, 'available');
+  assert.equal(codex.inspectionIdentity, 'codex:' + UUID, 'a codex identity keeps its codex: prefix');
+  assert.equal(codex.tool.last.name, 'exec_command'); assert.equal(codex.lastActivityAt, 77);
+  assert.equal(codex.usage.inputTokens.value, 120); assert.equal(codex.usage.outputTokens.state, 'partial');
+  // Unresolved Codex identity (no Herdr-published session, no thread-id status line): the row is kept, honestly empty.
+  const unresolved = sanitizeRow('vm', row({ provider: 'codex', sessionId: null, identitySource: 'unavailable', identityHealth: 'unavailable', inspectionIdentity: null, tool: { available: false }, status: 'done' }), 1000);
+  assert.ok(unresolved, 'an unresolved codex row is not dropped');
+  assert.deepEqual([unresolved.provider, unresolved.sessionId, unresolved.identitySource, unresolved.identityHealth, unresolved.inspectionIdentity, unresolved.status], ['codex', null, 'unavailable', 'unavailable', null, 'done']);
+  assert.equal(sanitizeRow('vm', row({ provider: 'codex', inspectionIdentity: 'claude:' + UUID }), 1).inspectionIdentity, null, 'a provider/identity mismatch is dropped, not reinterpreted');
+  const mixed = sanitizeSnapshot('vm', { sessions: [row(), row({ id: 'obs_' + 'd'.repeat(24), provider: 'codex', sessionId: null, inspectionIdentity: null })] }, 1).rows;
+  assert.deepEqual(mixed.map(value => value.provider), ['claude', 'codex'], 'codex rows are not filtered out of a snapshot');
+}
+
 // ── Per-host mail: a remote's own bus is kept, namespaced by host, endpoints remapped like rows, identities dropped.
 {
   const snap = sanitizeSnapshot('vm', { sessions: [row()], bus: { health: 'available', reason: null, observedAt: 1, window: 100, messages: [
@@ -258,5 +276,5 @@ function fakeTimers() {
   const localCrew = multi.workers.find(worker => !worker.row.host), alone = single.workers.find(worker => worker.id === localCrew.id);
   assert.deepEqual(localCrew.route, alone.route, 'local crew routes are unchanged by remotes');
   assert.notEqual(multi.revision, Scene.build(rooms, 0, { hosts: [{ id: 'vm', health: 'available', agents: 2 }, { id: 'empty', health: 'unavailable', agents: 0 }] }).revision, 'host health is part of the scene revision');
-  console.log('observer remotes: fixed ssh argv, option-injection refusal, sanitised host-scoped rows/ids/panes, partial/garbage/oversized/unterminated lines, stale truth, backoff, cache-only federation, remote inspect, local bus, stream flush ordering, per-host room slots, stacked ships with own mailrooms, no cross-ship paths, observation links and relay states OK');
+  console.log('observer remotes: fixed ssh argv, option-injection refusal, sanitised host-scoped rows/ids/panes, codex rows intact, partial/garbage/oversized/unterminated lines, stale truth, backoff, cache-only federation, remote inspect, local bus, stream flush ordering, per-host room slots, stacked ships with own mailrooms, no cross-ship paths, observation links and relay states OK');
 })().catch(error => { console.error(error); process.exit(1); });
