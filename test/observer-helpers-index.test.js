@@ -176,6 +176,54 @@ const notification = (child, status) => line({ type: 'queue-operation', operatio
     assert.deepEqual(names(result), ['scout'], 'completed root ambiguity continues to suppress nested helper');
     assert.equal((await coldHelpers.inspect(result.rows[0])).available, true, 'complete proof unlocks valid tail helper inspection');
 
+    // Losing either a spawn or its pending call makes negative ancestry evidence
+    // incomplete. Exercise each cap independently; status-only eviction is separate.
+    const splitSpawn = (name, call) => spawn(name, call).trim().split('\n').map(JSON.parse);
+    const [fillerCall, fillerResult] = splitSpawn('filler', 'filler-call');
+    const [firstCall, firstResult] = splitSpawn('nested', 'root-one');
+    const [secondCall, secondResult] = splitSpawn('nested', 'root-two');
+    const manyResults = Array.from({ length: 513 }, (_, i) =>
+      line({ ...fillerResult, toolUseResult: { status: 'async_launched', agentId: 'filler-' + i } })).join('');
+    const manyCalls = Array.from({ length: 513 }, (_, i) => line({ ...fillerCall,
+      message: { content: [{ ...fillerCall.message.content[0], id: 'call-' + i }] } })).join('');
+    const oversized = line({ ...firstCall, message: { content: [{ ...firstCall.message.content[0],
+      input: { description: 'Large task', prompt: 'PRIVATE OVERSIZED '.repeat(80000) } }] } });
+    for (const [label, incomplete] of [
+      ['spawn cap', line(firstCall) + line(firstResult) + line(secondCall) + line(secondResult) + line(fillerCall) + manyResults],
+      ['call cap', line(firstCall) + line(secondCall) + manyCalls + line(firstResult) + line(secondResult)],
+      ['oversized complete row', oversized.replace('PRIVATE OVERSIZED '.repeat(80000), 'PRIVATE OVERSIZED '.repeat(20000)) + line(firstResult)],
+      ['oversized chunk-spanning row', oversized + line(firstResult)]
+    ]) {
+      await fs.writeFile(parentFile, head + padding(500, 'h') + padding(1700) + spawn('scout'));
+      result = await helpers.children([parent]);
+      await transcripts.spawnIndexIdle();
+      result = await helpers.children([parent]);
+      const selected = result.rows.find(row => row.sessionId === 'nested');
+      assert(selected, label + ': complete evidence initially permits nested helper');
+      assert.equal((await helpers.inspect(selected)).available, true);
+      await fs.writeFile(parentFile, head + padding(500, 'h') + incomplete + padding(1700) + spawn('scout'));
+      assert.equal((await helpers.inspect(selected)).available, false, label + ': incomplete ancestor proof revokes private binding');
+      result = await helpers.children([parent]);
+      assert.deepEqual(names(result), ['scout'], label + ': readable tail remains but incomplete absence cannot choose a nested parent');
+      assert.equal((await helpers.inspect(result.rows[0])).available, false, label + ': retained positive claim does not make proof complete');
+      assert(!JSON.stringify(result).includes('PRIVATE OVERSIZED'));
+    }
+
+    // JSON escapes preserve native identity; a byte-substring prefilter cannot
+    // prove that rows without literal Agent/status markers contain no claims.
+    const escapedConflict = (spawn('nested', 'root-one') + spawn('nested', 'root-two'))
+      .replaceAll('"Agent"', '"\\u0041gent"').replaceAll('async_launched', 'async_\\u006caunched');
+    await fs.writeFile(parentFile, head + padding(500, 'h') + escapedConflict + padding(1700) + spawn('scout'));
+    result = await helpers.children([parent]);
+    assert.deepEqual(names(result), ['scout'], 'escaped native ancestor conflicts remain authoritative outside bounded windows');
+
+    const manyEvents = Array.from({ length: 513 }, (_, i) => notification('event-' + i, 'completed')).join('');
+    await fs.writeFile(parentFile, head + padding(500, 'h') + manyEvents + padding(1700) + spawn('scout'));
+    result = await helpers.children([parent]);
+    const afterEventOverflow = result.rows.find(row => row.sessionId === 'nested');
+    assert(afterEventOverflow, 'status-event eviction does not erase complete spawn-absence proof');
+    assert.equal((await helpers.inspect(afterEventOverflow)).available, true, 'status-only overflow does not deny complete private ancestry proof');
+
     console.log('observer helpers index: spawns outside the tail, append, conflict, rewrite/replacement reset, sidecar corroboration and activity status PASS');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

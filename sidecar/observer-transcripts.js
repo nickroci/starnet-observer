@@ -11,7 +11,6 @@ const READ_BYTES = 256 * 1024;
 // helpers vanish while still running. The index streams the whole parent transcript once, keeps only the records
 // consumeHelperMetadata reads (same rules, same bounded maps), then follows appends by offset.
 const SPAWN_INDEX_BYTES = 128 * 1024 * 1024, SPAWN_CHUNK = 1024 * 1024;
-const SPAWN_MARKERS = ['"Agent"', '"Task"', 'async_launched', 'task-notification', 'task_status'];
 const cleanName = value => typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 120) : '';
 
 // Only tool identity/outcome and numeric usage cross this boundary. Conversation bodies stay on disk.
@@ -269,7 +268,7 @@ function makeTranscriptObserver(options = {}) {
       }
       let offset = state.offset, carry = state.carry, skipping = state.skipping;
       const consumeLine = bytes => {
-        if (bytes.length > READ_BYTES || !SPAWN_MARKERS.some(marker => bytes.includes(marker))) return;
+        if (bytes.length > READ_BYTES) { state.projection.helperClaimsPartial = true; return; }
         try { inspector.consumeHelperMetadata(state.projection, JSON.parse(bytes.toString('utf8')), 'claude', sessionId, binding); }
         catch (_) { /* Invalid rows carry no spawn evidence. */ }
       };
@@ -287,7 +286,7 @@ function makeTranscriptObserver(options = {}) {
         }
         const rest = data.subarray(start);
         // An oversized unfinished row is skipped through its newline, like the bounded readers.
-        if (rest.length > READ_BYTES) skipping = true; else if (rest.length && !skipping) carry = Buffer.from(rest);
+        if (rest.length > READ_BYTES) { skipping = true; state.projection.helperClaimsPartial = true; } else if (rest.length && !skipping) carry = Buffer.from(rest);
       }
       await verifyPath(resource, await handle.stat());
       Object.assign(state, { offset, carry, skipping, digest: hash.digest('hex'), device: stat.dev, inode: stat.ino, ready: true });
@@ -335,7 +334,7 @@ function makeTranscriptObserver(options = {}) {
       const event = mergedEvent(projection, index, child);
       if (event) events.set(child, Object.freeze({ ...event }));
     }
-    return Object.freeze({ available: !!index, has: child => spawns.has(child), spawn: child => spawns.get(child), event: child => events.get(child) });
+    return Object.freeze({ available: !!index && !index.helperClaimsPartial, has: child => spawns.has(child), spawn: child => spawns.get(child), event: child => events.get(child) });
   }
   async function claudeCandidates(parentSessionId, parentBinding, parentId) {
     claudeClaimSnapshots.delete(parentId);
