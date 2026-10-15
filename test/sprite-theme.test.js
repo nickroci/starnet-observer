@@ -1,0 +1,87 @@
+'use strict';
+const assert = require('node:assert/strict');
+const { load } = require('./_sprite-runtime');
+const canonical = require('../frontend/assets/themes/starnet/theme.json').crew.blank;
+function setup({ fail, delay, set = 'people', decode = false } = {}) {
+  const group = { ...canonical, set, tracks: Object.fromEntries(Object.entries(canonical.tracks).map(([key, paths]) => [key, paths.map(p => p.replace('assets/sprites/approved_android/', 'assets/themes/synthetic/people/'))])) };
+  const sprites = { sprites: Object.fromEntries(Object.entries(canonical.tracks).map(([key, paths]) => [canonical.set + '.' + key, paths.map(p => p.slice('assets/sprites/'.length))])) };
+  const warnings = [], requested = [], pending = [];
+  const data = { DEFAULT_SKIN: 'blank', SKINS: { blank: canonical } };
+  return { warnings, requested, pending, group, runtime: load({ data, sprites, waitForSkin: false, initOptions: { crew: { blank: group }, onDegraded: warning => warnings.push(warning) }, image(img, value) {
+    requested.push(value); img.width = img.height = 144;
+    if (decode && value.includes('synthetic') && value.endsWith('type_north_4.png')) img.decode = () => new Promise(resolve => pending.push(resolve));
+    const finish = () => { if (value.includes('synthetic') && value.endsWith(fail?.path || '\0')) { if (fail.reason === 'image-load') return img.onerror(); img.width = 143; } img.onload(); };
+    if (value.includes('synthetic') && value.endsWith(delay || '\0')) pending.push(finish); else finish();
+  } }) };
+}
+function draw(rt, group, overrides) {
+  const log = [], body = { id: 'worker', skin: 'blank', px: 100, py: 100, dir: 'south', state: 'idle', noShadow: true, ...overrides };
+  assert.ok(rt.SPRITES.drawBody(rt.context(log), body, 1000, { group, reducedMotion: true }));
+  const painted = log.filter(row => row[0] === 'drawImage').at(-1);
+  return { source: painted[1], y: painted[3], body };
+}
+(async () => {
+  const delayed = setup({ delay: 'type_north_4.png' }), rt = await delayed.runtime;
+  assert.equal(rt.SPRITES.replacementState('blank'), 'loading');
+  assert.match(draw(rt).source, /assets\/sprites\/approved_android/);
+  assert.strictEqual(rt.SPRITES.ensureSkin('blank'), rt.SPRITES.ensureSkin('blank'));
+  assert.match(draw(rt, undefined, { state: 'walk', dir: 'east', odo: 4 }).source, /assets\/sprites\/approved_android/);
+  assert.equal(delayed.pending.length, 1);
+  delayed.pending[0]();
+  assert.equal(await rt.SPRITES.ensureSkin('blank'), true);
+  assert.equal(rt.SPRITES.replacementState('blank'), 'ready');
+  assert.equal(delayed.requested.filter(p => p.includes('synthetic')).length, 64);
+  assert.match(draw(rt).source, /synthetic\/people/);
+  assert.match(draw(rt, 'default').source, /assets\/sprites\/approved_android/);
+  assert.equal(draw(rt).body._renderStandingHeight, 19);
+  assert.equal(draw(rt, 'default').body._renderStandingHeight, 19);
+  assert.equal(draw(rt).body._renderCycleUnits, 10.64);
+  const seated = draw(rt, undefined, { sitting: true, working: true, dir: 'north' });
+  assert.match(seated.source, /synthetic\/people\/type_north_/);
+  assert.equal(seated.y, 62);
+  assert.equal(seated.y, draw(rt, 'default', { sitting: true, working: true, dir: 'north' }).y);
+  const walkBody = { id: 'walking', skin: 'blank', px: 100, py: 100, dir: 'east', state: 'walk', noShadow: true };
+  const seen = new Set();
+  for (let i = 0; i < 6; i++) {
+    walkBody.odo = (i + 0.1) * 10.64 / 6;
+    const log = [];
+    rt.SPRITES.drawBody(rt.context(log), walkBody, 1000, { reducedMotion: true });
+    seen.add(log.filter(row => row[0] === 'drawImage').at(-1)[1]);
+  }
+  assert.equal(seen.size, 6);
+  assert.equal(rt.SPRITES.bodyScale({ skin: 'blank' }), 0.25);
+  assert.deepEqual(delayed.warnings, []);
+  for (const reason of ['image-load', 'image-dimensions']) {
+    const failed = setup({ fail: { reason, path: 'walk_east_3.png' } }), fallback = await failed.runtime;
+    await fallback.SPRITES.ensureSkin('blank');
+    assert.equal(fallback.SPRITES.replacementState('blank'), 'failed');
+    assert.equal(fallback.SPRITES.isSkinReady('blank'), true);
+    assert.match(draw(fallback, undefined, { state: 'walk', dir: 'east', odo: 4 }).source, /assets\/sprites\/approved_android/);
+    assert.deepEqual(JSON.parse(JSON.stringify(failed.warnings)), [{ skin: 'blank', reason }]);
+    const count = failed.requested.length;
+    await fallback.SPRITES.ensureSkin('blank');
+    assert.equal(failed.requested.length, count);
+  }
+  const decoded = setup({ decode: true, set: canonical.set }), decoding = await decoded.runtime;
+  assert.equal(decoding.SPRITES.replacementState('blank'), 'loading');
+  decoded.pending[0]();
+  await decoding.SPRITES.ensureSkin('blank');
+  assert.match(draw(decoding).source, /synthetic\/people/);
+  assert.match(draw(decoding, 'default').source, /assets\/sprites\/approved_android/);
+  const defaultSprites = { sprites: Object.fromEntries(Object.entries(canonical.tracks).map(([key, paths]) => [canonical.set + '.' + key, paths.map(p => p.slice('assets/sprites/'.length))])) };
+  const inheritedSnapshot = { ...canonical, tracks: Object.fromEntries(Object.entries(canonical.tracks).map(([track, paths]) => [track, paths.map(p => '/' + p)])) };
+  const inheritedRuntime = await load({ data: { DEFAULT_SKIN: 'blank', SKINS: { blank: canonical } }, sprites: defaultSprites, initOptions: { crew: { blank: inheritedSnapshot } } });
+  assert.equal(inheritedRuntime.SPRITES.replacementState('blank'), 'inherited');
+  const startupPending = [];
+  const prime = await load({ waitForSkin: false, image(img, path) {
+    if (path.endsWith('type_north_1.png')) startupPending.push(() => img.onload()); else img.onload();
+  } });
+  assert.equal(prime.SPRITES.ready, true);
+  assert.ok(draw(prime));
+  assert.equal(startupPending.length, 1);
+  startupPending[0]();
+  await prime.SPRITES.ensureSkin('tester');
+  const inherited = await load();
+  assert.equal(inherited.SPRITES.replacementState('tester'), 'inherited');
+  console.log('sprite-theme: atomic success, delay, load/dimension failure, canonical drawing and metadata passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });
