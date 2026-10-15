@@ -228,6 +228,13 @@ const ObserverModel = (() => {
     return { reconcile, pages, onPage, pageFor, colorFor,
       seatFor: id => { const pane = panes.get(id); return pane ? pane.block * BLOCK_SEATS + pane.seat : undefined; } };
   }
-  return { projectKey, repoKey, checkoutKey, checkoutLabel, checkoutSuffix, sectionKey, helperStations, hash, palette, activity, age, idleAge, taskTitle, hoverLabel, createLayout };
+  /* Dynamic arrangement (the ARRANGE toggle): the sidecar publishes a second grouping per row; drawing it is just
+     reading its room and section in place of the folder project and repository. Rows without one keep folder grouping. */
+  function arranged(row) {
+    const value = row && row.arrangement;
+    if (!value || typeof value.roomId !== 'string' || typeof value.sectionId !== 'string') return row;
+    return { ...row, projectId: value.roomId, project: value.room, projectKind: 'group', repoId: value.sectionId, repo: value.section || value.room, folder: '' };
+  }
+  return { projectKey, repoKey, arranged, checkoutKey, checkoutLabel, checkoutSuffix, sectionKey, helperStations, hash, palette, activity, age, idleAge, taskTitle, hoverLabel, createLayout };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverModel;

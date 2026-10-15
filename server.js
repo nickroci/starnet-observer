@@ -137,7 +137,8 @@ if (require.main === module) {
   setClock(Date.now);
   const endpoint = resolveEndpoint({});
   const overseerState = makeOverseerState({ endpoint });
-  const observer = makeObserver({ now: Date.now, warmDetails: !config.presentation, endpoint, overseerState });
+  const observer = makeObserver({ now: Date.now, warmDetails: !config.presentation, endpoint, overseerState,
+    arrange: { roomsFile: config.roomsFile, warn: message => console.warn('[observer arrange]', redact(String(message))) } });
   const control = process.env.OBSERVER_CONTROL === '1' ? makeControl({ endpoint, overseerState, target: paneId => observer.controlTarget(paneId), claudeArgs: String(process.env.OBSERVER_CLAUDE_ARGS || '').split(/\s+/).filter(Boolean) }) : null;
   let server;
   try { server = createServer({ observer: config.presentation ? makePresentationObserver(observer, Date.now, config.labels) : observer, theme: config.theme, control }); }

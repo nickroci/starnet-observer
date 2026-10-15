@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase_name: 0 planned
 status: planning
 stopped_at: "PR #12 conflict repair complete; publication verification"
-last_updated: "2026-10-15T17:28:32.617Z"
+last_updated: "2026-10-15T20:05:32.321Z"
 last_activity: 2026-10-15
 last_activity_desc: "PR #12 main integration 60eed0b; all 27 test files passed on Bun 1.3.13; independent integration review approved."
-state_head: 60eed0b48605bfcd6ce42a86b5a56df2159b3a8a
+state_head: 4034b29df6bf961ed3e6f6e069dad455478ac0f6
 progress:
   total_phases: 0
   completed_phases: 0
@@ -22,13 +22,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-14)
 
 **Core value:** Show local agent activity truthfully without changing observed sessions or exposing private content beyond the local observation boundary.
-**Current focus:** PR #8 merged; PR #12 delivery verified and authorized for merge. No active milestone or phase.
+**Current focus:** PR #9 synced, bugs fixed and independently reviewed; PR #10 proof fixes verified separately.
 
 ## Current Position
 
 Phase: None (0 planned)
 Plan: None
-Status: PR #12 complete and verified; final user-authorized merge pending
+Status: PR #9 review ready; zero unresolved review findings; no merge requested
 Last activity: 2026-10-15 — PR #8 merged; PR #12 integrated main through PR #14 and PR #8, all 27 Bun test files passed, fresh independent integration review approved.
 
 ## Quick Tasks Completed
@@ -44,6 +44,7 @@ Last activity: 2026-10-15 — PR #8 merged; PR #12 integrated main through PR #1
 | 261015-sar | Resolve PR 12 conflicts with main | 2026-10-15 | 60eed0b | Verified; independent review approved | [261015-sar-resolve-pr-12-conflicts-with-main-preser](./quick/261015-sar-resolve-pr-12-conflicts-with-main-preser/) |
 | 261015-mjy | Overseer providers and checkout sections | 2026-10-15 | [PR #12](https://github.com/wnz99/starnet-observer/pull/12) | Complete; merge authorized | [261015-mjy](./quick/261015-mjy-overseer-providers-and-checkout-sections/) |
 | 261015-sb0 | Resolve PR 8 conflicts with main | 2026-10-15 | 27353b2 | Verified; independent review approved | [261015-sb0-resolve-pr-8-conflicts-with-main-preserv](./quick/261015-sb0-resolve-pr-8-conflicts-with-main-preserv/) |
+| 261015-vnn | Sync PR 9 and fix arrangement preferences and courier bugs | 2026-10-15 | 4034b29 | Verified; independent final review clean | [261015-vnn-sync-pr-9-with-main-preserving-existing-](./quick/261015-vnn-sync-pr-9-with-main-preserving-existing-/) |
 
 ## Accumulated Context
 
@@ -67,7 +68,7 @@ No blocking theme issue remains. Synthetic-source browser verification passed; n
 Last session: 2026-10-15
 Stopped at: PR #12 final delivery records before authorized merge
 Resume file: None
-Next action: Push final PR #12 records and merge with a merge commit; verify GitHub merge proof.
+Next action: Keep PR #9 open for user merge decision; complete PR #10 review separately.
 
 ### Registered Work
 
