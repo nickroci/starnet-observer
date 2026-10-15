@@ -62,4 +62,6 @@ Next action: Merge reviewed PR #4, then delegate approved additions in a separat
 
 ## Registered Work
 
-None.
+| # | Description | Status | Directory |
+| --- | --- | --- | --- |
+| 261015-mjy | Overseer providers and checkout sections | Registered; A1 execution starting | [261015-mjy](./quick/261015-mjy-overseer-providers-and-checkout-sections/) |
