@@ -69,7 +69,7 @@
      flights stay inside that ship (its own mailroom and crew). A transition into stale or reduced grounds flights at
      once; the reset makes the next live snapshot rebase instead of replaying what was missed. */
   const remoteCouriers = new Map(), remotePending = new Map();
-  const courierFor = host => { if (!remoteCouriers.has(host)) remoteCouriers.set(host, ObserverMail.createCourier()); return remoteCouriers.get(host); };
+  const courierFor = host => { if (!remoteCouriers.has(host)) remoteCouriers.set(host, ObserverMail.createCourier({ colors: pack.scene?.colors })); return remoteCouriers.get(host); };
   const resetCouriers = () => { courier.reset(); for (const value of remoteCouriers.values()) value.reset(); };
   function mailFrame(now) {
     const ground = mailStale(latest) || reducedMotion();
@@ -322,25 +322,32 @@
   // Closed or killed only on positive lifecycle evidence: inactivity, a missing file or a finished task never closes a helper.
   const lifecycleText = row => isHelper(row) && row.lifecycleEvidence?.state === 'closed' ? (row.lifecycleEvidence.reason === 'killed' ? 'killed' : 'closed') : '';
 
-  function endpointLabel(id) {
+  function endpointLabel(id, message = null, side = null) {
     if (id === 'ambiguous') return 'Ambiguous session';
     const row = byId.get(id);
-    return row ? workerName(row) + ' · ' + (row.project || 'Unassigned') : 'Outside the observer';
+    if (row) return workerName(row) + ' · ' + (row.project || 'Unassigned');
+    // The far side of relayed mail: the machine, shared repo and provider llm-bus routed it by (never a session id).
+    const relay = message?.relay, far = relay && ((relay.direction === 'out') === (side === 'to'));
+    return far ? (relay.provider ? PROVIDERS[relay.provider] || relay.provider : 'Agent') + ' on ' + relay.machine + ' · ' + relay.repo + ' (via relay)' : 'Outside the observer';
   }
+  // Relayed mail's delivery as llm-bus's bridge last synchronized it: storage and delivery are never proof of handling.
+  const RELAY_TEXT = { queued_local: 'queued here for the relay', accepted_remote: 'held at the relay', delivered_local: 'delivered to the far machine, not acknowledged',
+    acknowledged: 'acknowledged', expired: 'expired at the relay (30 days)', unknown: 'relay state unknown' };
   // Wake is a request to the recipient's host, never proof the message was read.
   const wakeText = { requested: 'wake requested', failed: 'wake failed', unsupported: 'wake unsupported', unknown: 'wake state unknown', none: 'no wake recorded' };
-  const mailStatus = message => message.acknowledgedAt ? 'acknowledged' : 'not acknowledged · ' + (wakeText[message.wake] || wakeText.unknown);
+  const mailStatus = message => message.relay?.direction === 'out' ? RELAY_TEXT[message.relay.state] || RELAY_TEXT.unknown
+    : message.acknowledgedAt ? 'acknowledged' : 'not acknowledged · ' + (wakeText[message.wake] || wakeText.unknown);
   function busHealth(bus) {
     if (!bus) return 'Bus not read yet';
-    if (bus.health === 'available') return 'Live · llm-bus';
+    if (bus.health === 'available') return 'Live · llm-bus' + (bus.remote ? ' · relay ' + bus.remote.machine + ' ⇄ ' + bus.remote.relay : '');
     const reason = { missing: 'No bus database found', unsupported: 'Bus SQLite support unavailable; use the supported Bun runtime', unreadable: 'Bus unreadable',
       unstable: 'Bus busy while copying · retrying' }[bus.reason] || 'Bus unavailable';
     return reason + (bus.observedAt ? ' · last known ' + ObserverModel.age(bus.observedAt) : '');
   }
   function mailDetail(message) {
-    return 'Message #' + message.id + ' · from ' + endpointLabel(message.from) + ' · to ' + endpointLabel(message.to) +
+    return 'Message #' + message.id + ' · from ' + endpointLabel(message.from, message, 'from') + ' · to ' + endpointLabel(message.to, message, 'to') +
       ' · sent ' + (ObserverModel.age(message.sentAt) || 'at an unknown time') + ' · ' + mailStatus(message) +
-      (byId.has(message.to) ? '' : byId.has(message.from) ? ' · recipient is not an observed pane; showing sender' : ' · neither side is an observed pane');
+      (byId.has(message.to) ? '' : byId.has(message.from) ? (message.relay ? ' · the recipient is on another machine; showing sender' : ' · recipient is not an observed pane; showing sender') : ' · neither side is an observed pane');
   }
   // Selecting a ledger row focuses the recipient pane, else the sender; neither being observed is said plainly.
   function showMail(message) {
@@ -392,7 +399,7 @@
     const items = messages.map(message => {
       const entry = mailRow(message.id);
       entry.button.setAttribute('aria-pressed', String(mailSelected === message.id));
-      setText(entry.route, '#' + message.id + ' ' + endpointLabel(message.from) + ' → ' + endpointLabel(message.to));
+      setText(entry.route, '#' + message.id + ' ' + endpointLabel(message.from, message, 'from') + ' → ' + endpointLabel(message.to, message, 'to'));
       entry.state.className = 'mail-state' + (message.acknowledgedAt ? '' : ' pending');
       setText(entry.state, mailStatus(message) + ' · ' + ObserverModel.age(message.sentAt));
       // Only a message with a verified identity can be read; the toggle names what it will do.
@@ -826,9 +833,13 @@
     const bus = data?.bus || null, messages = Array.isArray(bus?.messages) ? bus.messages : [];
     // Hover text, plates and pending envelopes read rows and bus live; a frozen floor repaints only when they change.
     const hostBus = data?.hostBus || {};
+    // llm-bus relays come from each observed bus's own binding; their member states are part of the scene.
+    const relays = ObserverScene.relayNetworks([[null, bus], ...Object.entries(hostBus).filter(([id]) => hosts.some(host => host.id === id))], Date.now());
+    const relayKey = JSON.stringify(relays.map(net => [net.relay, net.members.map(member => [member.host, member.state, member.lastActivityAt && Math.floor((Date.now() - member.lastActivityAt) / 60000)]),
+      net.outposts.map(outpost => [outpost.machine, outpost.agents, outpost.repos])]));
     const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages], Object.entries(hostBus).map(([id, value]) => [id, value.health, value.messages])]);
-    if (key !== sceneKey || !scene) {
-      sceneKey = key; scene = ObserverScene.build(rooms, page, hosts.length ? { overseer: overseerRow, overseerAccent: pack.scene?.colors?.cyan, hosts, localHealth: hostSources.local?.health } : { overseer: overseerRow, overseerAccent: pack.scene?.colors?.cyan });
+    if (key + relayKey !== sceneKey || !scene) {
+      sceneKey = key + relayKey; scene = ObserverScene.build(rooms, page, { overseer: overseerRow, overseerAccent: pack.scene?.colors?.cyan, relays, ...(hosts.length ? { hosts, localHealth: hostSources.local?.health } : {}) });
       // Row freshness is read from the current roster by id: the cached scene's row objects can be older.
       view.update(scene, { stale: () => isStale(latest), rowStale: worker => rowStale(rowFor(worker.id)), mailFrame, inspected: inspectedAgent,
         repositorySelection: () => selectedRepoId, onRepositoryToggle: toggleRepository });

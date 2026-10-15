@@ -26,10 +26,9 @@ const HELP = `Usage: bun --no-env-file server.js [options]
 Flags override config; config overrides defaults. Mode defaults to off.
 If present, observer.config.json next to server.js is loaded automatically.
 Use PORT to change the listening port (default 4319).
-Config "remotes": [{ "id": "vm1", "ssh": "user@host", "dir": "~/starnet-observer", "mail": "separate" }] adds remote
-hosts, each streamed read-only over the operator's ssh (key auth, BatchMode) and drawn as its own ship with its own
-mailroom. "mail" is "separate" (default: each host's llm-bus stands alone) or "relay" (a relay between buses is
-expected; the page still draws a working mail link only once relayed traffic is actually observed).
+Config "remotes": [{ "id": "vm1", "ssh": "user@host", "dir": "~/starnet-observer" }] adds remote hosts, each
+streamed read-only over the operator's ssh (key auth, BatchMode) and drawn as its own ship with its own mailroom.
+Cross-machine mail is drawn only from what each llm-bus reports about its own relay binding, never from config.
 `;
 
 function object(value, field) {
@@ -76,16 +75,14 @@ function validateConfig(input) {
     if (!Array.isArray(input.remotes) || input.remotes.length > 16) throw new Error('remotes must be an array of at most 16 remote objects');
     const ids = new Set();
     result.remotes = input.remotes.map((remote, index) => {
-      const field = 'remotes[' + index + ']'; object(remote, field); keys(remote, ['id', 'ssh', 'dir', 'mail'], field);
+      const field = 'remotes[' + index + ']'; object(remote, field); keys(remote, ['id', 'ssh', 'dir'], field);
       if (typeof remote.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(remote.id) || remote.id === 'local') throw new Error(field + '.id must be 1–32 lowercase letters, digits, or hyphens, and not "local"');
       if (ids.has(remote.id)) throw new Error('Remote ids must be unique');
       ids.add(remote.id);
       if (typeof remote.ssh !== 'string' || remote.ssh.startsWith('-') || !/^[A-Za-z0-9._-]+(@[A-Za-z0-9.-]+)?$/.test(remote.ssh)) throw new Error(field + '.ssh must be host, alias or user@host');
       const dir = remote.dir === undefined ? '~/starnet-observer' : remote.dir;
       if (typeof dir !== 'string' || !/^~?[A-Za-z0-9._\/-]+$/.test(dir) || dir.length > 200 || dir.split('/').includes('..')) throw new Error(field + '.dir must be a plain path');
-      const mail = remote.mail === undefined ? 'separate' : remote.mail;
-      if (mail !== 'separate' && mail !== 'relay') throw new Error(field + '.mail must be "separate" or "relay"');
-      return { id: remote.id, ssh: remote.ssh, dir, mail };
+      return { id: remote.id, ssh: remote.ssh, dir };
     });
   }
   if (Object.hasOwn(input, 'theme')) {

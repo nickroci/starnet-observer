@@ -942,15 +942,41 @@ const ObserverView = (() => {
       if (live) glow(ctx, { ...link.to, z: 2.2 }, 14, C.cyan, animate ? 0.3 + 0.25 * Math.sin(now / 600) : 0.4);
       ctx.restore();
     }
-    /* Relay line (config mail: "relay"): mailroom to mailroom. Configured but never observed, it is a broken amber dash
-       ("relay configured · not seen"); only observed relayed traffic makes it a solid mail link. */
-    function paintRelay(relay, now, animate) {
-      const active = relay.state === 'active', a = P({ ...relay.from, z: 0.6 }), b = P({ ...relay.to, z: 0.6 });
-      ctx.save(); ctx.strokeStyle = C.amber;
-      if (active) { ctx.lineWidth = 3; ctx.globalAlpha = 0.9; }
-      else { ctx.lineWidth = 1.5; ctx.globalAlpha = 0.55; ctx.setLineDash([2, 9]); }
+    /* llm-bus relay: a small satellite in space with a high beam to each bound mailroom's tower (marching while that bus
+       saw relay activity in the last 15 minutes, still and dashed while quiet, grey while its bus is unreadable) and a
+       thin tether to each machine its roster names that is not observed here. An outpost is a dashed outline with one
+       pip per listed agent: its rooms are not observed, so none are drawn. */
+    function beam(from, to, color, { width = 1.4, alpha = 0.8, dash = [4, 4], offset = 0 } = {}) {
+      const a = P(from), b = P(to);
+      ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.globalAlpha = alpha; ctx.setLineDash(dash); ctx.lineDashOffset = offset;
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.restore();
-      void now; void animate;
+    }
+    function paintRelay(relay, now, animate) {
+      for (const member of relay.members) {
+        const active = member.state === 'active', color = member.state === 'unknown' ? C.idle : C.amber;
+        beam(member.from, member.to, color, active ? { width: 2, alpha: 0.9, dash: [6, 4], offset: animate ? -(now / 50) % 10 : 0 } : { width: 1.3, alpha: 0.5, dash: [2, 6] });
+      }
+      for (const outpost of relay.outposts) {
+        beam(outpost.link.from, outpost.link.to, outpost.agents ? C.amber : C.idle, { width: 1, alpha: outpost.agents ? 0.6 : 0.35, dash: [1, 4] });
+        const r = outpost.rect;
+        ctx.save(); ctx.globalAlpha = outpost.agents ? 0.85 : 0.45; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.5;
+        poly(ctx, rectPoly(r, 0), withAlpha(C.amber, outpost.agents ? 0.06 : 0.03), outpost.agents ? C.amber : C.idle); ctx.restore();
+        for (let index = 0; index < Math.min(outpost.agents, 12); index++) {
+          const pip = P({ x: r.x + 1.2 + (index % 6) * 1.1, y: r.y + 2 + Math.floor(index / 6) * 2, z: 0.4 });
+          ctx.fillStyle = C.amber; ctx.fillRect(Math.round(pip.x) - 2, Math.round(pip.y) - 2, 4, 4);
+        }
+      }
+      // The satellite: a dark body on a short mast with two panel wings, its lamp lit while any member is active.
+      const c = relay.center, body = P(c), live = relay.members.some(member => member.state === 'active');
+      ctx.save();
+      ctx.strokeStyle = C.rail; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(body.x, body.y); ctx.lineTo(body.x, body.y + 18); ctx.stroke();
+      ctx.fillStyle = C.hullRight; ctx.fillRect(Math.round(body.x) - 7, Math.round(body.y) - 7, 14, 12);
+      ctx.strokeStyle = C.amber; ctx.lineWidth = 1; ctx.strokeRect(Math.round(body.x) - 7.5, Math.round(body.y) - 7.5, 15, 13);
+      ctx.fillStyle = C.cyan; ctx.globalAlpha = 0.7;
+      for (const side of [-1, 1]) ctx.fillRect(Math.round(body.x) + (side < 0 ? -26 : 10), Math.round(body.y) - 4, 16, 6);
+      ctx.globalAlpha = 1; ctx.fillStyle = live ? C.amber : C.idle; ctx.fillRect(Math.round(body.x) - 2, Math.round(body.y) - 3, 4, 4);
+      ctx.restore();
+      if (live && decor) glow(ctx, c, 18, C.amber, animate ? 0.3 + 0.2 * Math.sin(now / 700) : 0.35);
     }
     // ---------- FX: glow and sparks on the station itself (world space, deterministic) ----------
     // A burst of rising pixel sparks around a screen point. Each spark loops on its own phase so there is no state.
@@ -1323,10 +1349,19 @@ const ObserverView = (() => {
         plates.push(textPlate(live ? 'ssh · observing' : link.health === 'stale' ? 'ssh · stale' : 'ssh · unreachable', mid.x, mid.y - 4,
           { accent: live ? C.cyan : C.idle, size: 12, color: live ? C.cyan : C.idle, priority: 46, dash: [2, 2] }));
       }
+      // Relay labels: the relay's host name and what its members' buses say; outposts name the machine and its listed agents.
       for (const relay of scene.relays || []) {
-        // Labelled where it leaves this machine's mailroom, clear of the gap the observation link labels use.
-        const start = screen({ x: relay.from.x, y: relay.from.y + 4, z: 0.6 });
-        plates.push(textPlate(relay.state === 'active' ? 'relay · mail' : 'relay configured · not seen', start.x, start.y, { accent: C.amber, size: 12, color: C.amber, priority: 45, dash: relay.state === 'active' ? null : [3, 3] }));
+        const at = screen({ ...relay.center, z: 4.4 }), live = relay.members.some(member => member.state === 'active');
+        const newest = Math.max(...relay.members.map(member => member.lastActivityAt ?? -Infinity));
+        const note = live ? 'live' : Number.isFinite(newest) ? 'quiet · last activity ' + Model.age(newest) : 'no activity seen';
+        plates.push(textPlate(clipText('RELAY · ' + relay.relay, viewport.width * 0.4, 12), at.x, at.y - 18, { accent: C.amber, size: 12, color: live ? C.amber : C.idle, priority: 47, dash: live ? null : [3, 3] }));
+        if (tier !== 'overview') plates.push(textPlate('llm-bus · ' + note, at.x, at.y - 2, { accent: C.amber, size: 11, color: C.dim, priority: 43 }));
+        for (const outpost of relay.outposts) {
+          const top = screen({ x: outpost.rect.x + outpost.rect.w / 2, y: outpost.rect.y, z: 0.6 });
+          const label = String(outpost.machine).toUpperCase() + ' · ' + outpost.agents + ' agent' + (outpost.agents === 1 ? '' : 's') + ' · not observed';
+          plates.push(textPlate(clipText(label, viewport.width * 0.35, 12), top.x, top.y - 6, { accent: outpost.agents ? C.amber : C.idle, size: 12, color: outpost.agents ? C.amber : C.idle, priority: 42, dash: [2, 2] }));
+          if (tier !== 'overview' && outpost.repos.length) plates.push(textPlate(clipText('shared: ' + outpost.repos.join(', '), viewport.width * 0.35, 11), top.x, top.y + 10, { accent: C.idle, size: 11, color: C.dim, priority: 41 }));
+        }
       }
       const hubAt = screen({ x: scene.mail.tower.x + scene.mail.tower.w / 2, y: scene.mail.tower.y + scene.mail.tower.h / 2, z: 3.4 });
       plates.push(textPlate('MAILROOM · llm-bus', hubAt.x, hubAt.y, { accent: C.amber, size: signSize(18), color: C.window, priority: 45 }));

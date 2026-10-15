@@ -128,23 +128,31 @@ function sanitizeBus(host, bus, rowIds, receivedAt) {
   const messages = [];
   for (const message of bus.messages.slice(0, MAX_MESSAGES)) {
     if (!message || !Number.isSafeInteger(message.id) || message.id < 1) continue;
+    const relay = sanitizeRelay(message.relay);
     messages.push({ id: message.id, key: message.id + '@' + host, host, from: endpoint(message.from), to: endpoint(message.to),
-      sentAt: time(message.sentAt), acknowledgedAt: time(message.acknowledgedAt), wake: WAKES.has(message.wake) ? message.wake : 'unknown' });
+      sentAt: time(message.sentAt), acknowledgedAt: time(message.acknowledgedAt), wake: WAKES.has(message.wake) ? message.wake : 'unknown', ...(relay ? { relay } : {}) });
   }
-  const health = bus.health === 'available' ? 'available' : 'unavailable';
+  const health = bus.health === 'available' ? 'available' : 'unavailable', remote = sanitizeRemote(bus.remote);
   return { health, reason: health === 'available' ? null : text(bus.reason, 120) || 'unreadable', observedAt: health === 'available' ? receivedAt : null,
-    window: Number.isSafeInteger(bus.window) && bus.window > 0 && bus.window <= 1000 ? bus.window : 100, messages };
+    window: Number.isSafeInteger(bus.window) && bus.window > 0 && bus.window <= 1000 ? bus.window : 100, messages, ...(remote ? { remote } : {}) };
 }
-/* Relay detection hook. With mail "relay" configured the page may only draw a working mail link once relayed traffic
-   is actually seen; config alone never makes it active. Nothing relays today, so this always reports 'none'.
-   TODO(relay): when llm-bus gains host-qualified addresses (claude:<uuid>@host, docs/multi-host.md Decision 2), the
-   remote observer must publish them (publicBus currently folds unknown senders into 'external'); detect them here,
-   set observed: 'active' and lastRelayedAt to the newest relayed message's sentAt. */
-function relayObserved(host, bus) {
-  void host; void bus;
-  return { observed: 'none', lastRelayedAt: null };
+/* That host's llm-bus relay view (observer-bus.js selectRemote): the same closed vocabulary, re-checked here. Times are
+   the remote machine's own clock, as for every other remote timestamp. */
+const RELAY_ID = /^[A-Za-z0-9_-]{1,128}$/, RELAY_HOST = /^[A-Za-z0-9.-]{1,253}$/;
+const RELAY_STATES = new Set(['queued_local', 'accepted_remote', 'delivered_local', 'acknowledged', 'expired', 'unknown']);
+const epoch = value => Number.isFinite(value) && value > 0 ? value : null;
+function sanitizeRelay(relay) {
+  if (!relay || typeof relay !== 'object' || !['out', 'in'].includes(relay.direction) || !RELAY_ID.test(relay.machine) || !RELAY_ID.test(relay.repo)) return null;
+  return { direction: relay.direction, machine: relay.machine, repo: relay.repo, provider: PROVIDERS.has(relay.provider) ? relay.provider : null,
+    state: RELAY_STATES.has(relay.state) ? relay.state : 'unknown' };
 }
-
+function sanitizeRemote(remote) {
+  if (!remote || typeof remote !== 'object' || !RELAY_HOST.test(remote.relay) || !RELAY_ID.test(remote.machine)) return null;
+  const peers = (Array.isArray(remote.peers) ? remote.peers : []).slice(0, 32).filter(peer => peer && RELAY_ID.test(peer.machine) && peer.machine !== remote.machine)
+    .map(peer => ({ machine: peer.machine, repos: (Array.isArray(peer.repos) ? peer.repos : []).filter(repo => RELAY_ID.test(repo)).slice(0, 16),
+      agents: Number.isSafeInteger(peer.agents) && peer.agents >= 0 ? Math.min(peer.agents, 2000) : 0, lastSeen: epoch(peer.lastSeen) }));
+  return { relay: remote.relay, machine: remote.machine, lastActivityAt: epoch(remote.lastActivityAt), peers };
+}
 // The remote command is fixed; only `dir` varies, and it is validated by config and single-quoted for the remote shell.
 const quote = value => "'" + String(value).replace(/'/g, "'\\''") + "'";
 function remoteCommand(dir) {
@@ -224,9 +232,7 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
       const bus = host.bus && (fresh ? host.bus : { ...host.bus, health: 'unavailable', reason: 'Host not currently observed', observedAt: host.bus.observedAt });
       if (bus) buses[host.remote.id] = bus;
       sources[host.remote.id] = { health, observedAt: host.receivedAt, reason: fresh ? null : host.reason || 'No recent snapshot',
-        agents: host.rows.filter(row => row.source !== 'helper').length,
-        // Mail topology: the configured mode, and what is actually observed (config alone never makes a link active).
-        mail: { mode: host.remote.mail === 'relay' ? 'relay' : 'separate', ...relayObserved(host.remote.id, host.bus) } };
+        agents: host.rows.filter(row => row.source !== 'helper').length };
     }
     return { rows, sources, buses };
   }
@@ -274,4 +280,4 @@ function makeFederatedObserver(local, remoteHosts, now = Date.now) {
   return { get, inspect, controlTarget, inspectMessage: (id, expectedIdentity) => local.inspectMessage(id, expectedIdentity), close: async () => { remoteHosts.close(); await local.close?.(); } };
 }
 
-module.exports = { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sanitizeBus, sanitizeTargets, CONTROL_FRESH_MS, relayObserved, sshArgs, remoteCommand, reasonFrom, MAX_LINE, FRESH_MS, BACKOFF };
+module.exports = { makeRemoteHosts, makeFederatedObserver, sanitizeRow, sanitizeSnapshot, sanitizeBus, sanitizeTargets, CONTROL_FRESH_MS, sshArgs, remoteCommand, reasonFrom, MAX_LINE, FRESH_MS, BACKOFF };

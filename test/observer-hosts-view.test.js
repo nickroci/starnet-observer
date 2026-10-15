@@ -29,9 +29,12 @@ for (const status of ['working', 'idle', 'done', 'unknown']) assert.equal(View.n
 const layout = Model.createLayout();
 const rows = [row('obs_local', { status: 'working' }), row('obs_blocked', { host: 'vm', status: 'blocked' }), row('obs_idle', { host: 'vm', status: 'idle' })];
 layout.reconcile(rows);
-const hosts = [{ id: 'vm', health: 'available', agents: 2, mail: { mode: 'relay', observed: 'none', lastRelayedAt: null } }, { id: 'empty', health: 'stale', observedAt: 1, agents: 0 }];
-const scene = Scene.build(layout.onPage(0), 0, { hosts });
-assert.equal(scene.links.length, 2, 'fixture: an observation link per remote ship'); assert.equal(scene.relays.length, 1, 'fixture: one relay-configured host');
+const hosts = [{ id: 'vm', health: 'available', agents: 2 }, { id: 'empty', health: 'stale', observedAt: 1, agents: 0 }];
+// Only the vm's own bus reports a relay binding (this machine's does not): one relay, vm its only member, one outpost.
+const relays = Scene.relayNetworks([[null, { health: 'available', messages: [] }], ['vm', { health: 'available', messages: [],
+  remote: { relay: 'relay.example.dev', machine: 'vm-1', lastActivityAt: Date.now() - 60000, peers: [{ machine: 'whitenoise', repos: ['llm-bus'], agents: 5, lastSeen: Date.now() - 60000 }] } }]], Date.now());
+const scene = Scene.build(layout.onPage(0), 0, { hosts, relays });
+assert.equal(scene.links.length, 2, 'fixture: an observation link per remote ship'); assert.equal(scene.relays.length, 1, 'fixture: one relay');
 const node = canvas(), ships = [];
 let now = 0, chosenHost = null; const staleIds = new Set();
 const view = View.create({ canvas: node, nameFor: id => id, onShip: host => { ships.push(host); chosenHost = host; }, hostSelection: () => chosenHost,
@@ -54,8 +57,8 @@ assert.ok(labelled(), 'remote ship label at overview');
 const drawn = text => node.ctx.texts.includes(text);
 assert.ok(drawn('ssh · observing'), 'a live host\'s observation link says what it is');
 assert.ok(drawn('ssh · stale'), 'a stale host\'s link shows its real state');
-assert.ok(drawn('relay configured · not seen'), 'a configured but unobserved relay says so');
-assert.ok(!drawn('relay · mail'), 'and is never drawn as a working mail link');
+assert.ok(drawn('RELAY · relay.example.dev'), 'the relay names its host');
+assert.ok(drawn('WHITENOISE · 5 agents · not observed'), 'an outpost names its machine and listed agents, and says it is not observed');
 const vmRoom = scene.platforms.find(platform => platform.host === 'vm');
 assert.ok(view.focusPlatform(vmRoom.key)); node.ctx.texts.length = 0; now += 16; view.paint(now);
 assert.ok(labelled(), 'remote ship label when zoomed onto its room'); assert.ok(node.ctx.texts.some(text => /^P · 2/.test(text)), 'and the room sign survives');
