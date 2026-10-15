@@ -64,7 +64,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
   assert.equal(viewOptions.canvas, elements.world); assert.deepEqual(lifecycle, ['start'], 'one view, started once');
   assert.equal(fxState, false, 'explicit theme FX wins over saved browser preference');
   assert.equal(elements['fx-toggle'].attributes['aria-pressed'], 'false');
-  assert.equal(themedStyles.get('--phosphor'), '#77dce8'); assert.equal(themedStyles.get('--bg'), '#02060b');
+  assert.equal(themedStyles.size, 0, 'interface colours come from the theme pack helper, not observer.js');
   assert.equal(bodyStyles.has('--chrome'), false); assert.equal(bodyStyles.has('--glow'), false, 'theme inheritance leaves body stale-state overrides in control');
   elements['fx-toggle'].handlers.click(); assert.equal(fxState, true, 'manual FX toggle remains available');
   listener(snapshot); assert.equal(scene().workers.length, 16); assert.equal(elements.sessions.children.length, 1);

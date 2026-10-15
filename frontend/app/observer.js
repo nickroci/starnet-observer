@@ -4,14 +4,6 @@
 (async () => {
   const get = id => document.getElementById(id);
   const theme = window.__OBSERVER_THEME__ || {};
-  const themeVariables = { accent: ['--phosphor', '--chrome'], background: ['--bg'], panel: ['--panel'], text: ['--ink'] };
-  for (const [name, color] of Object.entries(theme.colors || {})) {
-    for (const variable of themeVariables[name] || []) document.documentElement.style.setProperty(variable, color);
-    if (name === 'accent') {
-      const rgb = [1, 3, 5].map(start => parseInt(color.slice(start, start + 2), 16));
-      document.documentElement.style.setProperty('--glow', 'rgba(' + rgb.join(',') + ',.22)');
-    }
-  }
 
   const layout = ObserverModel.createLayout(), courier = ObserverMail.createCourier();
   const filters = Array.from(get('filters').querySelectorAll('button'));

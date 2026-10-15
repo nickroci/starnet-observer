@@ -13,6 +13,15 @@ const ThemePack = (() => {
     if (!defaults) throw new Error('Canonical theme default bootstrap is unavailable');
     return defaults;
   }
-  return Object.freeze({ freezeSnapshot, getDefault });
+  function applyInterface(snapshot, doc) {
+    const fallback = getDefault().ui.colors, colors = snapshot?.ui?.colors || {};
+    for (const key of Object.keys(fallback)) {
+      doc.documentElement.style.setProperty('--' + key, Object.hasOwn(colors, key) ? colors[key] : fallback[key]);
+    }
+  }
+  return Object.freeze({ freezeSnapshot, getDefault, applyInterface });
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ThemePack;
+else if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  ThemePack.applyInterface(ThemePack.freezeSnapshot(window.__OBSERVER_THEME_PACK__) || ThemePack.getDefault(), document);
+}

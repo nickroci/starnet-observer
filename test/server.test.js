@@ -35,6 +35,8 @@ const { createServer } = require('../server.js');
     assert.equal(sandbox.window.__OBSERVER_THEME_PACK__.scene.colors.working, '#6ff7a0');
     assert.equal(sandbox.window.__OBSERVER_THEME_PACK__.crew.blank.tracks['rot.south'][0], '/assets/sprites/approved_android/rot_south.png');
     assert.ok(html.indexOf('window.__OBSERVER_THEME_PACK__=') < html.indexOf('app/observer-model.js'), 'startup snapshot precedes consumers');
+    assert.ok(html.indexOf('window.__OBSERVER_THEME_PACK__=') < html.indexOf('app/theme-pack.js') && html.indexOf('app/theme-pack.js') < html.indexOf('</head>'), 'boot data precedes the head theme helper');
+    assert.ok(!html.includes('<!--observer-boot-->'), 'boot marker is replaced');
     assert.throws(() => createServer({ observer, theme: { pack: 'uninstalled-test-pack' } }), /Unknown or uninstalled/);
     assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     // Every script referenced by the shipped page must exist and be executable JavaScript.

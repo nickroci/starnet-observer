@@ -76,6 +76,28 @@ const browser = { window: {} };
 vm.runInNewContext(fs.readFileSync(path.join(root, 'app/theme-pack.js'), 'utf8'), browser);
 browser.window.__OBSERVER_THEME_DEFAULT__ = clone(defaults);
 assert.equal(vm.runInNewContext('ThemePack.getDefault().id', browser), 'starnet', 'helper may load before nonce data');
+const fakeDocument = () => { const styles = new Map(); return { styles, documentElement: { style: { setProperty(key, value) { styles.set(key, value); } } } }; };
+const colorKeys = Object.keys(defaults.ui.colors);
+assert.equal(colorKeys.length, 48);
+const applied = snapshot => { const doc = fakeDocument(); ThemePack.applyInterface(snapshot, doc); return doc.styles; };
+assert.deepEqual(applied(defaults), new Map(colorKeys.map(key => ['--' + key, defaults.ui.colors[key]])), 'default binds exactly the canonical inventory');
+const overridden = applied({ ui: { colors: { ...defaults.ui.colors, phosphor: '#123456', glow: 'rgba(18,52,86,.22)', madeUp: '#abcdef' } } });
+assert.equal(overridden.get('--phosphor'), '#123456'); assert.equal(overridden.get('--glow'), 'rgba(18,52,86,.22)');
+assert.equal(overridden.has('--madeUp'), false, 'unknown snapshot keys never become properties'); assert.equal(overridden.size, 48);
+const sparse = applied({ ui: { colors: { ink: '#aabbcc' } } });
+assert.equal(sparse.get('--ink'), '#aabbcc'); assert.equal(sparse.get('--bg'), defaults.ui.colors.bg, 'missing keys fall back to the default'); assert.equal(sparse.size, 48);
+for (const pack of [undefined, { ...clone(defaults), ui: { ...clone(defaults.ui), colors: { ...defaults.ui.colors, phosphor: '#654321' } } }]) {
+  const doc = fakeDocument(), page = { window: { __OBSERVER_THEME_DEFAULT__: clone(defaults), __OBSERVER_THEME_PACK__: pack }, document: doc };
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'app/theme-pack.js'), 'utf8'), page);
+  assert.equal(doc.styles.size, 48);
+  assert.equal(doc.styles.get('--phosphor'), pack ? '#654321' : defaults.ui.colors.phosphor, 'load applies the selected snapshot or the default');
+  if (pack) assert.ok(Object.isFrozen(page.window.__OBSERVER_THEME_PACK__.ui.colors), 'load freezes the selected snapshot');
+}
+const pageSource = fs.readFileSync(path.join(root, 'observer.html'), 'utf8');
+const head = pageSource.slice(0, pageSource.indexOf('</head>'));
+assert.ok(head.indexOf('href="css/observer.css"') < head.indexOf('<!--observer-boot--><script src="app/theme-pack.js"></script>'), 'boot marker then theme helper follow the stylesheet in head');
+assert.ok(pageSource.includes('<!--observer-boot--><script src="app/theme-pack.js"></script></head>'), 'theme helper is the last head element');
+assert.equal(pageSource.split('app/theme-pack.js').length, 2, 'theme helper loads exactly once');
 // One whole-source audit catches unextracted colors without per-token fixtures.
 const normalize = value => /^#[a-f0-9]{3}$/i.test(value) ? '#' + [...value.slice(1)].map(value => value + value).join('') : value;
 for (const [filename, inventory] of [['css/observer.css', defaults.ui.colors], ['app/observer-view.js', defaults.scene.colors], ['app/observer-model.js', defaults.scene.colors], ['app/observer-mail.js', defaults.scene.colors], ['app/observer-scene.js', defaults.scene.colors]]) {
