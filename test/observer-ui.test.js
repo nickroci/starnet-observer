@@ -280,7 +280,7 @@ const panelPart = (host, name, index = -1) => { const root = host.children.at(in
     inits[0].onDegraded({ skin: 'blank', reason: 'image-load' });
     assert.equal(warnings.length, 1); assert.equal(invalidated, settled + 1, 'a degraded crew group repaints the scene once');
     assert.deepEqual({ code: warnings[0].code, pack: warnings[0].pack, group: warnings[0].group }, { code: 'crew-load', pack: 'synthetic', group: 'blank' });
-    assert.equal(warnings[0].message, 'Theme pack synthetic crew blank did not load; showing the default crew.');
+    assert.equal(warnings[0].message, 'Theme pack synthetic crew blank did not load; showing fallback crew.');
     inits[0].onDegraded({ skin: '../assets/x.png', reason: 'image-dimensions', error: new Error('/private/path') });
     assert.deepEqual([warnings[1].code, warnings[1].group], ['crew-dimensions', 'unknown'], 'unsafe group names never reach the warning');
     assert(!warnings[1].message.includes('/') && !warnings[1].message.includes('Error'), 'no paths or raw errors');

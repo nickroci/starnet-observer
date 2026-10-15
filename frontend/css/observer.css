@@ -105,7 +105,7 @@ input { width:100%; min-width:0; padding:9px 11px; color:var(--ink); background:
 .mail-row { width:100%; display:block; text-align:left; padding:4px 8px; background:var(--row); border:1px solid var(--line); border-left:3px solid var(--blocked); border-radius:var(--shape-mail-row); font:calc(12px * var(--type-scale))/1.4 system-ui,sans-serif; letter-spacing:normal; text-transform:none; color:var(--ink); }
 .mail-row:not(:disabled):hover { color:var(--ink); background:var(--row-hover); border-color:var(--chrome); border-left-color:var(--blocked); box-shadow:none; }
 .mail-row[aria-pressed=true],.mail-row[aria-pressed=true]:not(:disabled):hover { border-color:var(--phosphor); border-left-color:var(--blocked); background:var(--row-selected); }
-.mail-item { position:relative; } .mail-item .mail-row { padding-right:38px; } .mail-item .row-inspect { top:50%; transform:translateY(-50%); }
+.mail-item { position:relative; min-width:0; } .mail-item .mail-row { padding-right:38px; } .mail-item .row-inspect { top:50%; transform:translateY(-50%); }
 .mail-body { flex:1; min-height:0; overflow:auto; margin:0 12px 12px; padding:10px 12px; background:var(--row); border:1px solid var(--line); font:13px/1.5 ui-monospace,monospace; color:var(--ink); white-space:pre-wrap; overflow-wrap:anywhere; scrollbar-width:thin; scrollbar-color:var(--chrome) transparent; }
 .mail-body:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
 .mail-route { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .mail-state { display:block; color:var(--dim); font-size:calc(12px * var(--type-scale)); } .mail-state.pending { color:var(--blocked); }

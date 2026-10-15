@@ -695,7 +695,7 @@
     const group = typeof skin === 'string' && /^[a-z0-9_-]{1,32}$/i.test(skin) ? skin : 'unknown', id = typeof pack.effectiveId === 'string' ? pack.effectiveId : 'starnet';
     const sized = reason === 'image-dimensions';
     ThemePack.reportWarning({ code: sized ? 'crew-dimensions' : 'crew-load', pack: id, group,
-      message: 'Theme pack ' + id + ' crew ' + group + (sized ? ' images have the wrong size' : ' did not load') + '; showing the default crew.' });
+      message: 'Theme pack ' + id + ' crew ' + group + (sized ? ' images have the wrong size' : ' did not load') + '; showing fallback crew.' });
     view.invalidate();
   }
   // Never awaited: stalled or failed sprite assets must not hold back the inventory. Crew paint the fallback silhouette until sets load.
