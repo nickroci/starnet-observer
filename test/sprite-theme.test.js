@@ -1,6 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const { load } = require('./_sprite-runtime');
+const fs = require('node:fs'), path = require('node:path');
 const canonical = require('../frontend/assets/themes/starnet/theme.json').crew.blank;
 function setup({ fail, delay, delayCanonical, set = 'people', decode = false } = {}) {
   const group = { ...canonical, set, tracks: Object.fromEntries(Object.entries(canonical.tracks).map(([key, paths]) => [key, paths.map(p => p.replace('assets/sprites/approved_android/', 'assets/themes/synthetic/people/'))])) };
@@ -22,6 +23,40 @@ function draw(rt, group, overrides) {
   return { source: painted[1], y: painted[3], body };
 }
 (async () => {
+  // Exercise the browser's actual bootstrap/shim/runtime composition with a changed canonical
+  // catalog and matching transport manifest. Logical provider identities stay application-owned.
+  const updatedDefault = JSON.parse(fs.readFileSync(path.join(__dirname, '../frontend/assets/themes/starnet/theme.json'), 'utf8'));
+  const updatedSprites = { sprites: {} };
+  for (const [skin, group] of Object.entries(updatedDefault.crew)) {
+    const set = 'canonical_' + skin;
+    group.set = set;
+    group.tracks = Object.fromEntries(Object.entries(group.tracks).map(([track, paths]) => {
+      const updated = paths.map(p => p.replace(/assets\/sprites\/[^/]+\//, 'assets/sprites/' + set + '/'));
+      updatedSprites.sprites[set + '.' + track] = updated.map(p => p.slice('assets/sprites/'.length));
+      return [track, updated];
+    }));
+  }
+  const browserSource = 'globalThis.window = { __OBSERVER_THEME_DEFAULT__: ' + JSON.stringify(updatedDefault) + ' };\n'
+    + 'document.documentElement = { style: { setProperty() {} }, setAttribute() {} }; document.readyState = \'loading\'; document.addEventListener = () => {};\n'
+    + ['app/theme-pack.js', 'app/data-shim.js', 'js/assets.js'].map(file => fs.readFileSync(path.join(__dirname, '../frontend', file), 'utf8')).join('\n');
+  const bootstrap = { source: browserSource, data: { DEFAULT_SKIN: 'blank' }, sprites: updatedSprites };
+  const canonicalStartup = await load(bootstrap);
+  assert.equal(canonicalStartup.SPRITES.ready, true, 'no-argument startup primes the updated canonical default');
+  const canonicalInherited = await load({ ...bootstrap, initOptions: { crew: updatedDefault.crew } });
+  for (const skin of ['blank', 'blank_blue', 'blank_amber']) {
+    await canonicalStartup.SPRITES.ensureSkin(skin);
+    await canonicalInherited.SPRITES.ensureSkin(skin);
+    assert.equal(canonicalInherited.SPRITES.replacementState(skin), 'inherited', 'canonical snapshot must not stage a replacement');
+    for (const runtime of [canonicalStartup, canonicalInherited]) {
+      assert.equal(runtime.SPRITES.isSkinReady(skin), true);
+      assert.equal(runtime.SPRITES.bodyScale({ skin }), 0.25);
+      for (const appearance of [undefined, 'default']) {
+        const painted = draw(runtime, appearance, { skin });
+        assert.match(painted.source, new RegExp('assets/sprites/canonical_' + skin + '/rot_south'));
+        assert.equal(painted.body._renderStandingHeight, 19);
+      }
+    }
+  }
   const delayed = setup({ delay: 'type_north_4.png' }), rt = await delayed.runtime;
   assert.equal(rt.SPRITES.replacementState('blank'), 'loading');
   assert.match(draw(rt).source, /assets\/sprites\/approved_android/);

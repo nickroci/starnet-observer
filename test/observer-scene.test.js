@@ -23,6 +23,20 @@ for (const worker of scene.workers) for (let i = 1; i < worker.route.length; i++
 const revision = scene.revision;
 rows[0] = { ...rows[0], status: 'working', title: 'new dynamic title' }; layout.reconcile(rows);
 assert.equal(Scene.build(layout.onPage(0), 0).revision, revision, 'status/title changes do not change geometry revision');
+{
+  const folderLayout = Model.createLayout(), folderRows = Array.from({ length: 9 }, (_, i) =>
+    ({ ...row('worker' + i), source: 'herdr', provider: 'claude', folder: 'front' }));
+  folderLayout.reconcile(folderRows);
+  const shared = Scene.build(folderLayout.onPage(0), 0);
+  assert.equal(shared.platforms[0].sections.length, 1);
+  folderRows[8] = { ...folderRows[8], folder: 'back' };
+  folderLayout.reconcile(folderRows);
+  const divided = Scene.build(folderLayout.onPage(0), 0);
+  assert.equal(divided.platforms[0].sections.length, 2);
+  assert.equal(divided.platforms[0].sections[1].partitions.length, 2, 'folder separation adds partition walls');
+  assert.deepEqual(divided.workers.map(w => [w.id, w.chair]), shared.workers.map(w => [w.id, w.chair]), 'folder separation can preserve every chair');
+  assert.notEqual(divided.revision, shared.revision, 'changed section topology invalidates floor and movement caches even with stable chairs');
+}
 const small = Model.createLayout(); small.reconcile([row(0)]);
 const one = Scene.build(small.onPage(0), 0);
 assert(one.bounds.maxY - one.bounds.minY < scene.bounds.maxY - scene.bounds.minY, 'unused slots do not enter occupied fit');
@@ -567,3 +581,19 @@ for (const exclusion of [{ status: 'working' }, { status: 'blocked' }, { stale: 
   assert(parentWalked, 'safe route rejection is local to boxed station');
 }
 console.log('Compact historical pair/turn/passage/regroup oracle, eligible gaps, own stale/work/closed precedence and inaccessible-departure fallback OK');
+
+// Overseer seating: a row flagged as overseer takes the observatory chair and the ambient viewer stands down.
+{
+  const Scene = require('../frontend/app/observer-scene.js');
+  const plain = Scene.build([], 0), boss = { id: 'obs_' + 'c'.repeat(24), status: 'working', provider: 'claude', role: 'overseer', source: 'herdr' };
+  const seated = Scene.build([], 0, { overseer: boss });
+  require('node:assert/strict').equal(plain.observatory.viewer.kind, 'ambient');
+  require('node:assert/strict').equal(seated.observatory.viewer, null);
+  require('node:assert/strict').equal(seated.observatory.overseer, boss.id);
+  const worker = seated.workers.find(w => w.id === boss.id);
+  require('node:assert/strict').deepEqual([worker.role, worker.platformKey, worker.chair], ['overseer', 'observatory', plain.observatory.chair]);
+  require('node:assert/strict').notEqual(plain.revision, seated.revision, 'seating the overseer rebuilds the floor');
+  require('node:assert/strict').equal(worker.accent, '#3fd8e8', 'the default overseer accent is the canonical cyan');
+  require('node:assert/strict').equal(Scene.build([], 0, { overseer: boss, overseerAccent: '#34518f' }).workers.find(entry => entry.role === 'overseer').accent, '#34518f', 'a theme supplies the overseer accent');
+  console.log('observer scene: overseer seating OK');
+}

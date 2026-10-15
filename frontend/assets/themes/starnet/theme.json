@@ -50,7 +50,13 @@
       "tool-bg": "#07120c",
       "unknown-role": "#c9d3da",
       "heading-ink": "#c6f8d6",
-      "totals-ink": "#c6f8d6"
+      "totals-ink": "#c6f8d6",
+      "danger": "#ff8a5c",
+      "danger-ink": "#ffb08a",
+      "danger-tab-ink": "#1a0c06",
+      "danger-glow": "rgba(255,138,92,.5)",
+      "danger-notice-ink": "#ffd2c0",
+      "danger-notice-glow": "rgba(255,138,92,.45)"
     },
     "typography": {
       "profile": "classic",

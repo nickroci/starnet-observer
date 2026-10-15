@@ -14,6 +14,18 @@ async function waitFor(predicate) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
 }
+// File removal precedes quarantine release. Demand proves recovery at the public boundary.
+async function recoveredEdges(client) {
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    try { return await client.readHelperEdges(); }
+    catch (error) {
+      if (error.message !== 'SQLite source unavailable') throw error;
+      assert(Date.now() < deadline, 'fixture worker did not resume admission');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  }
+}
 (async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'observer-worker-test-'));
   const scratch = path.join(root, 'scratch'); fs.mkdirSync(scratch);
@@ -86,8 +98,7 @@ async function waitFor(predicate) {
   assert.equal((await timedBody).reason, 'unreadable'); await edgesRejected;
   fs.writeFileSync(mode, 'ok');
   await waitFor(() => fs.readdirSync(scratch).length === 0);
-  await Bun.sleep(0); // Let the async filesystem completion release quarantine.
-  assert.deepEqual(await failing.readHelperEdges(), { rows: [] }, 'next demand starts a fresh worker');
+  assert.deepEqual(await recoveredEdges(failing), { rows: [] }, 'next demand starts a fresh worker');
   assert.equal(fs.readFileSync(calls, 'utf8').split('bus.inspect').length - 1, 1, 'timed-out body is not replayed');
   for (const failure of ['crash', 'error']) {
     fs.writeFileSync(mode, failure);
@@ -95,8 +106,7 @@ async function waitFor(predicate) {
     await Promise.all([assert.rejects(activeFailure, /unavailable/), assert.rejects(queuedFailure, /unavailable/)]);
     fs.writeFileSync(mode, 'ok');
     await waitFor(() => fs.readdirSync(scratch).length === 0);
-    await Bun.sleep(0); // Let the async filesystem completion release quarantine.
-    assert.deepEqual(await failing.readHelperEdges(), { rows: [] }, failure + ' permits restart after rejecting every pending job');
+    assert.deepEqual(await recoveredEdges(failing), { rows: [] }, failure + ' permits restart after rejecting every pending job');
   }
   fs.writeFileSync(mode, 'block');
   const closingJob = failing.readHelperEdges(); const rejectedAtClose = assert.rejects(closingJob, /unavailable/);

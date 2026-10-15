@@ -90,7 +90,7 @@ const fakeDocument = ({ elements = {}, FontFace, readyState = 'complete' } = {})
     createElement: () => fakeElement(), addEventListener(name, fn) { events[name] = fn; } };
 };
 const colorKeys = Object.keys(defaults.ui.colors);
-assert.equal(colorKeys.length, 48);
+assert.equal(colorKeys.length, 54);
 const SHAPE_PROPERTIES = { control: '--shape-control', input: '--shape-input', panel: '--shape-panel', sessionRow: '--shape-session-row', mailRow: '--shape-mail-row', tag: '--shape-tag', eyebrow: '--shape-eyebrow' };
 const DECOR_ATTRIBUTES = { scanlines: 'data-decor-scanlines', glyphStrip: 'data-decor-glyph-strip', cornerBrackets: 'data-decor-corner-brackets', glow: 'data-decor-glow' };
 const fixedCount = 1 + Object.keys(SHAPE_PROPERTIES).length;
@@ -107,9 +107,9 @@ assert.equal(defaultStyles.get('--shape-mail-row'), '2px 8px 2px 2px'); assert.e
 assert.equal(defaults.ui.logo, null);
 const overridden = applied({ ui: { colors: { ...defaults.ui.colors, phosphor: '#123456', glow: 'rgba(18,52,86,.22)', madeUp: '#abcdef' } } });
 assert.equal(overridden.get('--phosphor'), '#123456'); assert.equal(overridden.get('--glow'), 'rgba(18,52,86,.22)');
-assert.equal(overridden.has('--madeUp'), false, 'unknown snapshot keys never become properties'); assert.equal(overridden.size, 48 + fixedCount);
+assert.equal(overridden.has('--madeUp'), false, 'unknown snapshot keys never become properties'); assert.equal(overridden.size, 54 + fixedCount);
 const sparse = applied({ ui: { colors: { ink: '#aabbcc' } } });
-assert.equal(sparse.get('--ink'), '#aabbcc'); assert.equal(sparse.get('--bg'), defaults.ui.colors.bg, 'missing keys fall back to the default'); assert.equal(sparse.size, 48 + fixedCount);
+assert.equal(sparse.get('--ink'), '#aabbcc'); assert.equal(sparse.get('--bg'), defaults.ui.colors.bg, 'missing keys fall back to the default'); assert.equal(sparse.size, 54 + fixedCount);
 // Each fixed brand capacity reaches only its own binding.
 const shapes = Object.fromEntries(Object.keys(SHAPE_PROPERTIES).map((key, index) => [key, [index, index + 1, index + 2, index + 3]]));
 const shaped = appliedDocument({ ui: { shapes: { ...shapes, badgeCut: 'none' } } });
@@ -192,7 +192,7 @@ brandChecks.catch(error => { console.error(error); process.exitCode = 1; });
 for (const pack of [undefined, { ...clone(defaults), ui: { ...clone(defaults.ui), colors: { ...defaults.ui.colors, phosphor: '#654321' } } }]) {
   const doc = statusDocument(), page = { window: { __OBSERVER_THEME_DEFAULT__: clone(defaults), __OBSERVER_THEME_PACK__: pack }, document: doc };
   vm.runInNewContext(fs.readFileSync(path.join(root, 'app/theme-pack.js'), 'utf8'), page);
-  assert.equal(doc.styles.size, 48 + fixedCount);
+  assert.equal(doc.styles.size, 54 + fixedCount);
   assert.deepEqual(doc.documentElement.attributes, defaultAttributes);
   assert.equal(doc.styles.get('--phosphor'), pack ? '#654321' : defaults.ui.colors.phosphor, 'load applies the selected snapshot or the default');
   if (pack) assert.ok(Object.isFrozen(page.window.__OBSERVER_THEME_PACK__.ui.colors), 'load freezes the selected snapshot');

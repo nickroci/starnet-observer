@@ -8,6 +8,10 @@ const ObserverModel = (() => {
   const palette = FLOORS.map((floor, index) => [floor, Themes.getDefault().scene.projectAccents[index]]);
   const projectKey = row => row.projectId || 'folder:' + (row.project || 'Unassigned');
   const repoKey = row => row.repoId || projectKey(row);
+  // Agents in different sub-folders of one repository sit in different sections (low walls between them).
+  const folderOf = row => typeof row.folder === 'string' ? row.folder : '';
+  const sectionKey = row => repoKey(row) + (folderOf(row) ? '#' + folderOf(row) : '');
+  const sectionLabel = row => (row.repo || row.project || 'Unassigned') + (folderOf(row) ? ' / ' + folderOf(row) : '');
   // Gaps between reserved root desks; a section shares eight safe stations.
   const helperStations = [6, 9].flatMap(y => [4.25, 8.25, 14.25, 18].map(x => ({ x, y, w: 1, h: 0.72 })));
   const isHelper = row => row.source === 'helper' || Object.hasOwn(row, 'parentId');
@@ -64,14 +68,14 @@ const ObserverModel = (() => {
     const panes = new Map(), helpers = new Map(), wings = new Map(), names = new Map(), roomSlots = new Map();
     let hues = new Map(), rooms = [];
     // Holes are reused but surviving desks never move; a new block is appended only when none is free.
-    function allocate(project, repo, label) {
+    function allocate(project, repo, label, section = repo) {
       if (!wings.has(project)) wings.set(project, []);
       const blocks = wings.get(project), taken = blocks.map(() => new Set());
       for (const pane of panes.values()) if (pane.project === project) taken[pane.block].add(pane.seat);
-      let block = blocks.findIndex((value, index) => value.repo === repo && taken[index].size < BLOCK_SEATS);
+      let block = blocks.findIndex((value, index) => (value.section || value.repo) === section && taken[index].size < BLOCK_SEATS);
       if (block < 0) block = blocks.findIndex((_, index) => taken[index].size === 0);
       if (block < 0) { block = blocks.length; taken.push(new Set()); }
-      blocks[block] = { repo, label };
+      blocks[block] = { repo, label, section };
       let seat = 0; while (taken[block].has(seat)) seat++;
       return { block, seat };
     }
@@ -114,11 +118,11 @@ const ObserverModel = (() => {
       const roots = rows.filter(row => !isHelper(row)), live = new Set(roots.map(row => row.id));
       for (const id of panes.keys()) if (!live.has(id)) { panes.delete(id); removed.push(id); changed = true; }
       for (const row of roots) {
-        const project = projectKey(row), repo = repoKey(row), previous = panes.get(row.id);
+        const project = projectKey(row), repo = repoKey(row), section = sectionKey(row), previous = panes.get(row.id);
         names.set(project, row.project || 'Unassigned');
-        if (previous && previous.project === project && previous.repo === repo) continue;
+        if (previous && previous.project === project && previous.repo === repo && (previous.section || previous.repo) === section) continue;
         if (previous) { panes.delete(row.id); moved.push(row.id); }
-        panes.set(row.id, { project, repo, ...allocate(project, repo, row.repo || row.project || 'Unassigned') }); changed = true;
+        panes.set(row.id, { project, repo, section, ...allocate(project, repo, sectionLabel(row), section) }); changed = true;
       }
       for (const [project, blocks] of wings) {
         const used = new Set(Array.from(panes.values()).filter(pane => pane.project === project).map(pane => pane.block));
