@@ -13,11 +13,22 @@
     }
   }
 
-  const layout = ObserverModel.createLayout(), courier = ObserverMail.createCourier();
+  let layout = ObserverModel.createLayout();
+  const courier = ObserverMail.createCourier();
   const filters = Array.from(get('filters').querySelectorAll('button'));
   const clock = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
   const reducedMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-  let latest, selected = null, page = 0, filter = 'all', ingested = null, ingestedStale = false, mailSelected = null, inventoryStale = true;
+  /* Per-viewer view settings survive a reload: a saved value beats the theme default, which beats the built-in one.
+     Storage may be missing or throw (private window, blocked site data), so every access is guarded and the page
+     renders the same without it. Only toggles and positions are kept; never labels, ids or anything about sessions. */
+  const prefs = {
+    get(name) { try { const value = window.localStorage?.getItem('observer.' + name); return typeof value === 'string' ? value : null; } catch (_) { return null; } },
+    set(name, value) { try { window.localStorage?.setItem('observer.' + name, String(value)); } catch (_) { /* convenience only */ } },
+    flag(name, fallback) { const value = prefs.get(name); return value === '1' ? true : value === '0' ? false : fallback; }
+  };
+  const savedFilter = prefs.get('filter'), savedPage = Number(prefs.get('page'));
+  let latest, selected = null, page = Number.isInteger(savedPage) && savedPage >= 0 && savedPage < 1000 ? savedPage : 0,
+    filter = filters.some(button => button.dataset.filter === savedFilter) ? savedFilter : 'all', ingested = null, ingestedStale = false, mailSelected = null, inventoryStale = true;
   let pendingSpots = [], scene = null, grounded = true, byId = new Map();
   // Visibility: a hidden page owns no subscription, deadline or frame; resume proves freshness before inspection.
   let active = false, unsubscribe = null, resumedAt = 0, awaitingProof = false, cachedAtResume = null;
@@ -73,7 +84,7 @@
 
   function setPage(next) {
     if (next === page) return;
-    page = next; courier.reset();
+    page = next; courier.reset(); prefs.set('page', page);
   }
   function select(id, scroll = false) {
     if (!byId.has(id)) return;
@@ -237,16 +248,17 @@
   }
   // Ambient sky effects (Matrix rain, pixies, nebulae): off on startup unless explicitly configured.
   const fxButton = get('fx-toggle');
-  function readFx() { return typeof theme.fx === 'boolean' ? theme.fx : false; }
+  function readFx() { return prefs.flag('fx', typeof theme.fx === 'boolean' ? theme.fx : false); }
   function applyFx(on) { view.setFx(on); fxButton.setAttribute('aria-pressed', on ? 'true' : 'false'); }
-  if (fxButton && typeof view.setFx === 'function') { applyFx(readFx()); fxButton.addEventListener('click', () => applyFx(!view.fx())); }
+  if (fxButton && typeof view.setFx === 'function') { applyFx(readFx()); fxButton.addEventListener('click', () => { const on = !view.fx(); applyFx(on); prefs.set('fx', on ? 1 : 0); }); }
   get('zoom-in').addEventListener('click', () => view.zoomBy(1.25));
   get('zoom-out').addEventListener('click', () => view.zoomBy(0.8));
   get('previous-page').addEventListener('click', () => changePage(-1));
   get('next-page').addEventListener('click', () => changePage(1));
   get('search').addEventListener('input', () => { if (latest) render(latest, true); });
+  for (const option of filters) option.setAttribute('aria-pressed', String(option.dataset.filter === filter));
   for (const button of filters) button.addEventListener('click', () => {
-    filter = button.dataset.filter;
+    filter = button.dataset.filter; prefs.set('filter', filter);
     for (const option of filters) option.setAttribute('aria-pressed', String(option === button));
     if (latest) render(latest, true);
   });
@@ -696,6 +708,25 @@
       ...Object.values(latest.data.sources || {}).map(source => source.observedAt), ...(latest.data.sessions || []).flatMap(row => [row.observedAt, row.tool?.observedAt]), latest.data.aggregate?.usageObservedAt].filter(fresh);
     deadline = setTimeout(() => { deadline = null; if (latest) render(latest, true); }, Math.max(0, Math.min(...times) + FRESH_MS + 1 - Date.now()));
   }
+  /* ARRANGE: the page draws either the folder grouping or the sidecar's dynamic arrangement. The arranged copy is
+     memoised per snapshot so unchanged data keeps its identity; toggling rebuilds the layout once (desks then hold). */
+  const arrangeButton = get('arrange-toggle');
+  let arrangeOn = false, rawLatest = null, arrangedFrom = null, arrangedTo = null;
+  arrangeOn = prefs.flag('arrange', theme.arrange === true);
+  function arrangedState(state) {
+    if (!arrangeOn || !state?.data || !Array.isArray(state.data.sessions)) return state;
+    if (arrangedFrom !== state.data) { arrangedFrom = state.data; arrangedTo = { ...state.data, sessions: state.data.sessions.map(ObserverModel.arranged) }; }
+    return { ...state, data: arrangedTo };
+  }
+  function ingest(state) { rawLatest = state; render(arrangedState(state)); }
+  function applyArrange(on, persist) {
+    arrangeOn = !!on;
+    if (arrangeButton) arrangeButton.setAttribute('aria-pressed', arrangeOn ? 'true' : 'false');
+    if (persist) prefs.set('arrange', arrangeOn ? 1 : 0);
+    layout = ObserverModel.createLayout(); sceneKey = null; selectedRepoId = null;
+    if (rawLatest) render(arrangedState(rawLatest), true);
+  }
+  if (arrangeButton) { arrangeButton.setAttribute('aria-pressed', arrangeOn ? 'true' : 'false'); arrangeButton.addEventListener('click', () => applyArrange(!arrangeOn, true)); }
   function render(state, refresh = false) {
     if (!active) return;
     const previous = latest, stale = isStale(state);
@@ -765,7 +796,7 @@
     if (active || document.hidden) return;
     active = true; resumedAt = Date.now(); awaitingProof = panels.some(entry => entry.target.kind === 'agent'); cachedAtResume = latest?.data;
     courier.reset(); ingested = null;
-    unsubscribe = QuerySpine.subscribe('observer.sessions', snapshot => render(snapshot), { immediate: false, refresh: false });
+    unsubscribe = QuerySpine.subscribe('observer.sessions', snapshot => ingest(snapshot), { immediate: false, refresh: false });
     Promise.resolve(QuerySpine.invalidate('observer.sessions', { refresh: true })).catch(() => {});
     view.start();
     if (latest) render(latest, true);

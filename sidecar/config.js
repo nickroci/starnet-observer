@@ -13,6 +13,7 @@ const DEFAULT_LABELS = Object.freeze({
   ])
 });
 const DEFAULT_CONFIG = path.join(__dirname, '..', 'observer.config.json');
+const DEFAULT_ROOMS = path.join(__dirname, '..', 'rooms.json');
 const HELP = `Usage: bun --no-env-file server.js [options]
 
   --presentation          Enable private labels and block inspectors
@@ -26,6 +27,9 @@ const HELP = `Usage: bun --no-env-file server.js [options]
 Flags override config; config overrides defaults. Mode defaults to off.
 If present, observer.config.json next to server.js is loaded automatically.
 Use PORT to change the listening port (default 4319).
+Config "roomsFile" (default rooms.json next to server.js, relative to the config file) holds optional dynamic
+arrangement overrides: { "rooms": [{ "name": "Banqora", "match": ["~/dev/repos/bq-*", "github.com/banqora/*"] }] }.
+Config "theme": { "arrange": true } starts the page with the dynamic arrangement on.
 `;
 
 function object(value, field) {
@@ -39,7 +43,7 @@ function label(value, field) {
   return value.trim();
 }
 function validateConfig(input) {
-  object(input, 'Config'); keys(input, ['presentation', 'company', 'repoPrefix', 'rooms', 'theme'], 'config');
+  object(input, 'Config'); keys(input, ['presentation', 'company', 'repoPrefix', 'rooms', 'theme', 'roomsFile'], 'config');
   const result = {};
   if (Object.hasOwn(input, 'presentation')) {
     if (typeof input.presentation !== 'boolean') throw new Error('presentation must be a boolean');
@@ -66,12 +70,20 @@ function validateConfig(input) {
       }) };
     });
   }
+  if (Object.hasOwn(input, 'roomsFile')) {
+    if (typeof input.roomsFile !== 'string' || !input.roomsFile.trim() || input.roomsFile.length > 1024 || /[\x00-\x1f\x7f]/.test(input.roomsFile)) throw new Error('roomsFile must be a nonempty path without control characters');
+    result.roomsFile = input.roomsFile;
+  }
   if (Object.hasOwn(input, 'theme')) {
-    object(input.theme, 'theme'); keys(input.theme, ['fx', 'colors'], 'theme');
+    object(input.theme, 'theme'); keys(input.theme, ['fx', 'arrange', 'colors'], 'theme');
     result.theme = {};
     if (Object.hasOwn(input.theme, 'fx')) {
       if (typeof input.theme.fx !== 'boolean') throw new Error('theme.fx must be a boolean');
       result.theme.fx = input.theme.fx;
+    }
+    if (Object.hasOwn(input.theme, 'arrange')) {
+      if (typeof input.theme.arrange !== 'boolean') throw new Error('theme.arrange must be a boolean');
+      result.theme.arrange = input.theme.arrange;
     }
     if (Object.hasOwn(input.theme, 'colors')) {
       object(input.theme.colors, 'theme.colors');
@@ -117,6 +129,7 @@ function loadConfig(args = process.argv.slice(2), defaultPath = DEFAULT_CONFIG) 
   if (!settings.rooms) labels.rooms = DEFAULT_LABELS.rooms.map(room => ({ name: room.name, repos: room.repos.map(repo => labels.repoPrefix + repo.slice('helio'.length)) }));
   return { presentation: values.presentation ? true : values['no-presentation'] ? false : settings.presentation || false,
     labels: { company: labels.company, repoPrefix: labels.repoPrefix, rooms: labels.rooms },
-    theme: { ...settings.theme, ...(values.fx ? { fx: true } : values['no-fx'] ? { fx: false } : {}) } };
+    theme: { ...settings.theme, ...(values.fx ? { fx: true } : values['no-fx'] ? { fx: false } : {}) },
+    roomsFile: settings.roomsFile ? path.resolve(path.dirname(file), settings.roomsFile) : DEFAULT_ROOMS };
 }
-module.exports = { DEFAULT_LABELS, HELP, validateConfig, loadConfig };
+module.exports = { DEFAULT_LABELS, DEFAULT_ROOMS, HELP, validateConfig, loadConfig };
