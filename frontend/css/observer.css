@@ -196,3 +196,14 @@ body.control .session-row .row-top { padding-right:98px; } body.control .session
 .project-spawn { min-width:28px; min-height:28px; padding:0 6px; font:19px/1 var(--term); letter-spacing:0; text-transform:none; flex:none; }
 .control-notice { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:60; max-width:min(80vw,720px); padding:8px 14px; font:14px/1.3 var(--term); color:var(--ink); background:#06130b; border:1px solid var(--phosphor); border-radius:4px; box-shadow:0 0 14px var(--glow); }
 .control-notice.error { color:#ffd2c0; border-color:#ff8a5c; box-shadow:0 0 14px rgba(255,138,92,.45); }
+
+/* Provider choice is an explicit launch confirmation; native dialog owns keyboard modality. */
+.overseer-chooser { max-width: min(30rem, calc(100vw - 2rem)); padding: 1.5rem; color: var(--ink); background: var(--panel); border: 1px solid var(--chrome); border-radius: var(--leaf); }
+.overseer-chooser::backdrop { background: rgba(0, 0, 0, .65); }
+.overseer-chooser h2 { margin-bottom: 1rem; font: 24px/1.1 var(--term); color: var(--phosphor); }
+.overseer-chooser label { display: block; margin-bottom: .5rem; }
+.overseer-chooser select { width: 100%; padding: .5rem; color: var(--ink); background: var(--bg); font: inherit; }
+.overseer-chooser p { margin: 1rem 0; }
+.overseer-actions { display: flex; justify-content: flex-end; gap: .75rem; }
+.overseer-actions button { padding: .5rem 1rem; }
+.overseer-chooser :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }

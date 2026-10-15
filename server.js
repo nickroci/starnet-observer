@@ -45,8 +45,9 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       let chunks = [], bytes = 0;
       try { for await (const chunk of req) { bytes += chunk.length; if (bytes > 4096) return json(413, { error: 'Body too large' }); chunks.push(chunk); } } catch (_) { return json(400, { error: 'Body unreadable' }); }
       let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch (_) { return json(400, { error: 'Invalid JSON' }); }
+      if (action[1] === 'overseer' && (!body || !['claude', 'codex'].includes(body.provider))) return json(400, { error: 'invalid-provider' });
       if (action[1] !== 'overseer' && (!body || typeof body.paneId !== 'string' || !PANE.test(body.paneId))) return json(400, { error: 'paneId required' });
-      try { const result = action[1] === 'overseer' ? await control.overseer() : await control[action[1]](body.paneId); return json(200, controlResult(action[1], result)); }
+      try { const result = action[1] === 'overseer' ? await control.overseer(body.provider) : await control[action[1]](body.paneId); return json(200, controlResult(action[1], result)); }
       catch (thrown) { const error = thrown instanceof Error ? thrown : new Error(String(thrown)); const status = Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 500; if (status >= 500) console.warn('[observer control]', presentation ? controlResult(action[1], null, error).error : redact(String(error.message))); return json(status, controlResult(action[1], null, error)); }
     }
     try {

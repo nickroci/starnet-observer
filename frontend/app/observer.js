@@ -262,6 +262,7 @@
   document.addEventListener('pointerdown', event => { if (helpOpen() && !helpPanel.contains(event.target) && !helpButton.contains(event.target)) setHelp(false); });
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape') return;
+    if (overseerChooser?.root.open) { event.preventDefault(); closeOverseerChooser(); return; }
     // The innermost layer closes first: help, then the top panel only, then the worker focus or platform zoom.
     if (helpOpen()) { event.preventDefault(); setHelp(false, true); return; }
     if (panels.length) { event.preventDefault(); closeTopPanel(); return; }
@@ -406,23 +407,64 @@
     box.textContent = message; box.classList.toggle('error', !!isError); box.hidden = false;
     clearTimeout(notice.timer); notice.timer = setTimeout(() => { box.hidden = true; }, isError ? 8000 : 4000);
   }
-  async function controlAction(button, action, paneId, pending) {
+  async function controlAction(button, action, paneId, pending, provider) {
     if (!CONTROL || !paneId || button.disabled) return;
     button.disabled = true; notice(pending);
     try {
-      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? {} : { paneId });
-      notice(action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · terminal opening · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · terminal opening' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
+      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? { provider } : { paneId });
+      notice(action === 'overseer' ? PROVIDERS[provider] + ' overseer started in ' + result.paneId + ' · terminal opening · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · terminal opening' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
     } catch (error) { notice((action === 'overseer' ? 'Could not start the overseer: ' : action === 'spawn' ? 'Could not start an agent: ' : action === 'attach' ? 'Could not open a terminal: ' : 'Could not close the agent: ') + error.message, true); }
     finally { button.disabled = false; }
+  }
+  let overseerChooser = null;
+  function closeOverseerChooser() {
+    if (!overseerChooser?.root.open) return;
+    overseerChooser.root.close();
+    get('world').focus();
+  }
+  function openOverseerChooser() {
+    if (get('world').disabled) return;
+    if (!overseerChooser) {
+      const root = text('dialog', 'overseer-chooser', ''); root.id = 'overseer-chooser';
+      const title = text('h2', '', 'Start an overseer'); title.id = 'overseer-chooser-title';
+      const label = text('label', '', 'Provider'); label.setAttribute('for', 'overseer-provider');
+      const provider = text('select', '', ''); provider.id = 'overseer-provider'; provider.setAttribute('aria-label', 'Overseer provider');
+      for (const value of ['claude', 'codex']) {
+        const option = text('option', '', PROVIDERS[value]); option.value = value; provider.append(option);
+      }
+      const confirmation = text('p', '', ''); confirmation.id = 'overseer-confirmation';
+      const describe = () => { confirmation.textContent = 'Start ' + PROVIDERS[provider.value] + ' in a new Herdr workspace with a brief on watching the other agents, and open its terminal?'; };
+      provider.addEventListener('change', describe);
+      const actions = text('div', 'overseer-actions', '');
+      const start = text('button', '', 'Start'); start.type = 'button'; start.id = 'overseer-start';
+      const cancel = text('button', '', 'Cancel'); cancel.type = 'button'; cancel.id = 'overseer-cancel';
+      cancel.addEventListener('click', closeOverseerChooser);
+      root.addEventListener('cancel', event => { event.preventDefault(); closeOverseerChooser(); });
+      start.addEventListener('click', () => {
+        const chosen = provider.value;
+        if (!['claude', 'codex'].includes(chosen)) return;
+        closeOverseerChooser();
+        // A poll may have found the singleton while the chooser was open.
+        const row = (latest?.data?.sessions || []).find(entry => entry.role === 'overseer' && entry.source === 'herdr');
+        if (row) { select(row.id, true); return; }
+        controlAction(get('world'), 'overseer', 'overseer', 'Starting the ' + PROVIDERS[chosen] + ' overseer…', chosen);
+      });
+      actions.append(start, cancel); root.append(title, label, provider, confirmation, actions);
+      root.setAttribute('aria-labelledby', title.id); root.setAttribute('aria-describedby', confirmation.id);
+      document.body.append(root);
+      overseerChooser = { root, provider, describe };
+    }
+    setHelp(false);
+    overseerChooser.provider.value = 'claude'; overseerChooser.describe();
+    if (!overseerChooser.root.open) overseerChooser.root.showModal();
+    overseerChooser.provider.focus();
   }
   /* Observatory click: select the seated overseer, or (with control on) offer to start one. */
   function observatoryClicked() {
     const row = (latest?.data?.sessions || []).find(entry => entry.role === 'overseer' && entry.source === 'herdr');
     if (row) { select(row.id, true); return; }
     if (!CONTROL) { notice('No overseer. Start the observer with OBSERVER_CONTROL=1 to spawn one from here.', true); return; }
-    if (!window.confirm('Start an overseer agent in the observatory?\n\nThis opens a Herdr workspace named "overseer" in its own folder, starts Claude there with a brief on watching the other agents, and opens a terminal attached to it.')) return;
-    const button = get('world');
-    controlAction(button, 'overseer', 'overseer', 'Starting the overseer…');
+    openOverseerChooser();
   }
   const groupNodes = new Map(), rowNodes = new Map();
   function groupNode(key) {
