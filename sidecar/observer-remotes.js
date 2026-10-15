@@ -223,10 +223,13 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
       if (buffer.length > MAX_LINE) { buffer = ''; overflow = true; host.reason = 'Remote snapshot too large'; }
     });
     child.stderr?.on('data', chunk => { if (stderr.length < 8192) stderr += chunk; });
-    child.on('error', () => { host.reason = 'SSH unavailable'; });
+    child.on('error', () => {
+      if (host.child !== child) return;
+      host.health = 'unavailable'; host.targets.clear(); host.reason = 'SSH unavailable';
+    });
     child.on('close', code => {
       if (host.child !== child) return;
-      host.child = null;
+      host.child = null; host.health = 'unavailable'; host.targets.clear();
       host.reason = reasonFrom(stderr, code);
       schedule(host);
     });

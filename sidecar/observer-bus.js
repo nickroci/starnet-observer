@@ -46,8 +46,16 @@ function selectRemote(database, rows, at) {
     if (present.has('remote_outbox')) for (const row of database.query('SELECT local_id, state FROM remote_outbox WHERE local_id >= ?').all(oldest)) outbox.set(row.local_id, row.state);
     if (present.has('remote_imports')) for (const row of database.query('SELECT local_id FROM remote_imports WHERE local_id >= ?').all(oldest)) imports.add(row.local_id);
   }
-  let lastActivityAt = null;
-  const seen = value => { const ms = typeof value === 'string' ? Date.parse(value) : NaN; if (Number.isFinite(ms) && ms <= at + 60000) lastActivityAt = Math.max(lastActivityAt ?? 0, ms); return Number.isFinite(ms) ? ms : null; };
+  let lastActivityAt = null, expiresAt = Infinity;
+  const changesAt = value => { if (value > at) expiresAt = Math.min(expiresAt, value); };
+  const seen = value => {
+    const ms = typeof value === 'string' ? Date.parse(value) : NaN;
+    if (Number.isFinite(ms)) {
+      if (ms <= at + 60000) lastActivityAt = Math.max(lastActivityAt ?? 0, ms);
+      else changesAt(ms - 60000);
+    }
+    return Number.isFinite(ms) ? ms : null;
+  };
   for (const row of rows) {
     const out = outbox.has(row.id), peer = out ? peerOf(row.recipient) : imports.has(row.id) ? peerOf(row.sender) : null;
     if (!peer) continue;
@@ -65,6 +73,7 @@ function selectRemote(database, rows, at) {
     const last = seen(peer.last_seen), address = typeof peer.address === 'string' ? peer.address : '', who = peerOf(address);
     // llm-bus's own roster rule: a session that reported its end, or has been idle 24 hours, is not listed.
     if (!peer.ended && last !== null && at - last < PEER_IDLE_MS) {
+      changesAt(last + PEER_IDLE_MS);
       entry.agents++;
       if (who && who.machine === peer.machine_id && entry.list.length < MAX_PEER_AGENTS) entry.list.push({ id: who.peer, provider: who.provider, repo: who.repo, lastSeen: last });
     }
@@ -78,12 +87,15 @@ function selectRemote(database, rows, at) {
     let value; try { value = JSON.parse(payload); } catch (_) { continue; }
     if (!value || !ADDRESS.test(value.native_address) || !REMOTE_ID.test(value.repo_id) || key !== value.repo_id + '/' + value.native_address || value.ended) continue;
     const last = typeof value.last_seen === 'string' ? Date.parse(value.last_seen) : NaN;
-    if (Number.isFinite(last) && at - last < PEER_IDLE_MS) published.push({ address: value.native_address, repo: value.repo_id });
+    if (Number.isFinite(last) && at - last < PEER_IDLE_MS) {
+      changesAt(last + PEER_IDLE_MS);
+      published.push({ address: value.native_address, repo: value.repo_id });
+    }
   }
   const peers = [...machines.values()].map(entry => ({ machine: entry.machine, repos: [...entry.repos].sort().slice(0, 16), agents: entry.agents, lastSeen: entry.lastSeen,
     list: entry.list.sort((a, b) => a.repo.localeCompare(b.repo) || a.id.localeCompare(b.id)) }))
     .sort((a, b) => a.machine.localeCompare(b.machine));
-  return { relay: binding.relay, machine: binding.machine, peers, lastActivityAt, published };
+  return { view: { relay: binding.relay, machine: binding.machine, peers, lastActivityAt, published }, expiresAt };
 }
 
 // Mirrors llm-bus default_path(): LLM_BUS_DB (with ~), else the per-user data folder.
@@ -176,6 +188,7 @@ function messageIdentity(sourceFingerprint, row) {
 function makeBusReader({ file = defaultBusPath(), loadSqlite = loadBunSqlite, now, tempRoot = os.tmpdir(), copyFile = fs.copyFileSync } = {}) {
   if (typeof now !== 'function') throw new TypeError('Bus reader requires an injected now clock');
   let rows = [], remote = null, observedAt = null, health = 'unknown', reason = null, reusableFingerprint = null;
+  let remoteSelectedAt = null, remoteExpiresAt = Infinity;
   const query = makePrivateSnapshotQuery({ file, loadSqlite, tempRoot, copyFile });
   const selectRows = (database, sourceFingerprint) => {
     const result = [];
@@ -185,9 +198,13 @@ function makeBusReader({ file = defaultBusPath(), loadSqlite = loadBunSqlite, no
         acknowledgedAt: instant(row.acknowledged_at), wake: row.wake_status == null ? 'none' : WAKES.has(row.wake_status) ? row.wake_status : 'unknown' });
     }
     // Relay metadata is optional: a bus without (or with unreadable) remote tables still reads as a plain local bus.
-    let relayView = null;
-    try { relayView = selectRemote(database, result, now()); } catch (_) { relayView = null; for (const row of result) delete row.relay; }
-    return { rows: result, remote: relayView };
+    let relayView = null, expiresAt = Infinity;
+    const selectedAt = now();
+    try {
+      const selection = selectRemote(database, result, selectedAt);
+      relayView = selection?.view || null; expiresAt = selection?.expiresAt ?? Infinity;
+    } catch (_) { relayView = null; for (const row of result) delete row.relay; }
+    return { rows: result, remote: relayView, selectedAt, expiresAt };
   };
   // A failed read keeps the last good rows and their observedAt, so the browser sees them as stale.
   function read() {
@@ -195,13 +212,19 @@ function makeBusReader({ file = defaultBusPath(), loadSqlite = loadBunSqlite, no
     try {
       const current = fingerprint(file);
       if (current[0] === null) result = { reason: 'missing' };
-      else if (reusableFingerprint && current.join('|') === reusableFingerprint.join('|')) {
+      // A stable database does not freeze the relay's clock-dependent roster/publications.
+      else if (reusableFingerprint && current.join('|') === reusableFingerprint.join('|') &&
+        (!remote || now() >= remoteSelectedAt && now() < remoteExpiresAt)) {
         return { rows, remote, observedAt, health: 'available', reason: null };
       }
     } catch (_) { result = { reason: 'unreadable' }; }
     result = result || query(selectRows);
     if (result.rows) {
-      rows = result.rows; remote = result.remote || null; observedAt = now(); health = 'available'; reason = null;
+      const unchanged = reusableFingerprint && result.fingerprint.join('|') === reusableFingerprint.join('|');
+      rows = result.rows; remote = result.remote || null;
+      remoteSelectedAt = result.selectedAt; remoteExpiresAt = result.expiresAt;
+      if (!unchanged) observedAt = now();
+      health = 'available'; reason = null;
       reusableFingerprint = result.fingerprint;
     } else {
       health = 'unavailable'; reason = result.reason; reusableFingerprint = null;

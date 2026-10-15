@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const sqlite = require('bun:sqlite');
 const { makeBusReader, publicBus, relayBinding } = require('../sidecar/observer-bus.js');
+const { makeSqliteClient } = require('../sidecar/observer-sqlite-client.js');
 
 // The llm-bus native schema plus the remote tables exactly as llm_bus_remote_store.py creates them.
 const SCHEMA = `CREATE TABLE agents (address TEXT PRIMARY KEY, kind TEXT NOT NULL, project TEXT NOT NULL, scope TEXT NOT NULL,
@@ -27,6 +28,7 @@ assert.deepEqual(relayBinding('https://user:pw@llm-bus-relay.example.dev:8443/v1
 for (const bad of [null, 'https://relay.example.dev', '|friend-1', 'https://relay.example.dev|bad machine', 'ftp://relay.example.dev|m', 'not a url|m']) assert.equal(relayBinding(bad), null, String(bad));
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'observer-bus-relay-'));
+(async () => {
 try {
   const file = path.join(temp, 'bus.sqlite3'), scratch = path.join(temp, 'scratch'); fs.mkdirSync(scratch);
   const db = new sqlite.Database(file);
@@ -90,6 +92,59 @@ try {
   assert.deepEqual(state.remote.peers[0].repos, ['llm-bus'], 'public view never aliases reader state');
   assert.notEqual(state.rows[1].relay.state, 'mutated');
 
+  // SQLite metadata can be unchanged while the native relay's 24-hour selection
+  // rule changes. Cache reuse must stop at actual evidence boundaries, not a TTL.
+  const expiryFile = path.join(temp, 'expiry.sqlite3'), expiryDb = new sqlite.Database(expiryFile);
+  expiryDb.exec(SCHEMA + REMOTE);
+  expiryDb.query('INSERT INTO remote_binding VALUES (1, ?)').run('https://relay.example.dev|friend-1');
+  const lastSeen = NOW - 23 * 3600000;
+  expiryDb.query('INSERT INTO remote_peers VALUES (?, ?, ?)').run(FAR, 'llm-bus', JSON.stringify({
+    address: FAR, machine_id: 'whitenoise', repo_id: 'llm-bus', last_seen: iso(lastSeen), ended: false }));
+  expiryDb.query('INSERT INTO remote_peers VALUES (?, ?, ?)').run('future-box/docs/codex:x', 'docs', JSON.stringify({
+    address: 'future-box/docs/codex:x', machine_id: 'future-box', repo_id: 'docs', last_seen: iso(NOW + 120000), ended: true }));
+  expiryDb.query('INSERT INTO remote_publications VALUES (?, ?)').run('llm-bus/' + LOCAL, JSON.stringify({
+    native_address: LOCAL, repo_id: 'llm-bus', last_seen: iso(lastSeen), ended: false }));
+  expiryDb.close(true);
+  const unchangedBytes = fs.readFileSync(expiryFile);
+  let clock = NOW, expiryOpens = 0;
+  const expiring = makeBusReader({ file: expiryFile, tempRoot: scratch, now: () => clock,
+    loadSqlite: () => ({ Database: class extends sqlite.Database { constructor(...args) { super(...args); expiryOpens++; } } }) });
+  const roster = state => state.remote.peers.find(peer => peer.machine === 'whitenoise');
+  const publication = state => publicBus(state, [{ id: 'obs_local', provider: 'claude', sessionId: S1 }]).remote.onRelay;
+  const initial = expiring.read();
+  assert.equal(roster(initial).agents, 1); assert.equal(roster(initial).list.length, 1); assert.equal(publication(initial).length, 1);
+  clock = NOW + 59999;
+  expiring.read(); assert.equal(expiryOpens, 1, 'unchanged selection reuses its private snapshot before the next evidence boundary');
+  clock++;
+  const futureEligible = expiring.read();
+  assert.equal(futureEligible.remote.lastActivityAt, NOW + 120000, 'future activity becomes eligible at the existing skew boundary without DB writes');
+  assert.equal(expiryOpens, 2);
+  clock = NOW + 3600000 - 1;
+  assert.equal(roster(expiring.read()).agents, 1); assert.equal(expiryOpens, 2);
+  clock++;
+  const expired = expiring.read();
+  assert.equal(roster(expired).agents, 0, 'unchanged peers expire exactly 24 hours after last_seen');
+  assert.deepEqual(roster(expired).list, []); assert.deepEqual(publication(expired), [], 'unchanged publications no longer put this pane on the relay');
+  assert.equal(expired.observedAt, initial.observedAt, 'time-only relay selection does not renew immutable message observation time');
+  assert.equal(expiryOpens, 3);
+  clock = NOW + 2 * 3600000;
+  assert.deepEqual(expiring.read().remote, makeBusReader({ file: expiryFile, tempRoot: scratch, now: () => clock }).read().remote,
+    'cached reader and fresh native reader agree after the idle cutoff with no database writes');
+  assert.deepEqual(fs.readFileSync(expiryFile), unchangedBytes);
+
+  // Production's persistent SQLite worker receives the current clock on every read.
+  let workerClock = NOW;
+  const client = makeSqliteClient({ busFile: expiryFile, tempRoot: scratch, now: () => workerClock });
+  try {
+    const firstWorker = await client.readBus();
+    assert.equal(roster(firstWorker).agents, 1); assert.equal(publication(firstWorker).length, 1);
+    workerClock += 2 * 3600000;
+    const secondWorker = await client.readBus();
+    assert.equal(roster(secondWorker).agents, 0); assert.deepEqual(publication(secondWorker), []);
+    assert.equal(secondWorker.observedAt, firstWorker.observedAt);
+  } finally { await client.close(); }
+  assert.deepEqual(fs.readFileSync(expiryFile), unchangedBytes, 'native worker reads leave the source unchanged');
+
   // A malformed relay table never costs the local bus.
   const broken = new sqlite.Database(file); broken.exec('DROP TABLE remote_outbox; CREATE TABLE remote_outbox (nope TEXT)'); broken.close();
   const degraded = makeBusReader({ now: () => NOW, file, tempRoot: scratch }).read();
@@ -98,3 +153,5 @@ try {
   assert.deepEqual(fs.readdirSync(scratch), [], 'private copies removed');
   console.log('observer bus relay: host-only binding, per-message direction/peer/state, per-machine roster with llm-bus idle rule, no bodies or session ids, never aliased, malformed tables degrade to local OK');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+
+})().catch(error => { console.error(error); process.exitCode = 1; });

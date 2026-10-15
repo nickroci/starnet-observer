@@ -171,6 +171,26 @@ function fakeTimers() {
   hosts.close();
 }
 
+// A known stream termination is immediate loss of proof, even inside the freshness window.
+for (const event of ['close', 'error']) {
+  let clock = 1000;
+  const fake = fakeSpawn();
+  const hosts = makeRemoteHosts({ remotes: [{ id: 'vm', ssh: 'nick@host' }], spawn: fake.spawn, now: () => clock,
+    setTimer: () => ({}), clearTimer() {} });
+  const target = { pane_id: 'w1:p1', workspace_id: 'w1', terminal_id: 't1', agent: 'claude', agent_session: null, cwd: '/work' };
+  fake.children[0].stdout.emit('data', JSON.stringify({ health: 'available', sessions: [row()], targets: [target], bus: { health: 'available', messages: [] } }) + '\n');
+  assert(hosts.controlTarget('vm', 'w1:p1'));
+  clock++;
+  fake.children[0].emit(event, event === 'close' ? 255 : new Error('transport failure'));
+  const snap = hosts.snapshot();
+  assert.equal(snap.sources.vm.health, 'unavailable', event + ' immediately withdraws live host proof');
+  assert.equal(snap.sources.vm.observedAt, 1000);
+  assert.equal(snap.rows.length, 1); assert.equal(snap.rows[0].inventoryHealth, 'unavailable');
+  assert.equal(snap.buses.vm.health, 'unavailable');
+  assert.equal(hosts.controlTarget('vm', 'w1:p1'), null, event + ' revokes native targets before their former TTL expires');
+  hosts.close();
+}
+
 // ── Codex rows cross the hub intact: provider, identity (resolved or not), footer source, tool and usage survive.
 {
   const usage = { inputTokens: { value: 120, state: 'available' }, outputTokens: { value: 30, state: 'partial' }, cacheReadTokens: { value: 0, state: 'available' }, cacheWriteTokens: null };
