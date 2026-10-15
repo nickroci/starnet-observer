@@ -41,10 +41,25 @@ function makeTranscriptObserver(options = {}) {
   const roots = options.roots || { codex: path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions'),
     claude: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects') };
   const states = new Map(), detailStates = new Map(), indices = new Map(), pending = new Map();
+  const scans = new Map();
+  let discoveryGeneration = 0;
 
-  async function locate(provider, sessionId, fresh = false) {
-    let index = indices.get(provider);
-    if (fresh || !index || now() - index.at > 60000) {
+  function beginDiscovery() {
+    discoveryGeneration++;
+    indices.clear();
+  }
+
+  function scanIndex(provider, fresh) {
+    const previous = scans.get(provider), generation = discoveryGeneration;
+    if (previous && previous.generation === generation && (!fresh || previous.fresh)) return previous.promise;
+    const cached = indices.get(provider);
+    if (!previous && !fresh && cached && now() - cached.at <= 60000) return Promise.resolve(cached);
+    indices.delete(provider);
+    const scan = { generation, fresh, promise: null };
+    // A fresh proof must start after an older ordinary traversal, never share its captured directory entries.
+    scan.promise = (async () => {
+      if (previous) await previous.promise.catch(() => {});
+      if (generation !== discoveryGeneration) throw new Error('Transcript discovery superseded');
       const files = new Map(); let visited = 0;
       async function walk(directory, depth) {
         if (depth > 4) return;
@@ -60,8 +75,16 @@ function makeTranscriptObserver(options = {}) {
         }
       }
       await walk(roots[provider], 0);
-      index = { at: now(), files }; indices.set(provider, index);
-    }
+      if (generation !== discoveryGeneration) throw new Error('Transcript discovery superseded');
+      const index = { at: now(), files };
+      if (scans.get(provider) === scan) indices.set(provider, index);
+      return index;
+    })().finally(() => { if (scans.get(provider) === scan) scans.delete(provider); });
+    scans.set(provider, scan);
+    return scan.promise;
+  }
+  async function locate(provider, sessionId, fresh = false) {
+    const index = await scanIndex(provider, fresh);
     return index.files.get(sessionId) || null;
   }
 
@@ -398,7 +421,7 @@ function makeTranscriptObserver(options = {}) {
   function retain(ids) {
     for (const selected of [states, detailStates]) for (const id of selected.keys()) if (!ids.has(id)) selected.delete(id);
   }
-  return { resetHelperIndex: () => indices.clear(), helperMetadata: id => states.get(id)?.projection, read, inspect: (id, provider, sessionId) => read(id, provider, sessionId, true), retain,
+  return { beginDiscovery, helperMetadata: id => states.get(id)?.projection, read, inspect: (id, provider, sessionId) => read(id, provider, sessionId, true), retain,
     bindChild, claudeCandidates, inspectChild };
 }
 module.exports = { makeTranscriptObserver };

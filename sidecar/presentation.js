@@ -6,6 +6,7 @@ const TOOL_NAMES = new Set(['Bash', 'exec_command', 'shell', 'local_shell', 'wri
 // A server-side allowlist, not a text replacement: private labels never reach the recording page.
 // Opaque ownership IDs and live status/freshness remain unchanged; aliases are display identities only.
 function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LABELS) {
+  let closePromise = null;
   const projects = new Map(), repos = new Map(), terminals = new Map(), worktrees = new Map();
   const roomNames = new Set(labels.rooms.map(room => room.name.toLowerCase()));
   const repoNames = new Set(labels.rooms.flatMap(room => room.repos).map(name => name.toLowerCase()));
@@ -52,6 +53,7 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
       presence: row.presence, helperOverflow: row.helperOverflow, usage: row.usage,
       tool: { available: row.tool?.available === true }
     };
+    if (Number.isFinite(row.tool?.observedAt)) safe.tool.observedAt = row.tool.observedAt;
     if (row.tool?.last) safe.tool.last = { name: TOOL_NAMES.has(row.tool.last.name) ? row.tool.last.name : 'Tool', phase: row.tool.last.phase, outcome: row.tool.last.outcome, at: row.tool.last.at };
     if (helper) {
       safe.parentId = row.parentId; safe.lineageState = row.lineageState;
@@ -80,6 +82,7 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
       };
     },
     async inspect(id) { return unavailable(id, 'presentation-mode', now()); },
+    close() { return closePromise || (closePromise = Promise.resolve().then(() => observer.close?.())); },
     inspectMessage(id) { return { id, identity: null, health: 'unavailable', reason: 'presentation-mode', text: null }; }
   };
 }

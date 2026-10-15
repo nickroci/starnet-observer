@@ -28,6 +28,17 @@ const message = text => ({ type: 'response_item', payload: { type: 'message', ro
     let edges = [{ parent_thread_id: ID, child_thread_id: CHILD, status: 'open' }];
     const helpers = makeHelperObserver({ now, transcripts, readEdges: () => ({ rows: edges }) });
     const before = await transcripts.inspect(parent.id, 'codex', ID);
+    const prepared = await helpers.prepareChildren([parent]);
+    assert.equal(prepared.rows.length, 1);
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, false, 'preparation does not publish bindings');
+    prepared.commitBindings(new Set());
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, false, 'rejected helper binding never becomes inspectable');
+    prepared.commitBindings(new Set([prepared.rows[0].id]));
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, true);
+    const clearing = await helpers.prepareChildren([]);
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, true, 'another preparation leaves the live map intact');
+    clearing.commitBindings(new Set());
+    assert.equal((await helpers.inspect(prepared.rows[0])).available, false, 'publication replaces bindings atomically');
     let result = await helpers.children([parent]);
     assert.equal(result.rows.length, 1);
     const child = result.rows[0];
@@ -242,6 +253,7 @@ const message = text => ({ type: 'response_item', payload: { type: 'message', ro
     await fs.writeFile(path.join(claude, OTHER + '.jsonl'), spawn(OTHER, 'scout').concat(spawn(OTHER, 'scout')).map(line).join(''));
     await fs.writeFile(path.join(otherDirectory, 'agent-scout.jsonl'), line({ ...record, sessionId: OTHER, message: { id: 'distinct', usage: { input_tokens: 11 }, content: 'OTHER' } }));
     const otherParent = { ...claudeParent, id: 'other-parent', sessionId: OTHER, inspectionIdentity: 'claude:' + OTHER };
+    transcripts.beginDiscovery();
     result = await helpers.children([claudeParent, otherParent]);
     const scouts = result.rows.filter(row => row.sessionId === 'scout');
     assert.equal(scouts.length, 2); assert.notEqual(scouts[0].id, scouts[1].id);
@@ -294,6 +306,7 @@ const message = text => ({ type: 'response_item', payload: { type: 'message', ro
       edges.push({ parent_thread_id: ID, child_thread_id: id, status: 'open' });
       await fs.writeFile(path.join(codex, id + '.jsonl'), line(meta(id, ID)));
     }
+    transcripts.beginDiscovery();
     result = await helpers.children([parent]);
     assert.equal(result.rows.length, 64); assert.equal(result.rows.filter(row => row.helperSlot !== null).length, 8);
     assert.equal(result.overflow.get(parent.id), 62);
@@ -304,6 +317,7 @@ const message = text => ({ type: 'response_item', payload: { type: 'message', ro
       await fs.writeFile(path.join(codex, id + '.jsonl'), line(meta(id, previous)));
       previous = id;
     }
+    transcripts.beginDiscovery();
     result = await helpers.children([parent]);
     assert.equal(result.rows.length, 3); assert(result.rows.every(row => row.status === 'unknown' && row.lineageState === 'closed'));
     // A live pane at depth three must inherit grouping without restarting at depth zero.
@@ -332,6 +346,7 @@ const message = text => ({ type: 'response_item', payload: { type: 'message', ro
       await fs.writeFile(path.join(codex, id + '.jsonl'), line(meta(id, previous)));
       previous = id;
     }
+    transcripts.beginDiscovery();
     for (const depth of [4, 5]) {
       const deepId = edges[depth - 1].child_thread_id;
       const deepPane = { ...cutoffPane, id: 'deep-pane', sessionId: deepId, inspectionIdentity: 'codex:' + deepId };
