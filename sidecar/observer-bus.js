@@ -134,11 +134,10 @@ function makeBusReader({ file = defaultBusPath(), loadSqlite = loadBunSqlite, no
     return { rows, observedAt, health, reason };
   }
 
-  function inspect(id, expectedIdentity) {
-    const base = { id, identity: null, health: 'unavailable', reason: null, asOf: new Date(now()).toISOString(),
-      text: null, truncated: false, window: { maxTextChars: MAX_TEXT_CHARS } };
-    if (!Number.isSafeInteger(id) || id < 1) return { ...base, reason: 'invalid-message' };
-    if (expectedIdentity !== undefined && (typeof expectedIdentity !== 'string' || !MESSAGE_IDENTITY.test(expectedIdentity))) return { ...base, reason: 'invalid-identity' };
+  // Private raw results are confined to the worker transport and the shared sanitizer below.
+  function inspectRaw(id, expectedIdentity) {
+    if (!Number.isSafeInteger(id) || id < 1) return { id, reason: 'invalid-message' };
+    if (expectedIdentity !== undefined && (typeof expectedIdentity !== 'string' || !MESSAGE_IDENTITY.test(expectedIdentity))) return { id, reason: 'invalid-identity' };
     const result = query((database, sourceFingerprint) => {
       // Bound transfer into JavaScript; scrub before the smaller display cap. A cut quoted value stays redacted.
       const row = database.query('SELECT id, sender, recipient, sent_at, substr(body, 1, ?) AS body FROM messages WHERE id = ?').get(MAX_RAW_CHARS + 1, id);
@@ -147,13 +146,24 @@ function makeBusReader({ file = defaultBusPath(), loadSqlite = loadBunSqlite, no
       const identity = messageIdentity(sourceFingerprint, row);
       if (expectedIdentity !== undefined && identity !== expectedIdentity) return { reason: 'identity-mismatch' };
       if (typeof row.body !== 'string') return { reason: 'unreadable' };
-      const safe = redactText(row.body);
-      return { identity, text: safe.slice(0, MAX_TEXT_CHARS), truncated: row.body.length > MAX_RAW_CHARS || safe.length > MAX_TEXT_CHARS };
+      return { identity, body: row.body.slice(0, MAX_RAW_CHARS + 1) };
     });
-    if (result.reason) { reusableFingerprint = null; return { ...base, reason: result.reason }; }
-    return { ...base, health: 'available', identity: result.identity, text: result.text, truncated: result.truncated };
+    if (result.reason) reusableFingerprint = null;
+    return { id, ...(result.reason ? { reason: result.reason } : { identity: result.identity, body: result.body }) };
   }
-  return { read, inspect };
+  return { read, inspectRaw, inspect: (id, expectedIdentity) => sanitizeMessageInspection(inspectRaw(id, expectedIdentity), now()) };
+}
+
+// Both synchronous fixtures and the parent worker adapter use the main process's live known-value redaction.
+function sanitizeMessageInspection(raw, now) {
+  const base = { id: raw.id, identity: null, health: 'unavailable', reason: null, asOf: new Date(now).toISOString(),
+    text: null, truncated: false, window: { maxTextChars: MAX_TEXT_CHARS } };
+  if (raw.reason) return { ...base, reason: raw.reason };
+  if (typeof raw.body !== 'string' || raw.body.length > MAX_RAW_CHARS + 1 || !MESSAGE_IDENTITY.test(raw.identity || '')) return { ...base, reason: 'unreadable' };
+  const safe = redactText(raw.body);
+  return { ...base, health: 'available', identity: raw.identity, text: safe.slice(0, MAX_TEXT_CHARS),
+    truncated: raw.body.length > MAX_RAW_CHARS || safe.length > MAX_TEXT_CHARS };
+
 }
 
 // Exact identity join: one pane with this provider:session gets its observer id; two or more stay ambiguous.
@@ -169,4 +179,4 @@ function publicBus(state, sessions) {
     messages: state.rows.map(row => ({ id: row.id, ...(row.identity === undefined ? {} : { identity: row.identity }), from: endpoint(row.sender), to: endpoint(row.recipient),
       sentAt: row.sentAt, acknowledgedAt: row.acknowledgedAt, wake: row.wake })) };
 }
-module.exports = { makeBusReader, publicBus, defaultBusPath, WINDOW, makePrivateSnapshotQuery };
+module.exports = { makeBusReader, publicBus, defaultBusPath, WINDOW, makePrivateSnapshotQuery, sanitizeMessageInspection };

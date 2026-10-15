@@ -3,7 +3,9 @@ const assert = require('node:assert/strict');
 const { makePresentationObserver } = require('../sidecar/presentation.js');
 const { createServer } = require('../server.js');
 (async () => {
-  let inspected = 0;
+  let inspected = 0, closes = 0;
+  let releaseClose;
+  const closeGate = new Promise(resolve => { releaseClose = resolve; });
   const secret = 'PRIVATE-COMPANY-CANARY';
   const parent = { id: 'obs_' + 'a'.repeat(24), provider: 'codex', source: 'herdr', status: 'working', projectId: 'prj_1', project: secret,
     repoId: 'repo_1', repo: secret, worktree: secret, paneId: secret, title: secret, sessionId: secret, inspectionIdentity: secret,
@@ -15,7 +17,7 @@ const { createServer } = require('../server.js');
     health: 'available', observedAt: 1000, error: null, sources: { herdr: { health: 'available', observedAt: 1000, reason: secret }, desktop: { health: 'unavailable', observedAt: null, reason: secret } },
     bus: { health: 'available', reason: null, observedAt: 1000, window: 100, messages: [{ id: 1, identity: secret, from: parent.id, to: helper.id, sentAt: '2026-01-01T00:00:00.000Z', acknowledgedAt: null, wake: 'requested', body: secret }] } };
   const original = structuredClone(inventory);
-  const presentation = makePresentationObserver({ get: async () => inventory, inspect: () => { inspected++; }, inspectMessage: () => { inspected++; } }, () => 1000);
+  const presentation = makePresentationObserver({ close: async () => { closes++; await closeGate; }, get: async () => inventory, inspect: () => { inspected++; }, inspectMessage: () => { inspected++; } }, () => 1000);
   const first = await presentation.get();
   assert.equal(JSON.stringify(first).includes(secret), false, 'mask names, task text, nicknames, identities, diagnostics, bodies, and unknown fields');
   assert.deepEqual(inventory, original, 'masking never mutates live identities or source snapshots');
@@ -57,6 +59,16 @@ const { createServer } = require('../server.js');
     assert.equal(session.reason, 'presentation-mode'); assert.deepEqual(session.turns, []);
     assert.equal(mail.reason, 'presentation-mode'); assert.equal(mail.text, null);
     assert.equal(inspected, 0, 'inspection never delegates to private transcript/message readers');
-  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+  } finally {
+    server.closeAllConnections();
+    let closed = false;
+    const closing = new Promise(resolve => server.close(() => { closed = true; resolve(); }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed, false, 'HTTP close waits for forwarded observer teardown');
+    releaseClose(); await closing;
+    const firstClose = presentation.close(); assert.equal(presentation.close(), firstClose);
+    await firstClose; assert.equal(closes, 1, 'presentation close delegates exactly once');
+    await new Promise(resolve => server.close(resolve));
+  }
   console.log('presentation: stable fictional labels, real status/topology/totals/mail, no private fields, source immutability, and blocked HTTP inspectors passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

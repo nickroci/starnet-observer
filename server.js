@@ -42,7 +42,7 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
         const mail = url.pathname.match(/^\/api\/observer\/messages\/([1-9][0-9]{0,15})\/inspect$/);
         if (mail && Number.isSafeInteger(Number(mail[1]))) {
           if (identities.length > 1 || identities.length === 1 && !/^mail_[a-f0-9]{64}$/.test(identities[0])) return json(400, { id: Number(mail[1]), identity: null, health: 'unavailable', reason: 'invalid-identity', text: null });
-          const data = observer.inspectMessage(Number(mail[1]), identities[0]);
+          const data = await observer.inspectMessage(Number(mail[1]), identities[0]);
           return json(data.reason === 'missing-message' ? 404 : 200, data);
         }
         return json(404, { error: 'Unknown observer route' });
@@ -67,6 +67,18 @@ function createServer({ observer = makeObserver({ now: Date.now }), token = cryp
       json(500, { error: 'Observer request failed' });
     }
   });
+  const closeHttp = server.close.bind(server);
+  let closing = null;
+  server.close = function close(callback) {
+    if (!closing) {
+      closing = Promise.all([
+        new Promise((resolve, reject) => closeHttp(error => error && error.code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolve())),
+        Promise.resolve().then(() => observer.close?.())
+      ]).then(() => {});
+    }
+    if (callback) closing.then(() => callback(), callback);
+    return server;
+  };
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
   return server;

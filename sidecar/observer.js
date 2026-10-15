@@ -7,7 +7,8 @@ const { makeDesktopObserver } = require('./observer-desktop.js');
 const { makeProjectResolver } = require('./observer-projects.js');
 const { makeTranscriptObserver } = require('./observer-transcripts.js');
 const { makeHelperObserver } = require('./observer-helpers.js');
-const { makeBusReader, publicBus } = require('./observer-bus.js');
+const { publicBus } = require('./observer-bus.js');
+const { makeSqliteClient } = require('./observer-sqlite-client.js');
 const { unavailable, redactText } = require('./observer-inspector.js');
 const { makeIdentityResolver } = require('./observer-identity.js');
 
@@ -88,8 +89,9 @@ function makeObserver(options = {}) {
   }));
   const projects = options.projects || makeProjectResolver({ execute, now });
   const transcripts = options.transcripts || makeTranscriptObserver({ now });
-  const helpers = options.helpers || makeHelperObserver({ transcripts, now });
-  const bus = options.bus || makeBusReader({ now });
+  const sqlite = !options.helpers || !options.bus ? makeSqliteClient({ now }) : null;
+  const helpers = options.helpers || makeHelperObserver({ transcripts, now, readEdges: sqlite.readHelperEdges });
+  const bus = options.bus || { read: sqlite.readBus, inspect: sqlite.inspectMessage };
   const desktop = options.desktop || makeDesktopObserver({ execute, now });
   const endpoint = options.endpoint || process.env.HERDR_SOCKET_PATH || path.join(os.homedir(), '.config/herdr/herdr.sock');
   const identities = options.identities || makeIdentityResolver({ execute, now, endpoint, readConfiguration: options.readIdentityConfiguration, readProcessBirth: options.readProcessBirth });
@@ -170,7 +172,7 @@ function makeObserver(options = {}) {
     aggregate = aggregateRows(lastGood, now());
     transcripts.retain(new Set(lastGood.filter(row => row.source !== 'desktop').map(row => row.id)));
     // Bus health is independent of Herdr: its own read, observedAt and stale retention.
-    try { mail = bus.read(); } catch (_) { mail = { rows: mail ? mail.rows : [], observedAt: mail ? mail.observedAt : null, health: 'unavailable', reason: 'unreadable' }; }
+    try { mail = await bus.read(); } catch (_) { mail = { rows: mail ? mail.rows : [], observedAt: mail ? mail.observedAt : null, health: 'unavailable', reason: 'unreadable' }; }
     return snapshot();
   }
   function snapshot() {
@@ -250,6 +252,11 @@ function makeObserver(options = {}) {
     return { ...projection, id, inspectionIdentity, asOf: new Date(now()).toISOString(),
       provenance: { kind: 'transcript', coverage: 'bounded-transcript', identity: 'session' } };
   }
-  return { get, inspect, inspectMessage: (id, expectedIdentity) => bus.inspect(id, expectedIdentity) };
+  let closePromise = null;
+  function close() {
+    if (!closePromise) closePromise = Promise.all([sqlite?.close(), options.bus?.close?.(), options.helpers?.close?.()]).then(() => {});
+    return closePromise;
+  }
+  return { get, inspect, inspectMessage: (id, expectedIdentity) => bus.inspect(id, expectedIdentity), close };
 }
 module.exports = { makeObserver };

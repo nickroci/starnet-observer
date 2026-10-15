@@ -28,17 +28,21 @@ function ownStatus(task, at) {
   return ['completed', 'failed', 'killed', 'stopped'].includes(task?.status) ? 'done' : 'unknown';
 }
 
+// Shared bounded selector: production runs this in the SQLite worker; direct fixtures can inject SQLite.
+function readHelperEdges(options = {}) {
+  return makePrivateSnapshotQuery({
+    file: options.file || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'state_5.sqlite'),
+    loadSqlite: options.loadSqlite, tempRoot: options.tempRoot, copyFile: options.copyFile
+  })(database => ({ rows: database.query(
+    'SELECT parent_thread_id, child_thread_id, status FROM thread_spawn_edges LIMIT ' + (MAX_EDGES + 1)).all() }));
+}
+
 // Persisted lineage proves a relationship, never a running task.
 function makeHelperObserver(options = {}) {
   const { transcripts, now } = options;
   if (typeof now !== 'function') throw new TypeError('Helper observer requires an injected now clock');
   if (!transcripts) throw new TypeError('Helper observer requires transcripts');
-  const query = makePrivateSnapshotQuery({
-    file: options.file || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'state_5.sqlite'),
-    loadSqlite: options.loadSqlite, tempRoot: options.tempRoot, copyFile: options.copyFile
-  });
-  const readEdges = options.readEdges || (() => query(database => ({ rows: database.query(
-    'SELECT parent_thread_id, child_thread_id, status FROM thread_spawn_edges LIMIT ' + (MAX_EDGES + 1)).all() })));
+  const readEdges = options.readEdges || (() => readHelperEdges(options));
   let bindings = new Map();
 
   async function children(parents) {
@@ -221,4 +225,4 @@ function makeHelperObserver(options = {}) {
   }
   return { children, inspect };
 }
-module.exports = { makeHelperObserver };
+module.exports = { makeHelperObserver, readHelperEdges };

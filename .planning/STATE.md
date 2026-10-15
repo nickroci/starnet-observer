@@ -57,3 +57,9 @@ Last session: 2026-10-15
 Stopped at: Bun migration implementation and review complete (PR #6)
 Resume file: None
 Next action: Continue registered work or discuss the next request.
+
+## Registered Work
+
+| # | Description | Status | Directory |
+| --- | --- | --- | --- |
+| 261015-hqt | Earlier rooms and bounded background detail loading | In progress: Task 2; Task 1 reviewed | .planning/quick/261015-hqt-earlier-rooms-and-bounded-background-det |
