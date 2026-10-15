@@ -47,6 +47,11 @@
   }
   // Couriers fly between Herdr panes, so a fresh Desktop source never launches them over a stale Herdr floor.
   const mailStale = state => isStale(state) || sourceStale('herdr', state);
+  function remoteMailStale(host, state = latest) {
+    const source = state?.data?.sources?.hosts?.[host], bus = state?.data?.hostBus?.[host];
+    return isStale(state) || source?.health !== 'available' || !fresh(source.observedAt) ||
+      bus?.health !== 'available' || !fresh(bus.observedAt);
+  }
   const isHelper = row => row.source === 'helper' || Object.hasOwn(row, 'parentId');
   /* Repository highlight: one exact repository id, never a label or the parent-folder project. It selects, never
      filters or moves the camera, and asks for nothing: the list and the floor just repaint. */
@@ -81,19 +86,22 @@
   /* One courier per host's bus, stepped by the view's frame: this machine's, plus one for each remote ship, whose
      flights stay inside that ship (its own mailroom and crew). A transition into stale or reduced grounds flights at
      once; the reset makes the next live snapshot rebase instead of replaying what was missed. */
-  const remoteCouriers = new Map(), remotePending = new Map();
+  const remoteCouriers = new Map(), remotePending = new Map(), remoteGrounded = new Set();
   const courierFor = host => { if (!remoteCouriers.has(host)) remoteCouriers.set(host, ObserverMail.createCourier({ colors: pack.scene?.colors })); return remoteCouriers.get(host); };
   const resetCouriers = () => { courier.reset(); for (const value of remoteCouriers.values()) value.reset(); };
   function mailFrame(now) {
     const ground = mailStale(latest) || reducedMotion();
-    if (ground && !grounded) resetCouriers();
+    if (ground && !grounded) courier.reset();
     grounded = ground;
     courier.step(now);
     const frame = courier.frame(now, { reduced: ground, pending: pendingSpots, pads: scene ? scene.mail.pads : [] });
     for (const [host, remote] of remoteCouriers) {
       const own = scene && ObserverScene.mailOf(scene, host); if (!own) continue;
+      const ownGround = remoteMailStale(host) || reducedMotion();
+      if (ownGround && !remoteGrounded.has(host)) remote.reset();
+      if (ownGround) remoteGrounded.add(host); else remoteGrounded.delete(host);
       remote.step(now);
-      const extra = remote.frame(now, { reduced: ground, pending: remotePending.get(host) || [], pads: own.pads });
+      const extra = remote.frame(now, { reduced: ownGround, pending: remotePending.get(host) || [], pads: own.pads });
       frame.drones = [...(frame.drones || []), ...(extra.drones || [])]; frame.envelopes = [...(frame.envelopes || []), ...(extra.envelopes || [])];
     }
     return frame;
@@ -838,7 +846,9 @@
     // A sidecar that publishes no aggregate gets no totals: nothing is inferred from the roster.
     nodes.list.hidden = !aggregate; nodes.disclosure.hidden = !aggregate;
     if (!aggregate) return;
-    const live = !sourceStale('herdr', state), agents = aggregate.agents || {}, coverage = aggregate.coverage || {};
+    const hosts = state.data?.sources?.hosts;
+    const live = hosts ? !isStale(state) && Object.values(hosts).some(source => source.health === 'available' && fresh(source.observedAt)) : !sourceStale('herdr', state);
+    const agents = aggregate.agents || {}, coverage = aggregate.coverage || {};
     const usageLive = live && (!Number.isFinite(aggregate.usageObservedAt) || fresh(aggregate.usageObservedAt));
     if (nodes.list.dataset.freshness !== (live ? 'live' : 'stale')) nodes.list.dataset.freshness = live ? 'live' : 'stale';
     nodes.disclosure.dataset.freshness = usageLive ? 'live' : 'stale';
@@ -974,10 +984,10 @@
     if (data && (data !== ingested || parked !== ingestedStale)) { ingested = data; ingestedStale = parked; courier.update(bus, { now: clock(), deck: page, reduced: reducedMotion(), live: !parked, route: message => ObserverScene.route(scene, layout, message, floorRows) }); }
     pendingSpots = ObserverScene.pending(scene, layout, messages);
     // Each remote host's own mail: its courier and pending envelopes stay on its own ship.
-    for (const id of [...remoteCouriers.keys()]) if (!hostBus[id]) { remoteCouriers.delete(id); remotePending.delete(id); }
+    for (const id of [...remoteCouriers.keys()]) if (!hostBus[id]) { remoteCouriers.delete(id); remotePending.delete(id); remoteGrounded.delete(id); }
     for (const [id, value] of Object.entries(hostBus)) {
       const list = Array.isArray(value.messages) ? value.messages : [];
-      if (data !== ingestedHosts) courierFor(id).update(value, { now: clock(), deck: page, reduced: reducedMotion(), live: !isStale(state) && value.health === 'available', route: message => ObserverScene.route(scene, layout, message, floorRows, id) });
+      if (data !== ingestedHosts) courierFor(id).update(value, { now: clock(), deck: page, reduced: reducedMotion(), live: !remoteMailStale(id, state), route: message => ObserverScene.route(scene, layout, message, floorRows, id) });
       remotePending.set(id, ObserverScene.pending(scene, layout, list, id));
     }
     ingestedHosts = data;

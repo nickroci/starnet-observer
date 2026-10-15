@@ -89,6 +89,21 @@ function fakeTimers() {
   let snap = hosts.snapshot();
   assert.equal(snap.sources.vm.health, 'available'); assert.equal(snap.rows.length, 1); assert.equal(snap.sources.vm.agents, 1);
   assert.equal('bus' in snap, false, 'the remote bus is dropped at the hub');
+  const tooLarge = JSON.stringify({ health: 'available', sessions: [row({ title: 'Oversized replacement' })], padding: 'x'.repeat(MAX_LINE) });
+  const lastReceipt = snap.sources.vm.observedAt;
+  clock++;
+  children[0].stdout.emit('data', tooLarge + '\n');
+  assert.equal(hosts.snapshot().rows[0].title, 'Remote task', 'a complete oversized valid JSON line is rejected before parsing');
+  assert.equal(hosts.snapshot().sources.vm.observedAt, lastReceipt, 'rejected complete lines never renew observation proof');
+  clock++;
+  children[0].stdout.emit('data', tooLarge.slice(0, MAX_LINE - 10));
+  children[0].stdout.emit('data', tooLarge.slice(MAX_LINE - 10) + '\n');
+  assert.equal(hosts.snapshot().rows[0].title, 'Remote task', 'a line completed across chunks obeys the same cap');
+  assert.equal(hosts.snapshot().sources.vm.observedAt, lastReceipt);
+  clock++;
+  children[0].stdout.emit('data', tooLarge + '\n' + line + '\n');
+  assert.equal(hosts.snapshot().rows[0].title, 'Remote task');
+  assert.equal(hosts.snapshot().sources.vm.observedAt, clock, 'the next bounded snapshot recovers even in the same stdout chunk');
   children[0].stdout.emit('data', 'not json\n');
   assert.equal(hosts.snapshot().rows.length, 1, 'garbage keeps the last good snapshot');
   clock += 10001;
@@ -141,6 +156,14 @@ function fakeTimers() {
   snap = hosts.snapshot();
   assert.equal(snap.rows.length, 1, 'unavailable empty envelope retains the cached crew');
   assert.equal(snap.sources.vm.health, 'unavailable');
+  assert.equal(hosts.controlTarget('vm', 'w1:p1'), null);
+  emit({ health: 'available', sources: { herdr: { health: 'unavailable', observedAt: 7000 }, desktop: { health: 'available', observedAt: clock } },
+    sessions: [row({ inventoryHealth: 'unavailable' })], targets: [proof], bus: { health: 'available', observedAt: clock, messages: [] } });
+  snap = hosts.snapshot();
+  assert.equal(snap.sources.vm.health, 'unavailable', 'remote Desktop or bus success cannot renew failed Herdr inventory');
+  assert.equal(snap.sources.vm.observedAt, 7000);
+  assert.equal(snap.rows[0].inventoryHealth, 'unavailable');
+  assert.equal(snap.buses.vm.health, 'unavailable', 'remote courier transport stays down over an unavailable Herdr floor');
   assert.equal(hosts.controlTarget('vm', 'w1:p1'), null);
   emit({ health: 'available', sessions: [], targets: [proof] });
   assert.equal(hosts.snapshot().rows.length, 0, 'a healthy empty inventory authoritatively withdraws cached rows');

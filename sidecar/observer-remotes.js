@@ -88,7 +88,9 @@ function sanitizeRow(host, row, receivedAt) {
 }
 function sanitizeSnapshot(host, value, receivedAt) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.sessions)) throw new Error('invalid snapshot');
-  const health = oneOf(value.health, HEALTH, 'unavailable');
+  // This host exports Herdr/helper rows. Desktop or bus success cannot prove that inventory.
+  const inventoryHealth = Object.hasOwn(value, 'sources') ? value.sources?.herdr?.health : value.health;
+  const health = value.health === 'available' ? oneOf(inventoryHealth, HEALTH, 'unavailable') : 'unavailable';
   const rows = [];
   for (const row of value.sessions.slice(0, MAX_ROWS)) { const safe = sanitizeRow(host, row, receivedAt); if (safe) rows.push(safe); }
   // A helper whose parent did not survive sanitising would be an orphan: drop it rather than guess a parent.
@@ -202,6 +204,7 @@ function makeRemoteHosts({ remotes = [], spawn = childProcess.spawn, now = Date.
       while ((index = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, index); buffer = buffer.slice(index + 1);
         if (overflow) { overflow = false; continue; }   // the tail of an oversized line
+        if (line.length > MAX_LINE) { host.reason = 'Remote snapshot too large'; continue; }
         if (!line.trim()) continue;
         try {
           const receivedAt = now();

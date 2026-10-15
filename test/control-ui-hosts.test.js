@@ -9,7 +9,7 @@ const ObserverInspector = require('../frontend/app/observer-inspector.js');
 const ObserverMailInspector = require('../frontend/app/observer-mail-inspector.js');
 const ObserverScene = require('../frontend/app/observer-scene.js');
 const ThemePack = require('../frontend/app/theme-pack.js');
-let document, viewOptions;
+let document, viewOptions, viewScene, frameOptions;
 function element() {
   return { textContent: '', children: [], hidden: false, dataset: {}, value: '', scrollTop: 0, handlers: {}, attributes: {}, style: { setProperty() {} }, parent: null, disabled: false,
     classList: { toggle() {}, add() {} },
@@ -29,7 +29,7 @@ function element() {
   elements.filters = element(); elements.filters.children = filters;
   const posts = [], confirms = [], stored = new Map(); const lastPost = () => JSON.stringify(posts.at(-1)); let confirmAnswer = false, listener;
   const context = { console, Date, Set, Map, document, setTimeout: () => 1, clearTimeout() {}, ObserverModel, ObserverMail, ObserverInspector, ObserverMailInspector, ObserverScene, ThemePack, encodeURIComponent,
-    ObserverView: { create: options => (viewOptions = options, { setFx() {}, fx() { return true; }, update() {}, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate() {} }) },
+    ObserverView: { create: options => (viewOptions = options, { setFx() {}, fx() { return true; }, update(scene, options) { viewScene = scene; frameOptions = options; }, focus() {}, overview() {}, zoomBy() {}, start() {}, stop() {}, invalidate() {} }) },
     window: { __OBSERVER_CONTROL__: true, __OBSERVER_THEME__: {}, localStorage: { getItem(key) { return stored.has(key) ? stored.get(key) : key === 'observer.host' ? null : 'on'; }, setItem(key, value) { stored.set(key, String(value)); }, removeItem(key) { stored.delete(key); } }, addEventListener() {}, confirm: message => { confirms.push(message); return confirmAnswer; } },
     SPRITES: { init: async () => ({}) },
     Harness: { api: { get: () => new Promise(() => {}), post: async (path, body) => { posts.push([path, body]); return { ok: true, paneId: 'w1:pX', name: 'spawned' }; } } },
@@ -115,6 +115,59 @@ function element() {
   assert.equal(elements['host-spawn'].hidden, false);
   elements['host-spawn'].children[1].handlers.click(); await tick();
   assert.equal(lastPost(), JSON.stringify(['/api/control/spawn-host', { host: 'local' }]), 'local plus never sends a null host');
+  // Each ship's mail and aggregate evidence remains live independently of local Herdr.
+  const at = Date.now(), remoteId = 'herdr-dev-2';
+  let mailClock = at;
+  context.performance = { now: () => mailClock };
+  const frameAt = now => { mailClock = now; return frameOptions.mailFrame(now); };
+  const localCrew = { ...sessions[0], observedAt: at, inventoryHealth: 'available' };
+  const remoteCrew = { ...blocked, observedAt: at, inventoryHealth: 'available' };
+  const aggregate = { agents: { observed: 2, verifiedSessions: 2, presenceOnly: 0, statuses: { working: 1, blocked: 1 }, stale: 0 },
+    usage: { inputTokens: { value: 5, state: 'available' } }, usageObservedAt: at, coverage: {} };
+  const busFor = (row, top) => ({ health: 'available', observedAt: at, window: 100, messages: Array.from({ length: top }, (_, i) =>
+    ({ id: 100 + i, from: row.id, to: 'external', acknowledgedAt: null, wake: 'none' })) });
+  const inventory = (top, localLive = true, remoteLive = true) => ({ sessions: [localLive ? localCrew : { ...localCrew, inventoryHealth: 'unavailable' }, remoteCrew],
+    health: 'available', observedAt: at, aggregate, sources: { herdr: { health: localLive ? 'available' : 'unavailable', observedAt: localLive ? at : null },
+      hosts: { local: { health: localLive ? 'available' : 'unavailable', observedAt: localLive ? at : null },
+        [remoteId]: { health: remoteLive ? 'available' : 'unavailable', observedAt: at, agents: 1 } } },
+    bus: busFor(localCrew, top), hostBus: { [remoteId]: busFor(remoteCrew, top) } });
+  listener({ data: inventory(1) }); frameAt(at);
+  listener({ data: inventory(2) });
+  const inside = (point, hull) => point.x >= hull.x && point.x <= hull.x + hull.w && point.y >= hull.y && point.y <= hull.y + hull.h;
+  const flyingOn = (frame, id) => frame.drones.filter(drone => !drone.parked && inside(drone.point, viewScene.ships.find(ship => ship.id === id).rect));
+  let frame = frameAt(at + 100);
+  assert(flyingOn(frame, null).length && flyingOn(frame, remoteId).length, 'fixture starts independent local and remote flights');
+  listener({ data: inventory(2, false) });
+  frame = frameAt(at + 200);
+  assert.equal(flyingOn(frame, null).length, 0, 'unavailable local Herdr still grounds local mail');
+  assert(flyingOn(frame, remoteId).length, 'local Herdr failure cannot hide or reset healthy remote flights');
+  assert.equal(elements['station-totals'].dataset.freshness, 'live', 'fresh host evidence keeps combined crew totals live');
+  assert.equal(elements['station-stats'].dataset.freshness, 'live', 'fresh remote token contributor remains live');
+  const expiredUsage = inventory(2, false);
+  expiredUsage.aggregate = { ...aggregate, usageObservedAt: at - 7000 };
+  listener({ data: expiredUsage });
+  assert.equal(elements['station-totals'].dataset.freshness, 'live');
+  assert.equal(elements['station-stats'].dataset.freshness, 'stale', 'aggregate contributors still expire on their own usage clock');
+  const quietBus = inventory(2, false);
+  quietBus.hostBus[remoteId].observedAt = at - 7000;
+  listener({ data: quietBus });
+  assert.equal(flyingOn(frameAt(at + 300), remoteId).length, 0, 'remote bus proof expiry grounds only that host');
+  listener({ data: inventory(3, false) }); frameAt(at + 400);
+  listener({ data: inventory(4, false) });
+  assert(flyingOn(frameAt(at + 500), remoteId).length, 'healthy remote recovers after its own rebase');
+  const history = inventory(4, false);
+  const oldHelper = { ...remoteCrew, id: 'obs_' + 'e'.repeat(24), source: 'helper', parentId: remoteCrew.id,
+    inventoryHealth: 'unavailable', observedAt: at - 7000 };
+  history.sessions.push(oldHelper);
+  history.hostBus[remoteId].messages.push({ id: 1, from: oldHelper.id, to: 'external', acknowledgedAt: at });
+  listener({ data: history });
+  assert(flyingOn(frameAt(at + 550), remoteId).length, 'old acknowledged mail for a stale helper cannot ground unrelated healthy flights');
+  const staleHost = inventory(4, false);
+  staleHost.sources.hosts[remoteId].observedAt = at - 7000;
+  listener({ data: staleHost });
+  assert.equal(flyingOn(frameAt(at + 600), remoteId).length, 0, 'host proof expiry grounds remote mail even with a fresh bus and overall clock');
+  assert.equal(elements['station-totals'].dataset.freshness, 'stale', 'overall receipt cannot renew expired host contributor proof');
+
   // A reload restores the remembered tab when that host is still reported, and falls back to this machine when not.
   for (const [remembered, expected] of [['herdr-dev-2', 'herdr-dev-2 crew'], ['gone-host', 'This machine crew']]) {
     const reloaded = {}; let reloadListener;
