@@ -509,8 +509,9 @@
     entry.source.hidden = !chip; setText(entry.source, chip);
     if (entry.attach) { const can = row.source === 'herdr' && !!row.paneId && !stale; entry.attach.hidden = !can; entry.close.hidden = !can; }
     setText(entry.title, composedTask(row) ? taskText(row) : row.title);
-    const last = row.tool?.available && row.tool.last;
-    entry.summary.className = 'row-summary' + (!last ? ' unavailable' : ''); setText(entry.summary, ObserverModel.activity(row));
+    const toolLive = !Number.isFinite(row.tool?.observedAt) || fresh(row.tool.observedAt);
+    const last = toolLive && row.tool?.available && row.tool.last;
+    entry.summary.className = 'row-summary' + (!last ? ' unavailable' : ''); setText(entry.summary, ObserverModel.activity(toolLive ? row : { ...row, tool: { available: false } }));
     entry.summary.title = last ? last.name + ' · ' + last.phase + ' · outcome ' + last.outcome : '';
     if (unreadCount) {
       setText(entry.mail, '✉ ' + unreadCount + ' unacknowledged message' + (unreadCount > 1 ? 's' : '') + ' · recent ' + window);
@@ -635,8 +636,8 @@
     const notice = get('source-health'); notice.hidden = !notes.length; setText(notice, notes.join(' — '));
   }
   /* Station totals: the sidecar's one aggregate per refresh, shown as published and never re-added here. A counter
-     without evidence is unavailable, never zero. The aggregate is only as live as Herdr: once Herdr's own deadline
-     passes, whatever Desktop says, its status and usage claims are labelled last known on that same deadline render. */
+     without evidence is unavailable, never zero. Herdr owns status freshness; counted usage contributors own the
+     separate token deadline. Both use the existing deadline render without deriving new counts in the browser. */
   const STATUS_TOTALS = [['working', 'working'], ['blocked', 'waiting'], ['idle', 'idle'], ['done', 'done'], ['unknown', 'unknown']];
   const COUNTER_TOTALS = [['inputTokens', 'in'], ['outputTokens', 'out'], ['cacheReadTokens', 'cache read'], ['cacheWriteTokens', 'cache write']];
   const whole = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -655,15 +656,16 @@
     nodes.list.hidden = !aggregate; nodes.disclosure.hidden = !aggregate;
     if (!aggregate) return;
     const live = !sourceStale('herdr', state), agents = aggregate.agents || {}, coverage = aggregate.coverage || {};
+    const usageLive = live && (!Number.isFinite(aggregate.usageObservedAt) || fresh(aggregate.usageObservedAt));
     if (nodes.list.dataset.freshness !== (live ? 'live' : 'stale')) nodes.list.dataset.freshness = live ? 'live' : 'stale';
-    nodes.disclosure.dataset.freshness = live ? 'live' : 'stale';
+    nodes.disclosure.dataset.freshness = usageLive ? 'live' : 'stale';
     setText(nodes.crew, tally(agents.observed) + ' observed · ' + tally(agents.verifiedSessions) + ' verified · ' + tally(agents.presenceOnly) + ' presence only');
     setText(nodes.status, (live ? '' : 'last known · ') + STATUS_TOTALS.map(([key, label]) => tally(agents.statuses?.[key]) + ' ' + label).join(' · ') +
       (agents.stale ? ' · ' + tally(agents.stale) + ' stale' : ''));
     for (const [key, label] of COUNTER_TOTALS) {
       const item = aggregate.usage?.[key], value = item && ['available', 'partial'].includes(item.state) ? whole(item.value) : null;
-      const kind = value === null ? 'unavailable' : live ? item.state : 'stale', node = nodes.counters.get(key), counted = coverage.counters?.[key] || {};
-      const notes = [item?.state === 'partial' && value !== null ? 'partial' : '', !live && value !== null ? 'last known' : ''].filter(Boolean).join(', ');
+      const kind = value === null ? 'unavailable' : usageLive ? item.state : 'stale', node = nodes.counters.get(key), counted = coverage.counters?.[key] || {};
+      const notes = [item?.state === 'partial' && value !== null ? 'partial' : '', !usageLive && value !== null ? 'last known' : ''].filter(Boolean).join(', ');
       setText(node, label + ' ' + (value === null ? 'unavailable' : value.toLocaleString('en-US', { notation: 'compact', maximumFractionDigits: 1 }) + (notes ? ' ' + notes : '')));
       const className = 'total-counter total-' + kind; if (node.className !== className) node.className = className;
       const hint = (value === null ? '' : value.toLocaleString('en-US') + ' tokens · ') + 'of ' + tally(counted.eligible) + ' verified sessions: ' + tally(counted.available) + ' complete, ' +
@@ -675,7 +677,7 @@
       return value === null ? 'unavailable' : value.toLocaleString('en-US', { notation: 'compact', maximumFractionDigits: 1 });
     };
     const partial = coverage.partial || coverage.unavailable || coverage.stale || coverage.conflicting;
-    setText(nodes.summary, (live ? '' : 'Last known · ') + tally(agents.observed) + ' crew · ' + tally(agents.statuses?.working) +
+    setText(nodes.summary, (live ? usageLive ? '' : 'Last known tokens · ' : 'Last known · ') + tally(agents.observed) + ' crew · ' + tally(agents.statuses?.working) +
       ' working · In ' + compact('inputTokens') + ' / Out ' + compact('outputTokens') + (partial ? ' · partial' : ''));
     setText(nodes.coverage, tally(coverage.available) + ' of ' + tally(coverage.eligible) + ' sessions complete · ' + tally(coverage.partial) + ' partial · ' +
       tally(coverage.unavailable) + ' unavailable · ' + tally(coverage.stale) + ' stale' + (coverage.conflicting ? ' · ' + tally(coverage.conflicting) + ' conflicting, not counted' : ''));
@@ -687,9 +689,9 @@
     // An open mail panel depends on the transport proof, which expires on the same clock even with every agent source down.
     const mail = busLive(latest) && panels.some(entry => entry.target.kind === 'mail');
     if (!active || !latest?.data || (isStale(latest) && !mail)) return;
-    // The earliest live observation decides: a row, source or mail proof turns stale on its own clock.
+    // Inventory, optional tools, counted usage and mail proofs expire on their original source clocks.
     const times = isStale(latest) ? [latest.updatedAt] : [latest.data.observedAt, ...(mail ? [latest.updatedAt] : []),
-      ...Object.values(latest.data.sources || {}).map(source => source.observedAt), ...(latest.data.sessions || []).map(row => row.observedAt)].filter(fresh);
+      ...Object.values(latest.data.sources || {}).map(source => source.observedAt), ...(latest.data.sessions || []).flatMap(row => [row.observedAt, row.tool?.observedAt]), latest.data.aggregate?.usageObservedAt].filter(fresh);
     deadline = setTimeout(() => { deadline = null; if (latest) render(latest, true); }, Math.max(0, Math.min(...times) + FRESH_MS + 1 - Date.now()));
   }
   function render(state, refresh = false) {

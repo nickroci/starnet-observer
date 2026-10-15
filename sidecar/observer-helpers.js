@@ -28,27 +28,32 @@ function ownStatus(task, at) {
   return ['completed', 'failed', 'killed', 'stopped'].includes(task?.status) ? 'done' : 'unknown';
 }
 
+// Shared bounded selector: production runs this in the SQLite worker; direct fixtures can inject SQLite.
+function readHelperEdges(options = {}) {
+  return makePrivateSnapshotQuery({
+    file: options.file || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'state_5.sqlite'),
+    loadSqlite: options.loadSqlite, tempRoot: options.tempRoot, copyFile: options.copyFile
+  })(database => ({ rows: database.query(
+    'SELECT parent_thread_id, child_thread_id, status FROM thread_spawn_edges LIMIT ' + (MAX_EDGES + 1)).all() }));
+}
+
 // Persisted lineage proves a relationship, never a running task.
 function makeHelperObserver(options = {}) {
   const { transcripts, now } = options;
   if (typeof now !== 'function') throw new TypeError('Helper observer requires an injected now clock');
   if (!transcripts) throw new TypeError('Helper observer requires transcripts');
-  const query = makePrivateSnapshotQuery({
-    file: options.file || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'state_5.sqlite'),
-    loadSqlite: options.loadSqlite, tempRoot: options.tempRoot, copyFile: options.copyFile
-  });
-  const readEdges = options.readEdges || (() => query(database => ({ rows: database.query(
-    'SELECT parent_thread_id, child_thread_id, status FROM thread_spawn_edges LIMIT ' + (MAX_EDGES + 1)).all() })));
+  const readEdges = options.readEdges || (() => readHelperEdges(options));
   let bindings = new Map();
 
-  async function children(parents) {
-    const rows = [], annotations = new Map(), overflow = new Map(), nextBindings = new Map();
+  async function prepareChildren(parents, readSummary = row => transcripts.read(row.id, row.provider, row.sessionId)) {
+    const rows = [], annotations = new Map(), overflow = new Map(), nextBindings = new Map(), groupOwners = new Map();
+    function commitBindings(acceptedIds) {
+      bindings = new Map([...nextBindings].filter(([id]) => acceptedIds.has(id)));
+    }
     const directParents = new Map(), ambiguousBindings = new Set(), capped = new Map();
     if (typeof transcripts.bindChild !== 'function' || typeof transcripts.claudeCandidates !== 'function') {
-      bindings = nextBindings;
-      return { rows, annotations, overflow, health: 'unavailable', reason: 'unsupported' };
+      return { rows, annotations, overflow, health: 'unavailable', reason: 'unsupported', commitBindings };
     }
-    transcripts.resetHelperIndex?.();
     const exact = new Map();
     for (const row of parents) {
       if (row.inventoryHealth !== 'available' || !row.sessionId || !row.inspectionIdentity) continue;
@@ -57,7 +62,7 @@ function makeHelperObserver(options = {}) {
     }
     const roots = [];
     for (const row of [...exact.values()].filter(Boolean).sort((a, b) => identity(a).localeCompare(identity(b)))) {
-      if (['codex', 'claude'].includes(row.provider) && (row.tool?.available === true || (await transcripts.read(row.id, row.provider, row.sessionId)).available)) roots.push(row);
+      if (['codex', 'claude'].includes(row.provider) && (row.tool?.available === true || (await readSummary(row)).available)) roots.push(row);
     }
     let source = { rows: [] };
     if (roots.some(row => row.provider === 'codex')) {
@@ -189,7 +194,7 @@ function makeHelperObserver(options = {}) {
     for (const [id, owner] of ownership) {
       // A depth or total limit may omit an authoritative pane from the represented
       // subtree. Keep its proved grouping without advertising a helper parent.
-      if (!nextBindings.has(id)) annotations.set(id, grouping(owner.root));
+      if (!nextBindings.has(id)) { annotations.set(id, grouping(owner.root)); groupOwners.set(id, owner.root.id); }
     }
     // Conflicting direct-parent claims cannot leave a guessed child or orphaned subtree.
     let removed = true;
@@ -209,8 +214,12 @@ function makeHelperObserver(options = {}) {
       const count = Math.max(0, (represented.get(parentId) || 0) - NEARBY) + (capped.get(parentId) || 0);
       if (count) overflow.set(parentId, count);
     }
-    bindings = nextBindings;
-    return { rows, annotations, overflow, health: source.reason ? 'unavailable' : 'available', reason: source.reason || null };
+    return { rows, annotations, overflow, groupOwners, commitBindings, health: source.reason ? 'unavailable' : 'available', reason: source.reason || null };
+  }
+  async function children(parents) {
+    const result = await prepareChildren(parents);
+    result.commitBindings(new Set([...result.rows.map(row => row.id), ...result.annotations.keys()]));
+    return result;
   }
   async function inspect(row) {
     const binding = bindings.get(row.id);
@@ -219,6 +228,6 @@ function makeHelperObserver(options = {}) {
     if (bindings.get(row.id) !== binding) return { available: false };
     return result.available ? { ...result, taskEvidence: row.taskEvidence, taskStatusEvidence: row.taskStatusEvidence, lifecycleEvidence: row.lifecycleEvidence } : result;
   }
-  return { children, inspect };
+  return { children, prepareChildren, inspect };
 }
-module.exports = { makeHelperObserver };
+module.exports = { makeHelperObserver, readHelperEdges, grouping };
