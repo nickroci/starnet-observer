@@ -40,6 +40,10 @@ const ObserverView = (() => {
   /* Approved skins draw about 19 design px tall natively (76 source px at 0.25). Crew stand ~40 px: just under
      two height units beside 48x24 floor diamonds, matching the fallback silhouette so loading never resizes them. */
   const SPRITE_SCALE = 2.1, CREW_HEIGHT = 40, MIN_HIT = 20, ZOOM_STEP = 1.25;
+  /* The sprite engine lifts a seated review-set body 7 units onto the tall station chair; the office chair's seat is
+     barely above its anchor, so that lift floats crew over it. -0.25 cancels the engine's ground bite (0 reads as
+     unset), landing the sit frame's lowest pixel on the chair point. */
+  const OFFICE_SEAT_LIFT = -0.25;
   const SKIN = { claude: 'blank_amber', codex: 'blank_blue' };
   const P = Scene.project;
 
@@ -1096,6 +1100,8 @@ const ObserverView = (() => {
       body.state = actor.pose === 'walk' ? 'walk' : 'idle'; body.working = actor.pose === 'working'; body.sitting = actor.pose === 'working';
       // Auras are station decoration; office crew carry only their contact shadow, plates and rings.
       const art = artMode(), aura = fx && decor && art === 'station';
+      // Office chairs seat lower than the station's: replace the engine's workstation lift so sit frames rest on them.
+      body.seatLift = art === 'office' ? OFFICE_SEAT_LIFT : undefined;
       if (aura) paintAgentAura(worker, foot, null, now, !reduced, true);
       ctx.save(); ctx.translate(foot.x, foot.y); ctx.scale(scale, scale); ctx.translate(-foot.x, -foot.y);
       let extent = null;

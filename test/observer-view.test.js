@@ -946,7 +946,7 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   }
   // Recording context: colours, composite modes, role images (with their exact draw rectangles) and crew bodies, in order.
   function recorder() {
-    const log = [], images = [], events = [], composites = [];
+    const log = [], images = [], events = [], composites = [], bodies = [];
     let dash = [];
     const target = { measureText: text => ({ width: String(text).length * 7 }), setLineDash: value => { dash = value; },
       createRadialGradient: () => ({ addColorStop: (offset, color) => log.push('stop:' + norm(color)) }),
@@ -957,7 +957,7 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
       if (key === 'globalCompositeOperation') composites.push(value);
       if (key === 'imageSmoothingEnabled') composites.push('smoothing:' + value);
       t[key] = value; return true; } });
-    return { ctx, log, images, events, composites };
+    return { ctx, log, images, events, composites, bodies };
   }
   const statuses = ['working', 'blocked', 'idle', 'done', 'unknown', 'working'];
   const rows = Array.from({ length: 24 }, (_, i) => ({ id: 'w' + i, project: 'P' + (i % 8), projectId: 'p' + (i % 8), projectKind: 'group', repo: i % 16 < 8 ? 'api' : 'web',
@@ -977,7 +977,7 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   async function paintWith(theme, { fx = true, ready = true, focus = null, zoom = 1, stale = false, at = 4321, reduced = true } = {}) {
     const rec = recorder();
     const node = { clientWidth: 1600, clientHeight: 1000, width: 0, height: 0, style: {}, getContext: () => rec.ctx, addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({ left: 0, top: 0 }) };
-    const sprite = { drawBody: (c, body) => { rec.events.push('body:' + body.id); return { top: body.py - 60, w: 30, h: 60 }; }, replacementState: () => (ready ? 'ready' : 'inherited'), ensureSkin: () => null };
+    const sprite = { drawBody: (c, body) => { rec.events.push('body:' + body.id); rec.bodies.push({ id: body.id, sitting: body.sitting, seatLift: body.seatLift }); return { top: body.py - 60, w: 30, h: 60 }; }, replacementState: () => (ready ? 'ready' : 'inherited'), ensureSkin: () => null };
     const view = View.create({ theme, canvas: node, nameFor: id => 'W ' + id, hoverLabel: () => 'hover', reducedMotion: () => reduced,
       env: { raf: () => 1, caf() {}, dpr: () => 1, now: () => 0, createCanvas: () => node, sprites: sprite, Image: RoleImage, themeStatus: { reportWarning() {}, reportNotice() {} } } });
     await flush();
@@ -985,7 +985,7 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
     view.update(scene, { stale: () => stale, mailFrame, inspected: () => 'w1', repositorySelection: () => 'web' });
     if (zoom !== 1) view.zoomBy(zoom);
     if (focus) view.focus(focus);
-    rec.log.length = 0; rec.images.length = 0; rec.events.length = 0; rec.composites.length = 0;
+    rec.log.length = 0; rec.images.length = 0; rec.events.length = 0; rec.composites.length = 0; rec.bodies.length = 0;
     view.paint(at);
     return { ...rec, view, used: new Set(rec.log.map(entry => attribute(entry.slice(entry.indexOf(':') + 1))).filter(Boolean)) };
   }
@@ -1056,6 +1056,13 @@ crewChecks.then(() => console.log('observer view: LOD/plate/cache budget helpers
   }
   assert.deepEqual(office.view.hitRegions(), station.view.hitRegions(), 'hit regions are identical');
   assert.deepEqual(office.view.camera(), station.view.camera());
+  /* Office chairs seat lower than the station's: a seated office body's lift cancels the sprite engine's ground bite
+     (-0.25 for measured sets), so the sit frame's lowest pixel lands on the chair point instead of the 7-unit
+     workstation lift. Station crew never carry an office lift. */
+  const GROUND_BITE = -0.25, seated = office.bodies.filter(body => body.sitting);
+  assert(seated.length > 0 && seated.length < office.bodies.length, 'the office paints seated and unseated crew');
+  for (const body of seated) assert.equal(GROUND_BITE - body.seatLift, 0, body.id + ': seated office feet land at the chair point');
+  assert(station.bodies.length === office.bodies.length && station.bodies.every(body => body.seatLift === undefined), 'station crew keep the engine seat lift');
   // Procedural humans (no ready group) keep the same hit-tested bodies.
   assert.equal((await paintWith(officeTheme, { ready: false })).view.hitRegions().length, scene.workers.length);
   console.log('office art: all 34 roles at native size and whole pixels, native chairs, carriers at drone points, no station primitives or glow, two-tone outlined faces, steady statuses, depth and hits OK');
