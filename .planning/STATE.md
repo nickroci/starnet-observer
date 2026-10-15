@@ -64,4 +64,4 @@ Next action: Complete approved theme delivery and final review.
 
 | Work | Status | Directory |
 | --- | --- | --- |
-| Standalone theme framework and local appearance comparisons | Content approved and locally frozen; final review in progress | .planning/quick/261014-wv3-standalone-theme-framework-and-local-app |
+| Standalone theme framework and local appearance comparisons | Content approved and frozen locally; aggregate approved, PR review next | .planning/quick/261014-wv3-standalone-theme-framework-and-local-app |
