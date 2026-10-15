@@ -486,4 +486,4 @@ function makeObserver(options = {}) {
   }
   return { get, controlTarget, inspect: (id, expectedIdentity) => inspect(id, expectedIdentity), inspectMessage: (id, expectedIdentity) => closed ? Promise.resolve({ id, health: 'unavailable', reason: 'unreadable', text: null }) : bus.inspect(id, expectedIdentity), close };
 }
-module.exports = { makeObserver, lastActivity };
+module.exports = { makeObserver, aggregateRows, lastActivity };

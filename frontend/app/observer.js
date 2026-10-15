@@ -24,6 +24,7 @@
   const prefs = {
     get(name) { try { const value = window.localStorage?.getItem('observer.' + name); return typeof value === 'string' ? value : null; } catch (_) { return null; } },
     set(name, value) { try { window.localStorage?.setItem('observer.' + name, String(value)); } catch (_) { /* convenience only */ } },
+    remove(name) { try { window.localStorage?.removeItem('observer.' + name); } catch (_) { /* convenience only */ } },
     flag(name, fallback) { const value = prefs.get(name); return value === '1' ? true : value === '0' ? false : fallback; }
   };
   const savedFilter = prefs.get('filter'), savedPage = Number(prefs.get('page'));
@@ -33,7 +34,9 @@
   // Visibility: a hidden page owns no subscription, deadline or frame; resume proves freshness before inspection.
   let active = false, unsubscribe = null, resumedAt = 0, awaitingProof = false, cachedAtResume = null;
   const rowFor = id => byId.get(id);
-  const messageFor = id => (latest?.data?.bus?.messages || []).find(value => value.id === id);
+  // The mail panel lists the selected host's own bus (this machine's unless a remote host tab is chosen).
+  const panelBus = () => (selectedHost && latest?.data?.hostBus?.[selectedHost]) || (selectedHost ? null : latest?.data?.bus) || null;
+  const messageFor = id => (panelBus()?.messages || []).find(value => value.id === id);
   const FRESH_MS = 6000, fresh = at => Number.isFinite(at) && Date.now() - at <= FRESH_MS;
   // Inventory older than six seconds is stale even while a GET is still pending: the view asks on every paint.
   // Overall freshness means at least one source refreshed; it never makes another source's rows live.
@@ -55,12 +58,19 @@
   /* Repository highlight: one exact repository id, never a label or the parent-folder project. It selects, never
      filters or moves the camera, and asks for nothing: the list and the floor just repaint. */
   let selectedRepoId = null;
+  /* Multi-host: the panel lists one host's crew at a time (null = this machine). Chosen by a host tab, a ship click
+     or selecting an agent; only meaningful when the hub reports remote hosts. */
+  let selectedHost = null, hostList = [], pendingSpawn = null;
+  /* The chosen host tab survives a reload (prefs key observer.host): only its id is stored, read once, and honoured
+     only if the hub still reports that host. Choosing this machine forgets the saved remote. */
+  let restoreHost = (() => { const value = prefs.get('host'); return value && /^[a-z0-9][a-z0-9-]{0,31}$/.test(value) ? value : null; })();
+  function rememberHost(host) { if (host) prefs.set('host', host); else prefs.remove('host'); }
   function toggleRepository(repoId) {
     if (typeof repoId !== 'string' || !(latest?.data?.sessions || []).some(row => row.repoId === repoId)) return;
     selectedRepoId = selectedRepoId === repoId ? null : repoId;
     if (latest) render(latest, true);
   }
-  const view = ObserverView.create({ canvas: get('world'), reducedMotion, onSelect: id => select(id, true), onObservatory: () => observatoryClicked(),
+  const view = ObserverView.create({ canvas: get('world'), reducedMotion, onSelect: id => select(id, true), onObservatory: () => observatoryClicked(), onShip: host => hostClicked(host), hostSelection: () => (hostList.length ? selectedHost : undefined),
     // A worker's canvas title toggles the same exact panel as its list title and magnifier; focus returns to the station.
     onTitleToggle: id => { const row = rowFor(id); if (row) togglePanel(agentTarget(row), get('world')); },
     // Platform zoom never selects a worker; it only clears a previous worker selection.
@@ -72,24 +82,37 @@
     idleVigour: id => { const row = rowFor(id); return row ? ObserverModel.idleAge(row).vigour : 1; },
     nameFor: id => { const row = rowFor(id); return row ? workerName(row) : ''; },
     onCamera: ({ canZoomIn, canZoomOut }) => { get('zoom-in').disabled = !canZoomIn; get('zoom-out').disabled = !canZoomOut; } });
-  /* One courier, stepped by the view's frame. A transition into stale or reduced grounds flights at once; the
-     reset makes the next live snapshot rebase instead of replaying what was missed. */
+  /* One courier per host's bus, stepped by the view's frame: this machine's, plus one for each remote ship, whose
+     flights stay inside that ship (its own mailroom and crew). A transition into stale or reduced grounds flights at
+     once; the reset makes the next live snapshot rebase instead of replaying what was missed. */
+  const remoteCouriers = new Map(), remotePending = new Map();
+  const courierFor = host => { if (!remoteCouriers.has(host)) remoteCouriers.set(host, ObserverMail.createCourier()); return remoteCouriers.get(host); };
+  const resetCouriers = () => { courier.reset(); for (const value of remoteCouriers.values()) value.reset(); };
   function mailFrame(now) {
     const ground = mailStale(latest) || reducedMotion();
-    if (ground && !grounded) courier.reset();
+    if (ground && !grounded) resetCouriers();
     grounded = ground;
     courier.step(now);
-    return courier.frame(now, { reduced: ground, pending: pendingSpots, pads: scene ? scene.mail.pads : [] });
+    const frame = courier.frame(now, { reduced: ground, pending: pendingSpots, pads: scene ? scene.mail.pads : [] });
+    for (const [host, remote] of remoteCouriers) {
+      const own = scene && ObserverScene.mailOf(scene, host); if (!own) continue;
+      remote.step(now);
+      const extra = remote.frame(now, { reduced: ground, pending: remotePending.get(host) || [], pads: own.pads });
+      frame.drones = [...(frame.drones || []), ...(extra.drones || [])]; frame.envelopes = [...(frame.envelopes || []), ...(extra.envelopes || [])];
+    }
+    return frame;
   }
 
   function setPage(next) {
     if (next === page) return;
-    page = next; courier.reset(); prefs.set('page', page);
+    page = next; resetCouriers(); prefs.set('page', page);
   }
   function select(id, scroll = false) {
     if (!byId.has(id)) return;
     selected = id;
-    const target = layout.pageFor(id); if (byId.get(id).role !== 'overseer' && Number.isInteger(target)) setPage(target);   // the overseer sits on every page
+    const row = byId.get(id);
+    if (hostList.length && (row.host || null) !== selectedHost) { selectedHost = row.host || null; rememberHost(selectedHost); }
+    const target = layout.pageFor(id); if ((row.role !== 'overseer' || row.host) && Number.isInteger(target)) setPage(target);   // the local overseer sits on every page
     render(latest, true);
     view.focus(id);
     if (scroll) rowNodes.get(id)?.button.scrollIntoView({ block: 'nearest' });
@@ -375,9 +398,9 @@
     entry = { item, button, route, state, read }; mailRows.set(id, entry);
     return entry;
   }
-  function renderMail(bus) {
+  function renderMail(bus, mailCourier = courier) {
     const messages = bus && Array.isArray(bus.messages) ? bus.messages : [], limit = bus?.window || 100;
-    const pending = messages.filter(message => !message.acknowledgedAt).length, skipped = courier.state().skipped;
+    const pending = messages.filter(message => !message.acknowledgedAt).length, skipped = mailCourier.state().skipped;
     setText(get('mail-health'), busHealth(bus));
     setText(get('mail-counts'), bus ? pending + ' pending · ' + (messages.length - pending) + ' acknowledged · in recent ' + limit +
       (skipped ? ' · ' + skipped + ' shown without animation' : '') : '');
@@ -424,17 +447,75 @@
     if (!CONTROL || !paneId || button.disabled) return;
     button.disabled = true; notice(pending);
     try {
-      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? {} : { paneId });
-      notice(action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · terminal opening · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · terminal opening' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
-    } catch (error) { notice((action === 'overseer' ? 'Could not start the overseer: ' : action === 'spawn' ? 'Could not start an agent: ' : action === 'attach' ? 'Could not open a terminal: ' : 'Could not close the agent: ') + error.message, true); }
+      const result = await Harness.api.post('/api/control/' + action, action === 'overseer' ? {} : action === 'spawn-host' ? { host: paneId === 'local' ? null : paneId } : { paneId });
+      // Spawning never opens a terminal: the new agent is selected in the panel when it appears; ⇱ attaches.
+      if (['spawn', 'spawn-host', 'overseer'].includes(action) && typeof result.paneId === 'string') pendingSpawn = { paneId: result.paneId, until: Date.now() + 90000 };
+      notice(action === 'spawn-host' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.folder + ' · ' + result.paneId + ' · selecting it when it appears' : action === 'overseer' ? 'Overseer started in ' + result.paneId + ' · it takes the observatory chair on the next poll' : action === 'spawn' ? 'Started ' + (result.name || 'a new agent') + ' in ' + result.paneId + ' · selecting it when it appears' : action === 'attach' ? 'Terminal opening for ' + paneId : 'Closed ' + paneId);
+    } catch (error) { notice((action === 'spawn-host' ? 'Could not start an agent on that host: ' : action === 'overseer' ? 'Could not start the overseer: ' : action === 'spawn' ? 'Could not start an agent: ' : action === 'attach' ? 'Could not open a terminal: ' : 'Could not close the agent: ') + error.message, true); }
     finally { button.disabled = false; }
+  }
+  /* Ship click or host tab: the panel switches to that host's crew. Acting (spawn, attach) happens from the panel. */
+  function hostClicked(host) {
+    if (!hostList.length) return;
+    const next = host && hostList.some(entry => entry.id === host) ? host : null;
+    if (next === selectedHost) return;
+    selectedHost = next; selectedRepoId = null; mailSelected = null; rememberHost(next);
+    if (selected && (byId.get(selected)?.host || null) !== next) selected = null;
+    if (latest) render(latest, true);
+  }
+  const hostName = host => host || 'This machine';
+  function hostHealthText(host, sources, count) {
+    const source = host ? sources?.[host] : sources?.local, agents = count + ' agent' + (count === 1 ? '' : 's');
+    if (!source || source.health === 'available') return { text: 'Live · ' + agents, live: true };
+    if (source.health === 'stale') return { text: 'Stale · last seen ' + (source.observedAt ? ObserverModel.age(source.observedAt) : 'never') + ' · ' + agents, live: false };
+    return { text: 'Unreachable · ' + (source.reason || 'no connection') + (count ? ' · last known ' + agents : ''), live: false };
+  }
+  const hostTabNodes = new Map();
+  function renderHosts(hosts, sources, rows, panelRows) {
+    const tabs = get('host-tabs'), health = get('host-health'), title = get('crew-title'), spawnBox = get('host-spawn');
+    if (!hosts.length) {
+      if (tabs) tabs.hidden = true; if (health) health.hidden = true; if (spawnBox) spawnBox.hidden = true;
+      if (title) setText(title, 'Your local crew');
+      return;
+    }
+    const all = [null, ...hosts.map(host => host.id)];
+    for (const key of hostTabNodes.keys()) if (!all.includes(key)) hostTabNodes.delete(key);
+    const nodes = all.map(host => {
+      let tab = hostTabNodes.get(host);
+      if (!tab) {
+        tab = text('button', 'host-tab', ''); tab.type = 'button'; tab.setAttribute('role', 'tab'); tab.dataset.host = host || '';
+        tab.addEventListener('click', () => hostClicked(host)); hostTabNodes.set(host, tab);
+      }
+      const source = host ? sources?.[host] : sources?.local, live = !source || source.health === 'available';
+      tab.className = 'host-tab' + (host ? ' remote' : '') + (live ? ' live' : '');
+      const label = hostName(host), count = rows.filter(row => (row.host || null) === host).length;
+      if (tab.dataset.label !== label + ' · ' + count) { tab.replaceChildren(text('span', 'host-dot', ''), text('span', 'host-label', label + ' · ' + count)); tab.dataset.label = label + ' · ' + count; }
+      tab.setAttribute('aria-selected', String(host === selectedHost));
+      return tab;
+    });
+    if (tabs) { tabs.replaceChildren(...nodes); tabs.hidden = false; }
+    if (title) setText(title, hostName(selectedHost) + ' crew');
+    const state = hostHealthText(selectedHost, sources, panelRows.length);
+    if (health) { setText(health, state.text); health.className = 'host-health ' + (state.live ? 'live' : 'down'); health.hidden = false; }
+    // "New agent in ~": always offered on a remote host (and on this machine when it has no agents), control on.
+    if (spawnBox) {
+      const offer = CONTROL && state.live && (selectedHost !== null || !panelRows.length);
+      spawnBox.hidden = !offer;
+      if (offer && spawnBox.dataset.host !== (selectedHost || '')) {
+        const plus = text('button', 'project-spawn', '+'); plus.type = 'button';
+        plus.title = 'Start a new Claude agent in the home folder on ' + hostName(selectedHost); plus.setAttribute('aria-label', plus.title);
+        const host = selectedHost;
+        plus.addEventListener('click', () => controlAction(plus, 'spawn-host', host || 'local', 'Starting an agent on ' + hostName(host) + '…'));
+        spawnBox.replaceChildren(text('span', 'host-spawn-label', 'New agent in ~'), plus); spawnBox.dataset.host = selectedHost || '';
+      }
+    }
   }
   /* Observatory click: select the seated overseer, or (with control on) offer to start one. */
   function observatoryClicked() {
-    const row = (latest?.data?.sessions || []).find(entry => entry.role === 'overseer' && entry.source === 'herdr');
+    const row = (latest?.data?.sessions || []).find(entry => entry.role === 'overseer' && entry.source === 'herdr' && !entry.host);
     if (row) { select(row.id, true); return; }
     if (!CONTROL) { notice('No overseer. Start the observer with OBSERVER_CONTROL=1 to spawn one from here.', true); return; }
-    if (!window.confirm('Start an overseer agent in the observatory?\n\nThis opens a Herdr workspace named "overseer" in its own folder, starts Claude there with a brief on watching the other agents, and opens a terminal attached to it.')) return;
+    if (!window.confirm('Start an overseer agent in the observatory?\n\nThis opens a Herdr workspace named "overseer" in its own folder, starts Claude there with a brief on watching the other agents. No terminal opens; use ⇱ to attach.')) return;
     const button = get('world');
     controlAction(button, 'overseer', 'overseer', 'Starting the overseer…');
   }
@@ -446,7 +527,7 @@
     const zoom = text('button', 'project-zoom', '⤢'); zoom.type = 'button'; zoom.addEventListener('click', () => zoomProject(key));
     heading.append(text('span', 'project-swatch', ''), label, kind, total, zoom);
     if (CONTROL) {
-      const spawn = text('button', 'project-spawn', '+'); spawn.type = 'button'; spawn.title = 'Start a new Claude agent in this project (new Herdr tab, terminal opens)';
+      const spawn = text('button', 'project-spawn', '+'); spawn.type = 'button'; spawn.title = 'Start a new Claude agent in this project (new Herdr tab; select it and press ⇱ to attach)';
       spawn.setAttribute('aria-label', 'Start a new Claude agent in this project');
       spawn.addEventListener('click', () => {
         const seed = (lastGroups.get(key) || []).find(row => row.source === 'herdr' && row.paneId && !rowStale(row));
@@ -512,16 +593,23 @@
     const stale = rowStale(row), helper = isHelper(row), chip = row.source === 'desktop' ? 'APP' : helper ? 'HELPER' : '';
     // Working emphasis is the row's own fresh status; a stale "was working" row is only highlighted.
     const inRepo = selectedRepoId !== null && row.repoId === selectedRepoId, working = inRepo && !stale && row.status === 'working';
-    const itemClass = 'session-item' + (helper ? ' helper' : '') + (inRepo ? ' repo-selected' : '') + (working ? ' repo-working' : '');
+    const needsInput = !stale && row.status === 'blocked' && row.source === 'herdr';
+    const itemClass = 'session-item' + (helper ? ' helper' : '') + (inRepo ? ' repo-selected' : '') + (working ? ' repo-working' : '') + (needsInput ? ' needs-input' : '');
     if (entry.item.className !== itemClass) entry.item.className = itemClass;
     entry.mark.hidden = !inRepo; setText(entry.mark, working ? '◆◆' : inRepo ? '◆' : '');
     setText(entry.markText, working ? 'Highlighted repository, working now' : inRepo ? 'Highlighted repository' : '');
     entry.item.style.setProperty('--depth', String(Math.min(depth, 4)));
     entry.button.setAttribute('aria-pressed', String(selected === row.id));
     entry.provider.className = 'provider ' + row.provider; setText(entry.provider, workerName(row)); if (entry.provider.title !== workerName(row)) entry.provider.title = workerName(row);
-    entry.status.className = 'status ' + row.status; setText(entry.status, (stale ? 'was ' : '') + (row.status === 'blocked' ? 'waiting' : row.status));
+    entry.status.className = 'status ' + row.status; setText(entry.status, (stale ? 'was ' : '') + (row.status === 'blocked' ? (needsInput ? 'waiting for input' : 'waiting') : row.status));
+    const hint = needsInput ? 'Waiting for input — press ⇱ to attach' : '';
+    if ((entry.item.title || '') !== hint) entry.item.title = hint;
     entry.source.hidden = !chip; setText(entry.source, chip);
-    if (entry.attach) { const can = row.source === 'herdr' && !!row.paneId && !stale; entry.attach.hidden = !can; entry.close.hidden = !can; }
+    if (entry.attach) {
+      const can = row.source === 'herdr' && !!row.paneId && !stale; entry.attach.hidden = !can; entry.close.hidden = !can;
+      const attachClass = 'row-attach' + (needsInput ? ' prominent' : ''); if (entry.attach.className !== attachClass) entry.attach.className = attachClass;
+      entry.attach.title = needsInput ? 'Waiting for input — open a terminal attached to this agent' : 'Open a terminal attached to this agent';
+    }
     setText(entry.title, composedTask(row) ? taskText(row) : row.title);
     const toolLive = !Number.isFinite(row.tool?.observedAt) || fresh(row.tool.observedAt);
     const last = toolLive && row.tool?.available && row.tool.last;
@@ -598,7 +686,7 @@
       lastGroups = groups;
       const first = group[0], entry = groupNode(key);
       entry.section.style.setProperty('--room', layout.colorFor(key).accent);
-      setText(entry.label, (first.project || 'Unassigned') + (labels.get(first.project)?.size > 1 ? ' · ' + key.slice(-4) : ''));
+      setText(entry.label, ObserverModel.projectName(first) + (labels.get(first.project)?.size > 1 ? ' · ' + key.slice(-4) : ''));
       setText(entry.kind, key === 'desktop' ? 'APPS' : first.projectKind === 'group' ? 'PROJECT' : first.projectKind === 'repository' ? 'REPO' : 'FOLDER');
       // Helpers are counted apart: a parent's own totals never include its helpers.
       const helpers = group.filter(isHelper).length;
@@ -632,7 +720,7 @@
 
   /* Health, freshness and ages follow every notification; content work follows changed content or an explicit
      view change. QuerySpine re-notifies the old data while a request is pending: that is metadata only. */
-  let sceneKey = null, contentKey = null, deadline = null, mailProof = null;
+  let sceneKey = null, contentKey = null, deadline = null, mailProof = null, ingestedHosts = null;
   const DESKTOP_REASONS = { 'permission-denied': 'accessibility permission is not granted to the observer reader', 'native-reader-building': 'the native reader is still starting',
     'native-reader-unavailable': 'the native reader is unavailable', 'unsupported-platform': 'not supported on this system', 'not-observed': 'not read yet' };
   function header(state, stale) {
@@ -749,19 +837,35 @@
     if (badge) setText(badge, data?.presentation ? 'LIVE · FICTIONAL LABELS' + (CONTROL ? ' · CONTROLS ON' : '') : CONTROL ? 'CONTROLS ON' : 'READ ONLY');
     // A repository whose last row left clears its highlight.
     if (selectedRepoId !== null && !rows.some(row => row.repoId === selectedRepoId)) selectedRepoId = null;
-    const overseerRow = rows.find(row => row.role === 'overseer' && row.source === 'herdr') || null;
+    const overseerRow = rows.find(row => row.role === 'overseer' && row.source === 'herdr' && !row.host) || null;
+    // Remote hosts (multi-host hub only): one ship each, in a stable order; health and last-seen come from the hub.
+    const hostSources = data?.sources?.hosts || null;
+    const hosts = hostSources ? Object.keys(hostSources).filter(id => id !== 'local').sort().map(id => ({ id, health: hostSources[id].health,
+      observedAt: hostSources[id].observedAt ?? null, reason: hostSources[id].reason || null, agents: hostSources[id].agents ?? 0, mail: hostSources[id].mail || null })) : [];
+    hostList = hosts;
+    // The first roster that lists hosts decides a remembered tab: kept if that host is present, else this machine.
+    if (restoreHost !== null && hosts.length) { if (hosts.some(host => host.id === restoreHost)) selectedHost = restoreHost; restoreHost = null; }
+    if (selectedHost !== null && !hosts.some(host => host.id === selectedHost)) selectedHost = null;
+    // A just-spawned agent is selected once it appears in the roster.
+    if (pendingSpawn) {
+      const spawned = rows.find(row => row.paneId === pendingSpawn.paneId);
+      if (spawned) { pendingSpawn = null; Promise.resolve().then(() => select(spawned.id, true)); }
+      else if (Date.now() > pendingSpawn.until) pendingSpawn = null;
+    }
+    const panelRows = hosts.length ? rows.filter(row => (row.host || null) === selectedHost) : rows;
     layout.reconcile(rows.filter(row => row !== overseerRow));
     if (selected && !byId.has(selected)) { overview(); }
     if (page >= layout.pages()) setPage(layout.pages() - 1);
     if (!layout.onPage(page).length && rows.length) setPage(layout.pageFor(rows[0].id));
     const rooms = layout.onPage(page), onFloor = rooms.flatMap(room => room.rows.map(value => value.row));
     // Geometry and row fields consumed by floor paint or movement; titles and tools are read live by the hover callbacks.
-    const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider]], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
+    const key = JSON.stringify([page, rooms, overseerRow && [overseerRow.id, overseerRow.status, overseerRow.provider], ...(hosts.length ? [hosts.map(host => [host.id, host.health, host.agents, host.reason, host.health === 'available' ? null : Math.floor((clock() - (host.observedAt || 0)) / 60000)])] : [])], (name, value) => name === 'row' ? [value.id, value.status, value.provider, value.worktree, value.lineageState, value.lifecycleEvidence?.state] : value);
     const bus = data?.bus || null, messages = Array.isArray(bus?.messages) ? bus.messages : [];
     // Hover text, plates and pending envelopes read rows and bus live; a frozen floor repaints only when they change.
-    const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages]]);
+    const hostBus = data?.hostBus || {};
+    const content = JSON.stringify([stale, data?.health, rows, bus && [bus.health, bus.reason, messages], Object.entries(hostBus).map(([id, value]) => [id, value.health, value.messages])]);
     if (key !== sceneKey || !scene) {
-      sceneKey = key; scene = ObserverScene.build(rooms, page, { overseer: overseerRow });
+      sceneKey = key; scene = ObserverScene.build(rooms, page, hosts.length ? { overseer: overseerRow, hosts, localHealth: hostSources.local?.health } : { overseer: overseerRow });
       // Row freshness is read from the current roster by id: the cached scene's row objects can be older.
       view.update(scene, { stale: () => isStale(latest), rowStale: worker => rowStale(rowFor(worker.id)), mailFrame, inspected: inspectedAgent,
         repositorySelection: () => selectedRepoId, onRepositoryToggle: toggleRepository });
@@ -773,16 +877,29 @@
     const parked = mailStale(state);
     if (data && (data !== ingested || parked !== ingestedStale)) { ingested = data; ingestedStale = parked; courier.update(bus, { now: clock(), deck: page, reduced: reducedMotion(), live: !parked, route: message => ObserverScene.route(scene, layout, message, rows) }); }
     pendingSpots = ObserverScene.pending(scene, layout, messages);
+    // Each remote host's own mail: its courier and pending envelopes stay on its own ship.
+    for (const id of [...remoteCouriers.keys()]) if (!hostBus[id]) { remoteCouriers.delete(id); remotePending.delete(id); }
+    for (const [id, value] of Object.entries(hostBus)) {
+      const list = Array.isArray(value.messages) ? value.messages : [];
+      if (data !== ingestedHosts) courierFor(id).update(value, { now: clock(), deck: page, reduced: reducedMotion(), live: !isStale(state) && value.health === 'available', route: message => ObserverScene.route(scene, layout, message, rows, id) });
+      remotePending.set(id, ObserverScene.pending(scene, layout, list, id));
+    }
+    ingestedHosts = data;
     setText(get('page-label'), 'Deck ' + (page + 1) + (layout.pages() > 1 ? ' / ' + layout.pages() : ''));
     get('previous-page').disabled = page === 0; get('next-page').disabled = page + 1 >= layout.pages();
     const projects = new Set(rows.map(ObserverModel.projectKey));
     setText(get('room-count'), projects.size + ' projects · ' + onFloor.length + ' workers on this deck');
     // Working and waiting count only rows whose own source is live; the rest are reported as last known.
-    const current = stale ? rows : rows.filter(row => !rowStale(row, state)), behind = rows.length - current.length;
+    const current = stale ? panelRows : panelRows.filter(row => !rowStale(row, state)), behind = panelRows.length - current.length;
     const working = current.filter(row => row.status === 'working').length, blocked = current.filter(row => row.status === 'blocked').length;
-    setText(get('counts'), (stale ? 'Last known: ' : '') + working + ' working · ' + blocked + ' waiting · ' + rows.length + ' total' + (behind ? ' · ' + behind + ' last known' : ''));
-    renderMail(bus);
-    renderSessions(rows, stale, messages, bus);
+    setText(get('counts'), (stale ? 'Last known: ' : '') + working + ' working · ' + blocked + ' waiting · ' + panelRows.length + ' total' + (behind ? ' · ' + behind + ' last known' : ''));
+    renderHosts(hosts, hostSources, rows, panelRows);
+    // The mailroom section lists the selected host's own bus; with remotes, the title names whose it is.
+    const shownBus = hosts.length && selectedHost ? hostBus[selectedHost] || null : bus;
+    renderMail(shownBus, hosts.length && selectedHost ? courierFor(selectedHost) : courier);
+    if (hosts.length) setText(get('mail-title'), 'Mailroom · ' + (selectedHost || 'this machine') + ' · recent ' + (Number.isInteger(shownBus?.window) ? shownBus.window : 100));
+    renderSessions(panelRows, stale, messages, bus);
+    if (hosts.length && !panelRows.length && !stale) setText(get('empty'), 'No sessions on ' + (selectedHost || 'this machine') + '.');
     for (const entry of panels) if (entry.target.kind === 'agent') entry.view.roster();
   }
   // Never awaited: stalled or failed sprite assets must not hold back the inventory. Crew paint the fallback silhouette until sets load.
@@ -795,7 +912,7 @@
     // A tab loaded or restored in the background acquires nothing until it is actually shown.
     if (active || document.hidden) return;
     active = true; resumedAt = Date.now(); awaitingProof = panels.some(entry => entry.target.kind === 'agent'); cachedAtResume = latest?.data;
-    courier.reset(); ingested = null;
+    resetCouriers(); ingested = null; ingestedHosts = null;
     unsubscribe = QuerySpine.subscribe('observer.sessions', snapshot => ingest(snapshot), { immediate: false, refresh: false });
     Promise.resolve(QuerySpine.invalidate('observer.sessions', { refresh: true })).catch(() => {});
     view.start();

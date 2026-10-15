@@ -30,6 +30,10 @@ Use PORT to change the listening port (default 4319).
 Config "roomsFile" (default rooms.json next to server.js, relative to the config file) holds optional dynamic
 arrangement overrides: { "rooms": [{ "name": "Banqora", "match": ["~/dev/repos/bq-*", "github.com/banqora/*"] }] }.
 Config "theme": { "arrange": true } starts the page with the dynamic arrangement on.
+Config "remotes": [{ "id": "vm1", "ssh": "user@host", "dir": "~/starnet-observer", "mail": "separate" }] adds remote
+hosts, each streamed read-only over the operator's ssh (key auth, BatchMode) and drawn as its own ship with its own
+mailroom. "mail" is "separate" (default: each host's llm-bus stands alone) or "relay" (a relay between buses is
+expected; the page still draws a working mail link only once relayed traffic is actually observed).
 `;
 
 function object(value, field) {
@@ -43,7 +47,7 @@ function label(value, field) {
   return value.trim();
 }
 function validateConfig(input) {
-  object(input, 'Config'); keys(input, ['presentation', 'company', 'repoPrefix', 'rooms', 'theme', 'roomsFile'], 'config');
+  object(input, 'Config'); keys(input, ['presentation', 'company', 'repoPrefix', 'rooms', 'theme', 'roomsFile', 'remotes'], 'config');
   const result = {};
   if (Object.hasOwn(input, 'presentation')) {
     if (typeof input.presentation !== 'boolean') throw new Error('presentation must be a boolean');
@@ -73,6 +77,24 @@ function validateConfig(input) {
   if (Object.hasOwn(input, 'roomsFile')) {
     if (typeof input.roomsFile !== 'string' || !input.roomsFile.trim() || input.roomsFile.length > 1024 || /[\x00-\x1f\x7f]/.test(input.roomsFile)) throw new Error('roomsFile must be a nonempty path without control characters');
     result.roomsFile = input.roomsFile;
+  }
+  if (Object.hasOwn(input, 'remotes')) {
+    // Each remote is reached by the hub's own ssh; the target is passed as one argv entry after `--`, and a leading
+    // '-' is refused so it can never be read as an ssh option.
+    if (!Array.isArray(input.remotes) || input.remotes.length > 16) throw new Error('remotes must be an array of at most 16 remote objects');
+    const ids = new Set();
+    result.remotes = input.remotes.map((remote, index) => {
+      const field = 'remotes[' + index + ']'; object(remote, field); keys(remote, ['id', 'ssh', 'dir', 'mail'], field);
+      if (typeof remote.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(remote.id) || remote.id === 'local') throw new Error(field + '.id must be 1–32 lowercase letters, digits, or hyphens, and not "local"');
+      if (ids.has(remote.id)) throw new Error('Remote ids must be unique');
+      ids.add(remote.id);
+      if (typeof remote.ssh !== 'string' || remote.ssh.startsWith('-') || !/^[A-Za-z0-9._-]+(@[A-Za-z0-9.-]+)?$/.test(remote.ssh)) throw new Error(field + '.ssh must be host, alias or user@host');
+      const dir = remote.dir === undefined ? '~/starnet-observer' : remote.dir;
+      if (typeof dir !== 'string' || !/^~?[A-Za-z0-9._\/-]+$/.test(dir) || dir.length > 200 || dir.split('/').includes('..')) throw new Error(field + '.dir must be a plain path');
+      const mail = remote.mail === undefined ? 'separate' : remote.mail;
+      if (mail !== 'separate' && mail !== 'relay') throw new Error(field + '.mail must be "separate" or "relay"');
+      return { id: remote.id, ssh: remote.ssh, dir, mail };
+    });
   }
   if (Object.hasOwn(input, 'theme')) {
     object(input.theme, 'theme'); keys(input.theme, ['fx', 'arrange', 'colors'], 'theme');
@@ -130,6 +152,7 @@ function loadConfig(args = process.argv.slice(2), defaultPath = DEFAULT_CONFIG) 
   return { presentation: values.presentation ? true : values['no-presentation'] ? false : settings.presentation || false,
     labels: { company: labels.company, repoPrefix: labels.repoPrefix, rooms: labels.rooms },
     theme: { ...settings.theme, ...(values.fx ? { fx: true } : values['no-fx'] ? { fx: false } : {}) },
-    roomsFile: settings.roomsFile ? path.resolve(path.dirname(file), settings.roomsFile) : DEFAULT_ROOMS };
+    roomsFile: settings.roomsFile ? path.resolve(path.dirname(file), settings.roomsFile) : DEFAULT_ROOMS,
+    remotes: settings.remotes || [] };
 }
 module.exports = { DEFAULT_LABELS, DEFAULT_ROOMS, HELP, validateConfig, loadConfig };

@@ -6,6 +6,8 @@ const ObserverScene = (() => {
   const unproject = ({ x, y }) => ({ x: x / 48 + y / 24, y: y / 24 - x / 48, z: 0 });
   const contains = (rect, point) => point.x >= rect.x && point.x < rect.x + rect.w && point.y >= rect.y && point.y < rect.y + rect.h;
   const pointAt = (rect, x, y, z = 0) => ({ x: rect.x + x, y: rect.y + y, z });
+  // Remote walkways carry their host; local ones keep the single-host shape exactly.
+  const onHost = (walkway, host) => host ? { ...walkway, host } : walkway;
   const strip = (a, b, kind) => ({ kind, rect: { x: Math.min(a.x, b.x) - 1, y: Math.min(a.y, b.y) - 1, w: Math.abs(b.x - a.x) + 2, h: Math.abs(b.y - a.y) + 2 } });
   const deskFor = (rect, block, seat) => ({ x: rect.x + [2, 6, 12, 16][seat % 4], y: rect.y + 6 + block * 7 + Math.floor(seat / 4) * 3, w: 2, h: 1 });
 
@@ -31,7 +33,36 @@ const ObserverScene = (() => {
       link: [{ x: 12, y: -4, z: 0 }, { x: 12, y: 0, z: 0 }, { x: 12, y: 5, z: 0 }, { x: 7, y: 5, z: 0 }, { x: 7, y: 6, z: 0 }],
       extents: [{ rect, height: 3.2 }, { rect: desk, height: 1.5 }, ...screens, ...telescopes, plant, light] };
   }
+  /* Remote ships sit in a line below the flagship (this machine), with a clear gap between hulls. llm-bus is per host,
+     so each remote ship has its OWN mailroom (same furniture as the flagship's) on its top edge, with its rooms flanking
+     it and a short spine down from it; that host's crew and couriers stay inside its own ship. Nothing physical joins
+     the ships: an observation link (the hub's ssh stream, not a mail path) spans the gap, and a relay line appears only
+     for a host configured mail: "relay" (broken until relayed traffic is actually observed). */
+  const SHIP_GAP_Y = 8, HULL_MARGIN = 3, REMOTE_MARGIN = 2, ROOM_Y = (bank, index) => (bank ? -42 : -48) + 32 * index;
+  const mailroomAt = top => ({ rect: { x: 0, y: top, w: 14, h: 12 }, hub: { x: 7, y: top + 6, z: 0 },
+    tower: { x: 5, y: top + 1, w: 4, h: 3 }, pads: [4, 7, 10].map(x => ({ x, y: top + 9, z: 0 })),
+    pod: [{ x: 11, y: top + 9, z: 0 }, { x: 11, y: top + 6, z: 0 }, { x: 7, y: top + 6, z: 0 }],
+    chute: [{ x: 2, y: top + 9, z: 0 }, { x: 2, y: top + 6, z: 0 }, { x: 7, y: top + 6, z: 0 }] });
+  const remoteRoomRect = (top, slot) => ({ x: slot % 2 ? 16 : -22, y: top + 32 * Math.floor(slot / 2), w: 20, h: 26 });
+  const hullAround = (rects, HULL_MARGIN = 3) => {
+    const minX = Math.min(...rects.map(r => r.x)), minY = Math.min(...rects.map(r => r.y));
+    const maxX = Math.max(...rects.map(r => r.x + r.w)), maxY = Math.max(...rects.map(r => r.y + r.h));
+    return { x: minX - HULL_MARGIN, y: minY - HULL_MARGIN, w: maxX - minX + 2 * HULL_MARGIN, h: maxY - minY + 2 * HULL_MARGIN };
+  };
   function build(rooms, page, extras = {}) {
+    // Ships appear only when remote hosts are configured; a single-host station is laid out exactly as before.
+    const remoteHosts = Array.isArray(extras.hosts) ? extras.hosts.map(host => ({ ...host })) : [];
+    const shipIndex = host => { let index = remoteHosts.findIndex(value => value.id === host); if (index < 0) { remoteHosts.push({ id: host, health: 'unavailable' }); index = remoteHosts.length - 1; } return index; };
+    for (const room of rooms) if (room.host) shipIndex(room.host);
+    // Ship tops: below the flagship hull's bottom edge (its lowest connector), then below each remote hull in turn.
+    const roomY = room => { const slot = room.slot % 8; return ROOM_Y(slot % 2, Math.floor(slot / 2)); };
+    let cursor = Math.max(12, ...rooms.filter(room => !room.host).map(room => roomY(room) + 29)) + HULL_MARGIN;
+    const tops = new Map(), mailrooms = new Map();
+    for (const host of remoteHosts) {
+      const top = cursor + SHIP_GAP_Y + REMOTE_MARGIN, own = rooms.filter(room => room.host === host.id);
+      tops.set(host.id, top); mailrooms.set(host.id, mailroomAt(top));
+      cursor = Math.max(top + 12, ...own.map(room => remoteRoomRect(top, room.slot % 8).y + 29)) + REMOTE_MARGIN;
+    }
     const mail = { rect: { x: 0, y: 0, w: 14, h: 12 }, hub: { x: 7, y: 6, z: 0 },
       tower: { x: 5, y: 1, w: 4, h: 3 }, pads: [4, 7, 10].map(x => ({ x, y: 9, z: 0 })),
       pod: [{ x: 11, y: 9, z: 0 }, { x: 11, y: 6, z: 0 }, { x: 7, y: 6, z: 0 }],
@@ -39,10 +70,12 @@ const ObserverScene = (() => {
     const observatory = observatoryFor(), platforms = [], walkways = [{ kind: 'observatory-link', rect: { x: 11, y: -4, w: 2, h: 4 } }], workers = [], helperOverflow = [], banks = new Map();
     for (const room of rooms) {
       const slot = room.slot % 8, bank = slot % 2, index = Math.floor(slot / 2);
-      const rect = { x: bank ? 24 : -30, y: (bank ? -42 : -48) + 32 * index, w: 20, h: 26 };
-      const spineX = bank ? 19 : -5, entry = pointAt(rect, 10, 25), elbow = pointAt(rect, 10, 28), join = { x: spineX, y: elbow.y, z: 0 };
-      if (!banks.has(bank)) banks.set(bank, []); banks.get(bank).push(join.y);
-      walkways.push(strip(entry, elbow, 'connector'), strip(elbow, join, 'connector'));
+      const own = room.host ? mailrooms.get(room.host) : mail, dock = own.hub;
+      const rect = room.host ? remoteRoomRect(tops.get(room.host), slot) : { x: bank ? 24 : -30, y: ROOM_Y(bank, index), w: 20, h: 26 };
+      const spineX = room.host ? 7 : bank ? 19 : -5, entry = pointAt(rect, 10, 25), elbow = pointAt(rect, 10, 28), join = { x: spineX, y: elbow.y, z: 0 };
+      const bankKey = room.host ? room.host : bank;
+      if (!banks.has(bankKey)) banks.set(bankKey, { x: spineX, host: room.host || null, dock, ys: [] }); banks.get(bankKey).ys.push(join.y);
+      walkways.push(onHost(strip(entry, elbow, 'connector'), room.host), onHost(strip(elbow, join, 'connector'), room.host));
       const sections = [];
       for (let block = 0; block < room.blocks.length; block++) {
         const value = room.blocks[block], previous = sections.at(-1);
@@ -56,7 +89,7 @@ const ObserverScene = (() => {
         { kind: 'apron', rect: { x: rect.x + 1, y: rect.y + 24, w: 2, h: 1 } },
         { kind: 'apron', rect: { x: rect.x + 17, y: rect.y + 24, w: 2, h: 1 } }
       ];
-      platforms.push({ key: room.key, projectId: room.projectId, name: room.name, annex: room.annex, accent: room.accent, rect, sections,
+      platforms.push({ key: room.key, projectId: room.projectId, name: room.name, annex: room.annex, accent: room.accent, rect, sections, ...(room.host ? { host: room.host } : {}),
         decorationRegions, entry: { point: entry, edge: 'front-y' }, sign: pointAt(rect, 10, 0, 1.25) });
       for (const { row, block, seat, kind } of room.rows) {
         if (kind === 'helper') continue;
@@ -64,7 +97,8 @@ const ObserverScene = (() => {
         const chair = { x: desk.x + 1, y: desk.y - 0.5, z: 0 }, laneY = chair.y - 0.75;
         const home = sections.find(section => contains(section.rect, { x: desk.x + 1, y: desk.y + 0.5 })) || null;
         workers.push({ id: row.id, row, kind: 'session', parentId: null, scale: 1, platformKey: room.key, accent: room.accent, desk, chair, home: home ? { ...home.rect } : null, section: home ? home.section : null,
-          route: [chair, { x: chair.x, y: laneY, z: 0 }, { x: rect.x + 10, y: laneY, z: 0 }, entry, elbow, join, { x: spineX, y: 6, z: 0 }, mail.hub] });
+          // Remote crew end at their own ship's mailroom (up the spine into it); they never cross to another ship.
+          route: [chair, { x: chair.x, y: laneY, z: 0 }, { x: rect.x + 10, y: laneY, z: 0 }, entry, elbow, join, ...(room.host ? [] : [{ x: spineX, y: 6, z: 0 }]), own.hub] });
       }
       const platform = platforms.at(-1), stations = [];
       const lanes = [0, 1, 2].flatMap(block => [4.75, 7.75].map(y => ({ x: rect.x + 1, y: rect.y + block * 7 + y - 0.25, w: 18, h: 0.5 })))
@@ -87,9 +121,10 @@ const ObserverScene = (() => {
       }
       platform.helperStations = stations;
     }
-    for (const [bank, ys] of banks) {
-      const x = bank ? 19 : -5;
-      walkways.push(strip({ x, y: Math.min(6, ...ys) }, { x, y: Math.max(6, ...ys) }, 'spine'), strip({ x, y: 6 }, mail.hub, 'hub-link'));
+    for (const { x, host, dock, ys } of banks.values()) {
+      // A remote spine leaves its mailroom's front edge and runs down the ship's centre line.
+      if (host) walkways.push(onHost(strip({ x, y: dock.y + 6 }, { x, y: Math.max(...ys) }, 'spine'), host));
+      else walkways.push(strip({ x, y: Math.min(dock.y, ...ys) }, { x, y: Math.max(dock.y, ...ys) }, 'spine'), strip({ x, y: 6 }, mail.hub, 'hub-link'));
     }
     for (const worker of workers.filter(worker => worker.kind === 'helper')) {
       const parent = workers.find(parent => parent.id === worker.parentId);
@@ -109,12 +144,35 @@ const ObserverScene = (() => {
       workers.push({ id: overseerRow.id, row: overseerRow, kind: 'session', role: 'overseer', parentId: null, scale: 1, platformKey: 'observatory', accent: '#3fd8e8',
         desk: observatory.desk, chair: observatory.chair, route: [observatory.chair, { x: observatory.chair.x, y: -11, z: 0 }, { x: 12, y: -11, z: 0 }, ...observatory.link, mail.hub] });
     }
-    const extents = [mail.rect, ...platforms.map(p => p.rect), ...walkways.map(w => w.rect)].map(rect => ({ rect }))
+    // Hulls: one per host when remotes exist. The flagship wraps this machine's whole station; a remote ship wraps its
+    // mailroom and rooms, or just its mailroom when the host has no agents (or has not been reached yet).
+    let ships = [], links = [], relays = [];
+    if (remoteHosts.length) {
+      const flagship = hullAround([mail.rect, observatory.rect, ...platforms.filter(p => !p.host).map(p => p.rect), ...walkways.filter(w => !w.host).map(w => w.rect)]);
+      ships = [{ id: null, local: true, health: extras.localHealth || 'available', rect: flagship }];
+      let above = flagship;
+      for (const host of remoteHosts) {
+        const own = mailrooms.get(host.id);
+        const parts = [own.rect, ...platforms.filter(p => p.host === host.id).map(p => p.rect), ...walkways.filter(w => w.host === host.id).map(w => w.rect)];
+        const health = host.health || 'unavailable', rect = hullAround(parts, REMOTE_MARGIN);
+        const mode = host.mail?.mode === 'relay' ? 'relay' : 'separate', observed = host.mail?.observed === 'active' ? 'active' : 'none';
+        ships.push({ id: host.id, local: false, health, observedAt: host.observedAt ?? null, reason: host.reason || null, agents: host.agents ?? 0, mail: own, rect, mailMode: mode });
+        // Observation link: the hub's ssh stream to this host, hull to hull across the gap. Its state is the stream's
+        // real health, never the config; it is telemetry, not a corridor or a mail path.
+        links.push({ host: host.id, health, from: { x: 12, y: above.y + above.h }, to: { x: 12, y: rect.y } });
+        // Relay line (mail: "relay" only): mailroom to mailroom; 'configured' (drawn broken) until relayed traffic is seen.
+        if (mode === 'relay') relays.push({ host: host.id, state: observed === 'active' ? 'active' : 'configured', lastRelayedAt: host.mail?.lastRelayedAt ?? null,
+          from: { x: 4, y: mail.rect.y + mail.rect.h }, to: { x: 4, y: own.rect.y } });
+        above = rect;
+      }
+    }
+    const extents = [mail.rect, ...platforms.map(p => p.rect), ...walkways.map(w => w.rect), ...ships.map(ship => ship.rect)].map(rect => ({ rect }))
       .concat(observatory.extents);
     const bounds = projectedBounds(extents);
     const revision = JSON.stringify([page, observatory.extents, observatory.overseer || null, rooms.map(r => [r.key, r.slot, r.blocks.map(b => b.section || b.repo)]).sort(),
+      ...(ships.length ? [ships.map(ship => [ship.id, ship.health, ship.rect]), relays.map(relay => [relay.host, relay.state])] : []),
       workers.map(w => [w.id, w.kind, w.parentId, w.chair.x, w.chair.y]).sort()]);
-    return { page, revision, platforms, walkways, workers, helperOverflow, observatory, mail, bounds };
+    return { page, revision, platforms, walkways, workers, helperOverflow, observatory, mail, bounds, ...(ships.length ? { ships, links, relays } : {}) };
   }
 
   const viewportOf = v => ({ width: Number.isFinite(v.width) && v.width > 0 ? v.width : 1, height: Number.isFinite(v.height) && v.height > 0 ? v.height : 1 });
@@ -162,23 +220,27 @@ const ObserverScene = (() => {
     for (const r of regions) if (point.x >= r.left && point.x <= r.left + r.width && point.y >= r.top && point.y <= r.top + r.height && (!chosen || r.depth >= chosen.depth)) chosen = r;
     return chosen ? chosen.id : null;
   }
-  function endpoint(scene, layout, id) {
+  // A host's own mailroom: this machine's for host null, else that ship's. Mail never leaves its host's ship.
+  const mailOf = (scene, host) => host ? (scene.ships || []).find(ship => ship.id === host)?.mail || null : scene.mail;
+  function endpoint(scene, layout, id, host = null) {
+    const own = mailOf(scene, host) || scene.mail;
     if (layout.seatFor(id) !== undefined) {
       const page = layout.pageFor(id), worker = scene.workers.find(w => w.id === id);
-      if (page === scene.page && worker) return { key: id, points: worker.route };
-      return { key: 'pod', points: scene.mail.pod, deck: page + 1 };
+      // Only a worker of this host's own ship can be a courier endpoint; anything else falls back to this host's pod.
+      if (page === scene.page && worker && (worker.row.host || null) === host) return { key: id, points: worker.route };
+      return { key: 'pod', points: own.pod, deck: page + 1 };
     }
-    return { key: 'chute', points: scene.mail.chute };
+    return { key: 'chute', points: own.chute };
   }
-  function route(scene, layout, message, rows) {
-    const from = endpoint(scene, layout, message.from), to = endpoint(scene, layout, message.to), recipient = rows.find(r => r.id === message.to);
+  function route(scene, layout, message, rows, host = null) {
+    const from = endpoint(scene, layout, message.from, host), to = endpoint(scene, layout, message.to, host), recipient = rows.find(r => r.id === message.to);
     return { key: from.key + '>' + to.key, from: from.points, to: to.points, color: recipient ? layout.colorFor(Model.projectKey(recipient)).accent : '#c9d3da' };
   }
-  function pending(scene, layout, messages) {
+  function pending(scene, layout, messages, host = null) {
     const spots = new Map();
     for (const message of messages) {
       if (message.acknowledgedAt) continue;
-      const end = endpoint(scene, layout, message.to), key = end.key + ':' + (end.deck || '');
+      const end = endpoint(scene, layout, message.to, host), key = end.key + ':' + (end.deck || '');
       if (!spots.has(key)) spots.set(key, { point: { ...end.points[0], z: 1.2 }, count: 0, mark: false, label: end.deck ? 'D' + end.deck : '' });
       const spot = spots.get(key); spot.count++; if (['failed', 'unsupported', 'unknown'].includes(message.wake)) spot.mark = true;
     }
@@ -459,6 +521,6 @@ const ObserverScene = (() => {
     }
     return { reconcile, step, reset };
   }
-  return { build, project, unproject, fit, focus, platformBounds, focusPlatform, hitPlatform, zoomAt, pan, toScreen, fromScreen, hitTest, endpoint, route, pending, createMovement };
+  return { build, mailOf, project, unproject, fit, focus, platformBounds, focusPlatform, hitPlatform, zoomAt, pan, toScreen, fromScreen, hitTest, endpoint, route, pending, createMovement };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ObserverScene;

@@ -196,3 +196,16 @@ body.control .session-row .row-top { padding-right:98px; } body.control .session
 .project-spawn { min-width:28px; min-height:28px; padding:0 6px; font:19px/1 var(--term); letter-spacing:0; text-transform:none; flex:none; }
 .control-notice { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:60; max-width:min(80vw,720px); padding:8px 14px; font:14px/1.3 var(--term); color:var(--ink); background:#06130b; border:1px solid var(--phosphor); border-radius:4px; box-shadow:0 0 14px var(--glow); }
 .control-notice.error { color:#ffd2c0; border-color:#ff8a5c; box-shadow:0 0 14px rgba(255,138,92,.45); }
+
+/* Multi-host: host tabs choose whose crew the panel lists; a ship click on the station does the same. */
+.host-tabs { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 6px; clear:both; }
+.host-tab { min-height:26px; padding:2px 10px; font:14px/1 var(--term); letter-spacing:.06em; text-transform:uppercase; color:var(--dim); background:#06130b; border:1px solid var(--line); border-radius:2px 8px 2px 2px; }
+.host-tab .host-dot { display:inline-block; width:7px; height:7px; margin-right:6px; border-radius:50%; background:var(--dim); vertical-align:middle; }
+.host-tab.live .host-dot { background:var(--working); box-shadow:0 0 6px var(--glow); } .host-tab.remote.live .host-dot { background:#ff9d3a; box-shadow:0 0 6px rgba(255,157,58,.5); }
+.host-tab[aria-selected=true],.host-tab[aria-selected=true]:not(:disabled):hover { color:var(--tab-ink); background:var(--phosphor); border-color:var(--phosphor); box-shadow:0 0 10px var(--glow); }
+.host-health { margin:2px 0 0; font:14px/1.3 var(--term); color:var(--dim); } .host-health.live { color:var(--working); } .host-health.down { color:var(--stale); }
+.host-spawn { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:10px 18px 0 22px; padding:8px 10px; border:1px dashed var(--line); border-radius:2px 8px 2px 2px; font:15px/1.2 var(--term); color:var(--ink); }
+/* Needs attention: a blocked agent (startup dialog, permission prompt) reads as waiting for input, attach first. */
+.session-item.needs-input .session-row { border-color:var(--blocked); box-shadow:inset 3px 0 0 var(--blocked); }
+.session-item.needs-input .status.blocked { font-weight:bold; text-shadow:0 0 6px rgba(255,189,92,.45); }
+.row-attach.prominent { color:#1a1206; background:var(--blocked); border-color:var(--blocked); box-shadow:0 0 10px rgba(255,189,92,.5); }

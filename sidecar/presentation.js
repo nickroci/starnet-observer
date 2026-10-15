@@ -8,7 +8,9 @@ const TOOL_NAMES = new Set(['Bash', 'exec_command', 'shell', 'local_shell', 'wri
 // Opaque ownership IDs and live status/freshness remain unchanged; aliases are display identities only.
 function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LABELS) {
   let closePromise = null;
-  const projects = new Map(), repos = new Map(), worktrees = new Map();
+  const projects = new Map(), repos = new Map(), worktrees = new Map(), hosts = new Map();
+  // Remote host ids are operator-chosen names (often real machine names): they become fictional ship names.
+  const host = id => { if (id == null) return null; if (!hosts.has(id)) hosts.set(id, 'Ship ' + (hosts.size + 1)); return hosts.get(id); };
   // Dynamic-arrangement labels are private too: fictional bay/section names in the same sorted allocation pass.
   const bays = new Map(), sections = new Map();
   const bay = id => { if (!bays.has(id)) bays.set(id, 'Bay ' + (bays.size + 1)); return bays.get(id); };
@@ -49,7 +51,7 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
     if (row.worktree && !worktrees.has(worktreeKey)) worktrees.set(worktreeKey, 'Worktree ' + (worktrees.size + 1));
     const helper = row.source === 'helper' || Object.hasOwn(row, 'parentId');
     const safe = {
-      id: row.id, provider: row.provider, source: row.source, status: row.status,
+      id: row.id, host: host(row.host), provider: row.provider, source: row.source, status: row.status,
       projectId: row.projectId, project: room.name, projectKind: row.projectKind,
       repoId: row.repoId, repo: repoName, repoKind: row.repoKind,
       worktree: row.worktree ? worktrees.get(worktreeKey) : null,
@@ -86,9 +88,14 @@ function makePresentationObserver(observer, now = Date.now, labels = DEFAULT_LAB
         sessions: inventory.sessions.map(rowProjection), aggregate: inventory.aggregate,
         health: inventory.health, observedAt: inventory.observedAt,
         error: inventory.error ? 'Local session inventory unavailable' : null,
-        sources: { herdr: source(inventory.sources?.herdr), desktop: source(inventory.sources?.desktop) },
+        sources: { herdr: source(inventory.sources?.herdr), desktop: source(inventory.sources?.desktop),
+          ...(inventory.sources?.hosts ? { hosts: Object.fromEntries(Object.entries(inventory.sources.hosts).map(([id, value]) =>
+            [id === 'local' ? 'local' : host(id), { health: value.health, observedAt: value.observedAt, agents: value.agents, ...(value.mail ? { mail: { mode: value.mail.mode, observed: value.mail.observed, lastRelayedAt: value.mail.lastRelayedAt } } : {}) }])) } : {}) },
         bus: bus ? { health: bus.health, reason: bus.reason, observedAt: bus.observedAt, window: bus.window,
-          messages: bus.messages.map(message => ({ id: message.id, from: message.from, to: message.to, sentAt: message.sentAt, acknowledgedAt: message.acknowledgedAt, wake: message.wake })) } : null
+          messages: bus.messages.map(message => ({ id: message.id, from: message.from, to: message.to, sentAt: message.sentAt, acknowledgedAt: message.acknowledgedAt, wake: message.wake })) } : null,
+        // Each remote host's own mail, masked like local mail and keyed by the host's fictional ship name.
+        ...(inventory.hostBus ? { hostBus: Object.fromEntries(Object.entries(inventory.hostBus).map(([id, value]) => [host(id), { health: value.health, observedAt: value.observedAt, window: value.window,
+          messages: (value.messages || []).map(message => ({ id: message.id, key: message.id + '@' + host(id), host: host(id), from: message.from, to: message.to, sentAt: message.sentAt, acknowledgedAt: message.acknowledgedAt, wake: message.wake })) }])) } : {})
       };
     },
     async inspect(id) { return unavailable(id, 'presentation-mode', now()); },
