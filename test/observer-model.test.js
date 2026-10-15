@@ -158,6 +158,30 @@ assert.equal(Model.hoverLabel({ source: 'helper', provider: 'codex', title: 'Ada
   assert.equal(layout.onPage(0)[0].rows[0].kind, 'session');
 }
 
+{
+  // Idle age: fresh under ten minutes, log-eased, quantised, capped at eight hours; working and untimed rows never age.
+  const now = 100 * 3600000, minutes = m => now - m * 60000, idle = (m, extra = {}) => Model.idleAge({ status: 'idle', lastActivityAt: minutes(m), ...extra }, now);
+  assert.deepEqual(idle(9), { ms: 9 * 60000, level: 0, vigour: 1, label: '' }, 'under ten minutes is fresh');
+  // Sparkle vigour: a longer clock than the tint, so today, yesterday and last week still differ; eighths; none at 3 days.
+  const vigour = [9, 60, 480, 24 * 60, 48 * 60, 72 * 60, 200 * 60].map(m => idle(m).vigour);
+  assert.deepEqual(vigour, [...vigour].sort((a, b) => b - a), 'vigour only fades with time');
+  assert.equal(vigour[0], 1); assert.ok(vigour[2] > 0.4, 'still lively at eight hours'); assert.ok(vigour[3] > vigour[4] && vigour[4] > 0, 'a day and two days apart differ');
+  assert.equal(idle(72 * 60).vigour, 0); assert.equal(idle(200 * 60).vigour, 0, 'no sparks after three days');
+  assert.ok(vigour.every(value => Number.isInteger(Math.round(value * 8 * 1e9) / 1e9)), 'vigour is quantised to eighths');
+  assert.equal(Model.idleAge({ status: 'working', lastActivityAt: minutes(6000) }, now).vigour, 1, 'working is always lively');
+  assert.equal(Model.idleAge({ status: 'idle' }, now).vigour, 1, 'untimed rows are not faded');
+  assert.equal(idle(11).label, 'idle 11m'); assert.equal(idle(192).label, 'idle 3h 12m'); assert.equal(idle(26 * 60).label, 'idle 1d 2h');
+  const levels = [11, 30, 60, 120, 240, 480, 2000].map(m => idle(m).level);
+  assert.deepEqual(levels, [...levels].sort((a, b) => a - b), 'age only darkens with time');
+  assert.equal(idle(480).level, 1); assert.equal(idle(5000).level, 1, 'capped at eight hours');
+  assert.ok(levels.every(level => Number.isInteger(level * 6)), 'levels are quantised to sixths');
+  assert.equal(Model.idleAge({ status: 'working', lastActivityAt: minutes(600) }, now).level, 0, 'a working pane is active now');
+  assert.equal(Model.idleAge({ status: 'idle' }, now).level, 0, 'no timestamp, no age');
+  assert.equal(Model.idleAge({ status: 'idle', lastActivityAt: now + 60000 }, now).level, 0, 'a future time is fresh');
+  assert.equal(Model.hoverLabel({ provider: 'claude', source: 'herdr', status: 'idle', title: 'Ship it', lastActivityAt: minutes(192) }, false, now), 'Claude — Ship it · idle 3h 12m');
+  assert.equal(Model.hoverLabel({ provider: 'claude', source: 'herdr', status: 'idle', title: 'Ship it', lastActivityAt: minutes(2) }, false, now), 'Claude — Ship it');
+}
+
 // Theme project accents recolour the ten slots only: same rooms, slots, floor names and desks as the default palette.
 {
   const defaults = require('../frontend/assets/themes/starnet/theme.json').scene.projectAccents;
