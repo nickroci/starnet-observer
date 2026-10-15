@@ -196,14 +196,17 @@ const ObserverScene = (() => {
     }
     /* Relays float in space east of everything observed; each bound mailroom's tower beams up to its relay, and the
        relay's unobserved machines sit beyond it as outposts. Nothing here is a corridor: crew never walk these. */
-    const relays = [], solid = [mail.rect, observatory.rect, ...platforms.map(p => p.rect), ...ships.map(ship => ship.rect)];
+    // A relay sits level with the mailrooms it serves, just clear of whatever occupies that band, so a relay used only by
+    // a remote ship floats beside that ship rather than across the station.
+    const relays = [], solid = [mail.rect, observatory.rect, ...platforms.map(p => p.rect), ...(ships.length ? ships.map(ship => ship.rect) : [])];
     const mailroomFor = host => host === null ? mail : mailrooms.get(host) || null;
-    let relayX = Math.max(...solid.map(rect => rect.x + rect.w)) + 12, relayCursor = -Infinity;
+    let relayCursor = -Infinity;
     for (const net of Array.isArray(extras.relays) ? extras.relays : []) {
       const members = net.members.filter(member => mailroomFor(member.host));
       if (!members.length) continue;
       const ys = members.map(member => mailroomFor(member.host).hub.y), height = Math.max(6, net.outposts.length * 8);
       const top = Math.max(relayCursor, (Math.min(...ys) + Math.max(...ys)) / 2 - height / 2);
+      const band = solid.filter(rect => rect.y < top + height + 2 && rect.y + rect.h > top - 2), relayX = Math.max(...(band.length ? band : solid).map(rect => rect.x + rect.w)) + 18;
       const rect = { x: relayX, y: top + height / 2 - 2, w: 4, h: 4 }, center = { x: rect.x + 2, y: rect.y + 2, z: 3.2 };
       relays.push({ key: 'relay:' + net.relay, relay: net.relay, rect, center,
         members: members.map(member => ({ ...member, from: towerTop(mailroomFor(member.host)), to: center })),

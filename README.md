@@ -269,7 +269,7 @@ Agents on other machines (for example a VPS running Herdr) can appear as their o
 station. Install the observer on each remote as usual, then list the remotes in `observer.config.json`:
 
 ```json
-{ "remotes": [{ "id": "vm1", "ssh": "nick@203.0.113.10", "dir": "~/starnet-observer", "mail": "separate" }] }
+{ "remotes": [{ "id": "vm1", "ssh": "nick@203.0.113.10", "dir": "~/starnet-observer" }] }
 ```
 
 The hub keeps one `ssh -o BatchMode=yes` stream per remote running `bun --no-env-file scripts/stream.js`, which prints
@@ -280,9 +280,30 @@ transcript or message inspection never reaches a remote.
 llm-bus is per host, so each remote ship has its own mailroom showing that host's own bus; its couriers and crew stay
 on their own ship, and the Live sessions mailroom section lists the selected host's mail. Remote messages keep their
 host's numeric id and also carry a hub-wide `key` (`5@vm1`). The ships are joined only by a dashed "ssh · observing"
-line: the hub's observation stream, coloured by its real health, never a mail path. `mail` is `"separate"` (default,
-no mail link) or `"relay"`: a relay between buses is expected, but until relayed traffic is actually observed the page
-draws only a broken "relay configured · not seen" line between the mailrooms (nothing relays today).
+line: the hub's observation stream, coloured by its real health, never a mail path.
+
+### llm-bus relays
+
+llm-bus can relay mail between machines through a relay it is bound to ([remote bus](https://github.com/wnz99/llm-bus/blob/main/docs/remote-bus.md)).
+Nothing about this is configured in the observer: every observed bus, local or remote, reports its own binding, and the
+station draws exactly that. The observer reads only routing metadata from the bus's `remote_*` tables: the relay's
+host name and this machine's id, each relayed message's direction, peer machine, shared repo and delivery state, and
+the relay's cached roster counted per machine. It never reads tokens, URL paths, native session ids or message bodies
+for this.
+
+- A relay is a satellite in open space beside the mailrooms it serves, labelled with its host name.
+- Each bound mailroom's tower beams up to its relay. The beam marches while that bus saw relay activity in the last
+  15 minutes, is still and dashed while quiet, and is grey while that bus is unreadable. The roster cache alone is not
+  proof that a bridge is running.
+- Machines the relay's roster names that this observer does not watch appear as dashed outposts beyond the relay,
+  with one pip per listed agent and the label "not observed". Their rooms are never drawn. An observed machine (this
+  one, or a configured remote bound to the same relay) is never an outpost.
+- Couriers for relayed mail fly between the mailroom and the relay. Unacknowledged outgoing mail waits where llm-bus
+  last proved it is: in the mailroom while `queued_local`, at the relay once `accepted_remote`, and at the far
+  machine's outpost once `delivered_local`. Each machine observes only its own half of a crossing.
+- Ledger rows name the far side, for example "Codex on whitenoise · llm-bus (via relay)", with the synchronised relay
+  state ("held at the relay", "delivered to the far machine, not acknowledged"). The bus status names the binding.
+- Presentation mode replaces relay hosts, machine ids and shared repo ids with fictional names.
 
 With `OBSERVER_CONTROL=1`, control actions also work on remote agents: `⇱`, `✕` and the project `+` run `herdr` on
 that host over the same non-interactive ssh (every argument validated and single-quoted; hosts not listed in
