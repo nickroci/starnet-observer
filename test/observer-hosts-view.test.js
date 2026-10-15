@@ -36,7 +36,12 @@ const ghosts = Scene.shadowRows(relays);
 layout.reconcile([...rows, ...ghosts]);
 const hosts = [{ id: 'vm', health: 'available', agents: 2 }, { id: 'empty', health: 'stale', observedAt: 1, agents: 0 },
   { id: 'relay:whitenoise', shadow: true, health: 'shadow', machine: 'whitenoise', relay: 'relay.example.dev', member: 'vm', agents: 2 }];
-const scene = Scene.build(layout.onPage(0), 0, { hosts, relays });
+// The shadow crew are on the relay by definition; no vm agent is published (none works in the shared repo).
+const relayMembers = new Map(ghosts.map(ghost => [ghost.id, { host: ghost.host, repo: ghost.repo }]));
+const scene = Scene.build(layout.onPage(0), 0, { hosts, relays, relayMembers });
+assert.ok(scene.platforms.find(platform => platform.host === 'relay:whitenoise').relay, 'the shadow room is a relay room');
+assert.ok(!scene.platforms.some(platform => platform.host === 'vm' && platform.relay), 'vm rooms with no published agent are not');
+assert.ok(scene.walkways.some(walkway => walkway.relay && walkway.host === 'relay:whitenoise') && !scene.walkways.some(walkway => walkway.relay && walkway.host === 'vm'), 'relay lanes only where the relay carries agents');
 assert.equal(scene.links.length, 2, 'fixture: an observation link per observed remote ship, none to the shadow'); assert.equal(scene.relays.length, 1, 'fixture: one relay');
 assert.deepEqual(scene.workers.filter(worker => worker.row.shadow).map(worker => worker.id).sort(), peers.map(peer => peer.id), 'fixture: ghost crew seated on the shadow ship');
 const node = canvas(), ships = [];
@@ -66,7 +71,8 @@ assert.ok(drawn('ssh · stale'), 'a stale host\'s link shows its real state');
   const shadowRoom = scene.platforms.find(platform => platform.host === 'relay:whitenoise');
   assert.ok(view.focusPlatform(shadowRoom.key)); node.ctx.texts.length = 0; now += 16; view.paint(now);
   assert.ok(node.ctx.texts.some(text => /^◌ WHITENOISE · 2 agents · via relay · not observed/.test(text)), 'a shadow ship names its machine and says it is not observed');
-  assert.ok(node.ctx.texts.some(text => /^relay · relay\.example\.dev · live/.test(text)), 'the relay link, labelled in the gap before the shadow ship, names its relay and live state');
+  assert.ok(node.ctx.texts.includes('LLM-BUS · 2 · ⇄ relay'), 'a relay room says so on its sign');
+  assert.ok(node.ctx.texts.some(text => /^RELAY relay\.example\.dev · live · 0 on it here/.test(text)), 'the relay link, labelled in the gap before the shadow ship, names its relay and live state');
   const vmShip = scene.ships.find(ship => ship.id === 'vm'), shadowShip = scene.ships.find(ship => ship.shadow);
   assert.ok(shadowShip.rect.x > vmShip.rect.x + vmShip.rect.w, 'the shadow ship docks beside the ship it links to');
   assert.equal(shadowShip.mail.hub.y, vmShip.mail.hub.y, 'level with its mailroom');

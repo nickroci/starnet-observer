@@ -21,7 +21,7 @@ const ADDRESS = /^(claude|codex):[A-Za-z0-9._-]{1,200}$/;
 const REMOTE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const REMOTE_ADDRESS = /^([A-Za-z0-9_-]{1,128})\/([A-Za-z0-9_-]{1,128})\/(claude|codex):[A-Za-z0-9._-]{1,200}$/;
 const RELAY_STATES = new Set(['queued_local', 'accepted_remote', 'delivered_local', 'acknowledged', 'expired']);
-const REMOTE_TABLES = ['remote_binding', 'remote_outbox', 'remote_imports', 'remote_peers'];
+const REMOTE_TABLES = ['remote_binding', 'remote_outbox', 'remote_imports', 'remote_peers', 'remote_publications'];
 const PEER_IDLE_MS = 24 * 3600 * 1000, MAX_PEERS = 2000, MAX_MACHINES = 32;
 const MAX_PEER_AGENTS = 48;
 // A remote agent's page identity: an opaque hash of its full relay address, so the far side's native session id never
@@ -70,10 +70,20 @@ function selectRemote(database, rows, at) {
     }
     if (last !== null) entry.lastSeen = Math.max(entry.lastSeen ?? 0, last);
   }
+  /* Which of this machine's own sessions are on the relay: the bridge publishes exactly the sessions of repositories its
+     config maps, and records each publication here ("repo/native address" → payload). An ended or day-old publication
+     is not counted, matching llm-bus's own roster rule. Native addresses stay in this process (joined in publicBus). */
+  const published = [];
+  if (present.has('remote_publications')) for (const { address: key, payload } of database.query('SELECT address, payload FROM remote_publications LIMIT ' + MAX_PEERS).all()) {
+    let value; try { value = JSON.parse(payload); } catch (_) { continue; }
+    if (!value || !ADDRESS.test(value.native_address) || !REMOTE_ID.test(value.repo_id) || key !== value.repo_id + '/' + value.native_address || value.ended) continue;
+    const last = typeof value.last_seen === 'string' ? Date.parse(value.last_seen) : NaN;
+    if (Number.isFinite(last) && at - last < PEER_IDLE_MS) published.push({ address: value.native_address, repo: value.repo_id });
+  }
   const peers = [...machines.values()].map(entry => ({ machine: entry.machine, repos: [...entry.repos].sort().slice(0, 16), agents: entry.agents, lastSeen: entry.lastSeen,
     list: entry.list.sort((a, b) => a.repo.localeCompare(b.repo) || a.id.localeCompare(b.id)) }))
     .sort((a, b) => a.machine.localeCompare(b.machine));
-  return { relay: binding.relay, machine: binding.machine, peers, lastActivityAt };
+  return { relay: binding.relay, machine: binding.machine, peers, lastActivityAt, published };
 }
 
 // Mirrors llm-bus default_path(): LLM_BUS_DB (with ~), else the per-user data folder.
@@ -244,6 +254,8 @@ function publicBus(state, sessions) {
     messages: state.rows.map(row => ({ id: row.id, ...(row.identity === undefined ? {} : { identity: row.identity }), from: endpoint(row.sender), to: endpoint(row.recipient),
       sentAt: row.sentAt, acknowledgedAt: row.acknowledgedAt, wake: row.wake, ...(row.relay ? { relay: { ...row.relay } } : {}) })),
     ...(state.remote ? { remote: { relay: state.remote.relay, machine: state.remote.machine, lastActivityAt: state.remote.lastActivityAt,
+      // This machine's panes on the relay: exact pane joins only, as observer ids with their shared repo.
+      onRelay: (state.remote.published || []).flatMap(entry => { const id = ADDRESS.test(entry.address) && panes.get(entry.address); return id && id !== 'ambiguous' ? [{ id, repo: entry.repo }] : []; }),
       peers: state.remote.peers.map(peer => ({ ...peer, repos: peer.repos.slice(), list: (peer.list || []).map(agent => ({ ...agent })) })) } } : {}) };
 }
 module.exports = { makeBusReader, publicBus, defaultBusPath, WINDOW, makePrivateSnapshotQuery, sanitizeMessageInspection, relayBinding, RELAY_STATES };
