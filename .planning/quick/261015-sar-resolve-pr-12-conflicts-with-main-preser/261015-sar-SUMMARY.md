@@ -13,3 +13,7 @@ Verification: Bun 1.3.13, all 27 test files passed; staged/full diff checks clea
 PR #8's updated paint baseline was independently reproduced with the original PR8 painter; default/custom-palette equivalence remains covered. No original feature scope was expanded.
 
 Prepared for a normal fast-forward push to the existing PR branch. The PR remains open; this repair does not authorize or perform its merge. Real-browser visuals and live provider/SSH actions were not exercised.
+
+## Authorized delivery
+
+User explicitly authorized merge. A final integration with main through PR #14 and PR #8 retained both feature sets and pixel styles. All 27 Bun1.3.13 test files passed; fresh independent integration review approved with no findings. Final records ship in PR #12 before its authorized merge.

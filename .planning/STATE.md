@@ -22,14 +22,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-14)
 
 **Core value:** Show local agent activity truthfully without changing observed sessions or exposing private content beyond the local observation boundary.
-**Current focus:** PR #12 conflict resolution against merged theme PR #13; feature PR remains open. No active milestone or phase.
+**Current focus:** PR #8 merged; PR #12 delivery verified and authorized for merge. No active milestone or phase.
 
 ## Current Position
 
 Phase: None (0 planned)
 Plan: None
-Status: PR #12 conflict repair verified and independently approved; feature PR remains open
-Last activity: 2026-10-15 — PR #12 main integration 60eed0b; all 27 test files passed on Bun 1.3.13; independent integration review approved.
+Status: PR #12 complete and verified; final user-authorized merge pending
+Last activity: 2026-10-15 — PR #8 merged; PR #12 integrated main through PR #14 and PR #8, all 27 Bun test files passed, fresh independent integration review approved.
 
 ## Quick Tasks Completed
 
@@ -42,6 +42,7 @@ Last activity: 2026-10-15 — PR #12 main integration 60eed0b; all 27 test files
 | 261015-flf | Migrate Local Observer runtime and SQLite to Bun | 2026-10-15 | [PR #6](https://github.com/wnz99/starnet-observer/pull/6) | Complete | [261015-flf](./quick/261015-flf-migrate-local-observer-runtime-and-sqlit/) |
 | 261015-hqt | Earlier rooms and bounded background detail loading | 2026-10-15 | [PR #7](https://github.com/wnz99/starnet-observer/pull/7) | Complete | [261015-hqt](./quick/261015-hqt-earlier-rooms-and-bounded-background-det/) |
 | 261015-sar | Resolve PR 12 conflicts with main | 2026-10-15 | 60eed0b | Verified; independent review approved | [261015-sar-resolve-pr-12-conflicts-with-main-preser](./quick/261015-sar-resolve-pr-12-conflicts-with-main-preser/) |
+| 261015-mjy | Overseer providers and checkout sections | 2026-10-15 | [PR #12](https://github.com/wnz99/starnet-observer/pull/12) | Complete; merge authorized | [261015-mjy](./quick/261015-mjy-overseer-providers-and-checkout-sections/) |
 | 261015-sb0 | Resolve PR 8 conflicts with main | 2026-10-15 | 27353b2 | Verified; independent review approved | [261015-sb0-resolve-pr-8-conflicts-with-main-preserv](./quick/261015-sb0-resolve-pr-8-conflicts-with-main-preserv/) |
 
 ## Accumulated Context
@@ -64,12 +65,10 @@ No blocking theme issue remains. Synthetic-source browser verification passed; n
 ## Session Continuity
 
 Last session: 2026-10-15
-Stopped at: PR #12 conflict repair complete; publication verification
+Stopped at: PR #12 final delivery records before authorized merge
 Resume file: None
-Next action: Verify fast-forward push and GitHub mergeability for PR #12; leave the PR open for user merge decision.
+Next action: Push final PR #12 records and merge with a merge commit; verify GitHub merge proof.
 
 ### Registered Work
 
-| # | Description | Status | Directory |
-| --- | --- | --- | --- |
-| 261015-mjy | Overseer providers and checkout sections | [PR #12](https://github.com/wnz99/starnet-observer/pull/12) review ready; all reviews/checks passed; merge approval pending | [261015-mjy](./quick/261015-mjy-overseer-providers-and-checkout-sections/) |
+None.

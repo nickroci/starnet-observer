@@ -1,10 +1,10 @@
 ---
-status: in-progress
+status: complete
 ---
 
 # Overseer providers and checkout sections
 
-[PR #12](https://github.com/wnz99/starnet-observer/pull/12) is review ready and remains open. A1 and A2 are implemented, independently reviewed, and verified. Merge awaits explicit user approval; this quick task remains registered rather than completed.
+[PR #12](https://github.com/wnz99/starnet-observer/pull/12) delivers A1 and A2, independently reviewed and verified. User explicitly authorized merging it on 2026-10-15. These final completion records ship with the PR before its merge.
 
 The Observatory offers Claude or Codex through an explicit labeled chooser. Both providers share one verified, persistent overseer identity. Provider validation precedes effects, Claude arguments stay Claude-only, and project + remains Claude. Missing AGENTS.md/CLAUDE.md files receive one independently reviewed, user-approved brief through exclusive creation; existing edits remain untouched.
 
@@ -16,4 +16,4 @@ Verification: Bun 1.3.13; final-source `bun run test` passed all 24 test files, 
 
 Limits: injected mock HTTP checks passed, but native browser navigation failed ERR_BLOCKED_BY_CLIENT. Native modal focus, narrow-viewport visuals and live desktop/provider launches remain unverified. An unchanged inspector test intermittently failed its fixed-turn settle assertion during A1; isolated/full reruns passed without inspector edits. Final A2 and correction full suites passed on first runs. Existing overseer helpers remain list/inspectable without station avatars; that predates this change and is outside its scope.
 
-The private execution record remains .planning/drafts/pr4-additions/FLOW.json, active at step11. Final merge and GSD completion remain pending.
+Final integration includes merged PR #14 and PR #8. All 27 test files passed on Bun 1.3.13; fresh independent integration review approved with no findings, and diff checks were clean. Theme parameters, pixel styling, idle aging, provider selection and checkout identities remain intact. No configured CI checks exist. Final publication and merge proof are recorded privately in .planning/drafts/pr4-additions/FLOW.json; this file does not contain the merge SHA.
