@@ -62,4 +62,4 @@ Next action: Continue registered work or discuss the next request.
 
 | # | Description | Status | Directory |
 | --- | --- | --- | --- |
-| 261015-hqt | Earlier rooms and bounded background detail loading | In progress: Task 2; Task 1 reviewed | .planning/quick/261015-hqt-earlier-rooms-and-bounded-background-det |
+| 261015-hqt | Earlier rooms and bounded background detail loading | In progress: Task 3; Tasks 1–2 reviewed | .planning/quick/261015-hqt-earlier-rooms-and-bounded-background-det |

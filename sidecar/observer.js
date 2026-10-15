@@ -126,20 +126,27 @@ function makeObserver(options = {}) {
         resolved = [];
         for (const pane of panes) resolved.push(await identities.resolve(pane, identityRefresh));
       }
-      for (const [index, pane] of panes.entries()) {
-        const id = 'obs_' + crypto.createHash('sha256').update(endpoint + '\0' + pane.pane_id).digest('hex').slice(0, 24);
-        const identity = resolved[index];
-        const sessionId = identity.sessionId;
-        if (identity.proof) proofs.set(id, identity.proof);
-        const tool = await transcripts.read(id, pane.agent, sessionId);
-        rows.push({ id, paneId: pane.pane_id, provider: pane.agent,
-          title: text(redactText(String(pane.terminal_title_stripped || pane.agent)), 160),
-          ...await projects.resolve(pane.foreground_cwd || pane.cwd),
-          status: STATUSES.has(pane.agent_status) ? pane.agent_status : 'unknown', sessionId,
-          identitySource: identity.source, identityHealth: sessionId ? 'available' : 'unavailable',
-          tool, usage: tool.usage || null, source: 'herdr', observedAt: inventoryAt, inventoryHealth: 'available',
-          inspectionIdentity: sessionId ? pane.agent + ':' + sessionId : null, presence: 'pane' });
+      const cwds = panes.map(pane => pane.foreground_cwd || pane.cwd);
+      const projectRows = projects.resolveMany ? await projects.resolveMany(cwds) : new Array(panes.length);
+      let next = 0;
+      async function readNext() {
+        while (next < panes.length) {
+          const index = next++, pane = panes[index];
+          const id = 'obs_' + crypto.createHash('sha256').update(endpoint + '\0' + pane.pane_id).digest('hex').slice(0, 24);
+          const identity = resolved[index];
+          const sessionId = identity.sessionId;
+          if (identity.proof) proofs.set(id, identity.proof);
+          const tool = await transcripts.read(id, pane.agent, sessionId);
+          rows[index] = { id, paneId: pane.pane_id, provider: pane.agent,
+            title: text(redactText(String(pane.terminal_title_stripped || pane.agent)), 160),
+            ...(projects.resolveMany ? projectRows[index] : await projects.resolve(cwds[index])),
+            status: STATUSES.has(pane.agent_status) ? pane.agent_status : 'unknown', sessionId,
+            identitySource: identity.source, identityHealth: sessionId ? 'available' : 'unavailable',
+            tool, usage: tool.usage || null, source: 'herdr', observedAt: inventoryAt, inventoryHealth: 'available',
+            inspectionIdentity: sessionId ? pane.agent + ':' + sessionId : null, presence: 'pane' };
+        }
       }
+      await Promise.all(Array.from({ length: Math.min(4, panes.length) }, readNext));
       identityProofs = proofs; identities.retain?.(seen);
       rowsBySource.herdr = rows; sources.herdr = { health: 'available', observedAt: inventoryAt, reason: null };
     } catch (_) {
@@ -159,6 +166,7 @@ function makeObserver(options = {}) {
     } catch (_) { retainUnavailable('desktop', 'native-reader-unavailable'); }
   }
   async function refresh() {
+    transcripts.beginDiscovery?.();
     await Promise.all([refreshHerdr(), refreshDesktop()]);
     let lineage;
     try { lineage = await helpers.children(rowsBySource.herdr); }

@@ -84,8 +84,49 @@ const pane = (id, session = ID) => ({ pane_id: id, agent: 'codex', agent_status:
   await deepHelperOwnership();
   await cappedHelperOwnership();
   await nestedHelperGrouping();
+  await boundedDiscovery();
   console.log('observer: shared refresh, stable panes, cache freshness, stale retention and authoritative removal OK');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+async function boundedDiscovery() {
+  for (const batchProjects of [false, true]) {
+    const agents = Array.from({ length: 9 }, (_, index) => ({ ...pane('batch-' + index), cwd: '/fixture/' + index }));
+    let active = 0, maximum = 0, begins = 0, projectMaximum = 0, projectActive = 0;
+    const gates = [], projectGates = [], projectCalls = [];
+    const project = async cwd => {
+      projectCalls.push(cwd); projectMaximum = Math.max(projectMaximum, ++projectActive);
+      await new Promise(resolve => projectGates.push(resolve)); projectActive--;
+      return { projectId: cwd };
+    };
+    const observer = makeObserver({ now: () => 1000,
+      execute: async () => ({ stdout: JSON.stringify({ result: { agents } }) }),
+      identities: { resolveMany: async panes => panes.map(() => ({ sessionId: ID, source: 'fixture' })) },
+      projects: batchProjects ? { resolveMany: async cwds => Promise.all(cwds.map(cwd => Promise.resolve({ projectId: cwd }))) } : { resolve: project },
+      transcripts: { beginDiscovery() { begins++; }, retain() {}, read: async id => {
+        assert.equal(begins, 1, 'sweep starts before summary reads'); maximum = Math.max(maximum, ++active);
+        await new Promise(resolve => gates.push(resolve)); active--; return { available: true, marker: id };
+      } },
+      helpers: { children: async () => ({ rows: [], annotations: new Map(), overflow: new Map() }) },
+      desktop: { inventory: async () => ({ health: 'available', windows: [] }) },
+      bus: { read: async () => ({ rows: [] }) } });
+    let complete = false;
+    const refreshing = observer.get().then(value => { complete = true; return value; });
+    for (let attempts = 0; !complete && attempts < 1000; attempts++) {
+      await new Promise(resolve => setImmediate(resolve));
+      gates.splice(0).reverse().forEach(resolve => resolve());
+      projectGates.splice(0).reverse().forEach(resolve => resolve());
+    }
+    assert(complete, 'bounded refresh completes');
+    const snapshot = await refreshing;
+    assert.equal(maximum, 4, 'summary reads use four concurrent rows');
+    assert(projectMaximum <= 4, 'single-project injected adapter stays bounded');
+    assert.equal(begins, 1);
+    assert.deepEqual(snapshot.sessions.map(row => row.paneId), agents.map(row => row.pane_id), 'completion order preserves roster order');
+    assert.deepEqual(snapshot.sessions.map(row => row.projectId), agents.map(row => row.cwd));
+    if (!batchProjects) assert.equal(projectCalls.length, agents.length);
+    await observer.close();
+  }
+}
 
 async function independentDesktop() {
   let clock = 1000, fail = false, desktopFail = false, rows = [{ id: 'obs_' + 'a'.repeat(24), inspectionIdentity: 'window-a', source: 'desktop', sessionId: null }], release;
@@ -762,7 +803,9 @@ async function identityEnrichmentOrdering() {
     projects: { resolve: async () => { events.push('project'); await new Promise(resolve => setImmediate(resolve)); return {}; } },
     helpers: { children: async parents => { events.push('helpers:' + parents.length); return { rows: [], annotations: new Map(), overflow: new Map() }; } } });
   assert.equal((await observer.get()).sessions.length, 2);
-  assert.deepEqual(events, ['identities:2', 'transcript', 'project', 'transcript', 'project', 'helpers:2']);
+  assert.equal(events[0], 'identities:2', 'identities finish before enrichment');
+  assert.equal(events.at(-1), 'helpers:2', 'helpers follow completed root enrichment');
+  assert.deepEqual(events.slice(1, -1).sort(), ['project', 'project', 'transcript', 'transcript']);
   events.length = 0; inventory = [pane('a'), pane('a')]; clock += 3000;
   assert.equal((await observer.get()).sources.herdr.health, 'unavailable');
   assert.deepEqual(events, ['helpers:2'], 'duplicate inventory rejected before any identity or enrichment calls');
@@ -773,7 +816,9 @@ async function identityEnrichmentOrdering() {
   assert.deepEqual((await observer.get()).sessions, []); assert.deepEqual(events, ['identities:0', 'helpers:0']);
   events.length = 0; delete identities.resolveMany; inventory = [pane('a'), pane('b')]; clock += 3000;
   await observer.get();
-  assert.deepEqual(events, ['identity:a', 'identity:b', 'transcript', 'project', 'transcript', 'project', 'helpers:2'], 'supported injected resolver fallback remains serial');
+  assert.deepEqual(events.slice(0, 2), ['identity:a', 'identity:b'], 'supported injected identity fallback remains serial');
+  assert.deepEqual(events.slice(2, -1).sort(), ['project', 'project', 'transcript', 'transcript']);
+  assert.equal(events.at(-1), 'helpers:2');
 }
 
 async function refreshStartCache() {

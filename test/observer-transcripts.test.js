@@ -209,10 +209,70 @@ const call = (id, name = 'exec_command') => ({ type: 'response_item', timestamp:
     await childDiscoveryWindows(root);
     await nativeHelperProjection(root);
     await openedPathRaces(root);
+    await sharedDiscovery(root);
     observer.retain(new Set());
     console.log('observer transcripts: exact identity, redaction, split UTF-8, partial rows, dedupe, truncation, replacement, oversized rows, symlink jail OK');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+async function sharedDiscovery(temp) {
+  const codex = path.join(temp, 'scan-sharing'); await fs.mkdir(codex);
+  const file = path.join(codex, ID + '.jsonl');
+  await fs.writeFile(file, line({ type: 'session_meta', payload: { id: ID, parent_thread_id: OTHER } }));
+  let traversals = 0, hold = false, entered, release;
+  const io = { ...fs, readdir: async (...args) => {
+    const entries = await fs.readdir(...args); traversals++;
+    if (hold) { hold = false; entered(); await new Promise(resolve => { release = resolve; }); }
+    return entries;
+  } };
+  const observer = makeTranscriptObserver({ now: () => 1000, roots: { codex }, fs: io });
+  const cold = await Promise.all(Array.from({ length: 8 }, (_, index) => observer.read('cold-' + index, 'codex', ID)));
+  assert(cold.every(value => value.available));
+  assert.equal(traversals, 1, 'concurrent cold lookups share one provider traversal');
+  const binding = await observer.bindChild('codex', ID, OTHER); assert(binding);
+  observer.beginDiscovery();
+  let started = new Promise(resolve => { entered = resolve; }); hold = true;
+  const ordinary = observer.read('missing', 'codex', OTHER); await started;
+  const duplicate = path.join(codex, 'duplicate-' + ID + '.jsonl'); await fs.copyFile(file, duplicate);
+  const forced = [observer.inspectChild('forced-one', binding), observer.inspectChild('forced-two', binding)];
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(traversals, 2, 'forced traversal waits for older ordinary traversal');
+  release(); await ordinary;
+  assert((await Promise.all(forced)).every(value => !value.available), 'fresh shared traversal detects late duplicate');
+  assert.equal(traversals, 3, 'concurrent forced lookups share one fresh traversal');
+  await fs.rm(duplicate);
+  assert((await observer.inspectChild('after-conflict', binding)).available, 'failed identity proof does not poison future forced scan');
+  assert.equal(traversals, 4, 'explicit detail cannot reuse completed TTL index');
+  observer.beginDiscovery();
+  started = new Promise(resolve => { entered = resolve; }); hold = true;
+  const superseded = observer.read('old-generation', 'codex', ID); await started;
+  observer.beginDiscovery(); await fs.copyFile(file, duplicate);
+  const current = observer.read('new-generation', 'codex', ID);
+  release();
+  assert.equal((await superseded).available, false, 'superseded discovery cannot provide current proof');
+  assert.equal((await current).available, false, 'new generation scans after old traversal and finds duplicate');
+  await fs.rm(duplicate);
+  await fs.writeFile(path.join(codex, OTHER + '.jsonl'), line(meta(OTHER)));
+  observer.beginDiscovery();
+  assert((await observer.read('parent-sweep', 'codex', OTHER)).available);
+  const sweepTraversals = traversals;
+  const { makeHelperObserver } = require('../sidecar/observer-helpers.js');
+  const helpers = makeHelperObserver({ now: () => 1000, transcripts: observer,
+    readEdges: async () => ({ rows: [{ parent_thread_id: OTHER, child_thread_id: ID, status: 'open' }] }) });
+  const lineage = await helpers.children([{ id: 'parent-sweep', provider: 'codex', sessionId: OTHER,
+    inspectionIdentity: 'codex:' + OTHER, inventoryHealth: 'available', tool: { available: true } }]);
+  assert.equal(lineage.rows.length, 1);
+  assert.equal(traversals, sweepTraversals, 'helper discovery reuses completed sweep index');
+  let invalid = true;
+  const retry = makeTranscriptObserver({ now: () => 1000, roots: { codex }, fs: { ...fs, readdir: async (...args) => {
+    if (invalid) return [{ name: ID + '.jsonl', isDirectory: () => false, isFile: () => true },
+      ...Array(50000).fill({ name: 'ignored', isDirectory: () => false, isFile: () => false })];
+    return fs.readdir(...args);
+  } } });
+  assert.equal((await retry.read('limit', 'codex', ID)).available, false);
+  invalid = false;
+  assert((await retry.read('retry', 'codex', ID)).available, 'over-limit traversal clears pending and partial indices');
+}
 
 async function childDiscoveryWindows(temp) {
   const root = path.join(temp, 'discovery-windows'); await fs.mkdir(root);

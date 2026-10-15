@@ -22,35 +22,39 @@ function makeProjectResolver({ execute, now }) {
     if (lines.length !== 3 || !lines.every(value => path.isAbsolute(value))) throw new Error('Unproven checkout');
     return Promise.all(lines.map(value => fs.realpath(value)));
   }
-  async function resolve(cwd) {
-    if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || cwd.length > 4096) return unassigned();
+  async function discover(cwd) {
+    if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || cwd.length > 4096) return { cwd, value: unassigned() };
     const cached = cache.get(cwd);
-    if (cached && now() - cached.at < 60000) return cached.value;
+    if (cached && now() - cached.at < 60000) return { cwd, value: cached.value };
     let root;
-    try { root = await fs.realpath(cwd); if (!(await fs.stat(root)).isDirectory()) return unassigned(); }
-    catch (_) { return unassigned(); }
-    let identity = root, kind = 'folder', worktree = null, mainRoot = null, linkedProof = false;
-    try {
-      const [checkout, gitDir, common] = await gitIdentity(root);
+    try { root = await fs.realpath(cwd); if (!(await fs.stat(root)).isDirectory()) return { cwd, value: unassigned() }; }
+    catch (_) { return { cwd, value: unassigned() }; }
+    try { return { cwd, root, git: await gitIdentity(root) }; }
+    /* A canonical non-repository folder keeps its own room. Missing folders cannot prove identity. */
+    catch (_) { return { cwd, root }; }
+  }
+  async function associate(found, mainEvidence) {
+    if (found.value) return found.value;
+    const { cwd, git } = found;
+    let root = found.root, identity = root, kind = 'folder', worktree = null, mainRoot = null;
+    if (git) {
+      const [checkout, gitDir, common] = git;
       let main = gitDir === common ? checkout : null;
       if (!main) {
-        linkedProof = true;
         // Git worktree-list can invent a metadata-parent checkout for --separate-git-dir.
-        // Only a previously observed main checkout in the existing bounded cache proves that association.
-        const candidates = new Set([...cache.values()].filter(entry => entry.repositoryIdentity === common && entry.mainRoot && now() - entry.at < 60000)
+        // Only an observed main checkout from this batch or the bounded cache proves that association.
+        const candidates = new Set(mainEvidence.filter(entry => entry.repositoryIdentity === common && entry.mainRoot && now() - entry.at < 60000)
           .map(entry => entry.mainRoot));
         if (candidates.size !== 1) return unassigned();
         const candidate = [...candidates][0];
-        const [currentCheckout, currentGitDir, currentCommon] = await gitIdentity(candidate);
-        if (currentCheckout !== candidate || currentGitDir !== common || currentCommon !== common) return unassigned();
+        try {
+          const [currentCheckout, currentGitDir, currentCommon] = await gitIdentity(candidate);
+          if (currentCheckout !== candidate || currentGitDir !== common || currentCommon !== common) return unassigned();
+        } catch (_) { return unassigned(); }
         main = candidate;
       }
       identity = common; kind = 'repository'; root = main; mainRoot = gitDir === common ? main : null;
       if (checkout !== root) worktree = path.basename(checkout);
-    } catch (_) {
-      /* A canonical non-repository folder keeps its own room. Missing folders cannot prove identity. */
-      if (linkedProof) return unassigned();
-      identity = root; kind = 'folder'; worktree = null;
     }
     const projectFolder = kind === 'repository' ? path.dirname(root) : root;
     const value = { projectId: opaque('prj_', 'folder\0' + projectFolder), project: clean(path.basename(projectFolder)) || 'Local folder', projectKind: 'group',
@@ -60,6 +64,33 @@ function makeProjectResolver({ execute, now }) {
     if (cache.size > 256) cache.delete(cache.keys().next().value);
     return value;
   }
-  return { resolve };
+  async function resolveMany(cwds) {
+    const unique = [...new Set(cwds)], discovered = new Array(unique.length), values = new Map();
+    let next = 0;
+    async function discoverNext() {
+      while (next < unique.length) {
+        const index = next++;
+        discovered[index] = await discover(unique[index]);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(4, unique.length) }, discoverNext));
+    // Keep this batch's proof even when registering its folders evicts an older cache entry.
+    const mainEvidence = [...cache.values()];
+    for (const found of discovered) if (found.git && found.git[1] === found.git[2])
+      mainEvidence.push({ at: now(), mainRoot: found.git[0], repositoryIdentity: found.git[2] });
+    // Register every observed main before considering linked checkouts, regardless of pane order.
+    for (const found of discovered) if (!found.git || found.git[1] === found.git[2]) values.set(found.cwd, await associate(found, mainEvidence));
+    const linked = discovered.filter(found => found.git && found.git[1] !== found.git[2]);
+    next = 0;
+    async function associateNext() {
+      while (next < linked.length) {
+        const found = linked[next++]; values.set(found.cwd, await associate(found, mainEvidence));
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(4, linked.length) }, associateNext));
+    return cwds.map(cwd => values.get(cwd));
+  }
+  async function resolve(cwd) { return (await resolveMany([cwd]))[0]; }
+  return { resolve, resolveMany };
 }
 module.exports = { makeProjectResolver };

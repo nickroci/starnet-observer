@@ -52,7 +52,6 @@ function makeHelperObserver(options = {}) {
       bindings = nextBindings;
       return { rows, annotations, overflow, health: 'unavailable', reason: 'unsupported' };
     }
-    transcripts.resetHelperIndex?.();
     const exact = new Map();
     for (const row of parents) {
       if (row.inventoryHealth !== 'available' || !row.sessionId || !row.inspectionIdentity) continue;
