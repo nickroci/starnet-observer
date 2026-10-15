@@ -179,7 +179,6 @@ function makeArranger({ git, now, fs = fsp, home = os.homedir(), roomsFile = nul
     for (const unit of units.values()) {
       const file = fileRoom(rules, unit.root, unit.remote);
       if (file) assigned.set(unit.root, file);
-      else if (sticky.has(unit.root)) assigned.set(unit.root, sticky.get(unit.root));
     }
     const ruleUnits = [...units.values()].filter(unit => !assigned.has(unit.root));
     // c. nested: the nearest outer Git checkout, else the nearest observed unit folder that contains this one.
@@ -205,8 +204,12 @@ function makeArranger({ git, now, fs = fsp, home = os.homedir(), roomsFile = nul
       // A Git ancestor may have no pane: continue through its known containing unit.
       if (!outer && !units.has(root)) for (const other of new Set([...units.keys(), ...sticky.keys()]))
         if (inside(root, other) && (!outer || inside(other, outer))) outer = other;
-      let room = fileRoom(rules, root, units.get(root)?.remote) || sticky.get(root);
-      if (!room && outer) room = roomFor(outer, visiting);
+      let room = fileRoom(rules, root, units.get(root)?.remote);
+      if (!room && outer) {
+        const inherited = roomFor(outer, visiting);
+        room = inherited?.key.startsWith('file\0') ? inherited : sticky.get(root) || inherited;
+      }
+      if (!room) room = sticky.get(root);
       const remote = units.get(root)?.remote;
       if (!room && !outer && remote) {
         const org = remote.host + '/' + remote.org, members = byOrg.get(org) || [], held = new Map();
@@ -215,6 +218,7 @@ function makeArranger({ git, now, fs = fsp, home = os.homedir(), roomsFile = nul
         for (const member of members) if (member.root !== root) {
           if (assigned.has(member.root)) hold(assigned.get(member.root));
           else if (nested.has(member.root) && !inside(member.root, root)) hold(roomFor(member.root, visiting));
+          else if (!nested.has(member.root)) hold(sticky.get(member.root));
         }
         if (held.size === 1) room = [...held.values()][0];
         else if (held.size === 0 && members.filter(unit => !nested.has(unit.root) && !assigned.has(unit.root)).length >= 2)
@@ -227,7 +231,7 @@ function makeArranger({ git, now, fs = fsp, home = os.homedir(), roomsFile = nul
     }
     // Canonical ordering makes cyclic organization dependencies resolve consistently across roster permutations.
     for (const root of [...units.keys()].sort()) roomFor(root);
-    for (const unit of ruleUnits) { sticky.delete(unit.root); sticky.set(unit.root, assigned.get(unit.root)); }
+    for (const unit of ruleUnits) if (!assigned.get(unit.root).key.startsWith('file\0')) { sticky.delete(unit.root); sticky.set(unit.root, assigned.get(unit.root)); }
     bounded(sticky);
     return placed.map(place => {
       if (!place) return { ...UNASSIGNED };

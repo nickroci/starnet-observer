@@ -100,6 +100,20 @@ for (const bad of [null, [], { rooms: 'x' }, { rooms: [{ name: '', match: ['/a']
     }
 
 
+    // Inherited file overrides are temporary, including a fresh start while the rule already exists.
+    const inheritedFile = path.join(temp, 'inherited-rooms.json');
+    const explicit = JSON.stringify({ rooms: [{ name: 'Explicit', match: [await fs.realpath(at('outer'))] }] });
+    await fs.writeFile(inheritedFile, explicit);
+    const inheritedResolver = makeProjectResolver({ now: () => clock, execute: execFile, arrange: { home, roomsFile: inheritedFile } });
+    const inheritedPaths = [at('outer'), at('outer', 'inner')];
+    assert((await inheritedResolver.resolveMany(inheritedPaths)).every(row => row.arrangement.room === 'Explicit'));
+    await fs.rm(inheritedFile);
+    assert((await inheritedResolver.resolveMany(inheritedPaths)).every(row => row.arrangement.room === 'outer'), 'removing a startup rule clears inherited temporary rooms');
+    await fs.writeFile(inheritedFile, explicit);
+    assert((await inheritedResolver.resolveMany(inheritedPaths)).every(row => row.arrangement.room === 'Explicit'), 'new outer override reaches already-sticky descendants');
+    await fs.rm(inheritedFile);
+    assert((await inheritedResolver.resolveMany(inheritedPaths)).every(row => row.arrangement.room === 'outer'), 'rule removal restores the original rule-made sticky room');
+
     // Stability: a later org-mate joins the existing room and never moves anyone; a lone unit's room is kept.
     await repository(at('bq-exec'), 'https://github.com/banqora/bq-exec.git');
     await repository(at('acme-two'), 'https://github.com/acme/two.git');
@@ -107,6 +121,13 @@ for (const bad of [null, [], { rooms: 'x' }, { rooms: [{ name: '', match: ['/a']
     assert.deepEqual(later.slice(0, cwds.length), rows.map(row => row.arrangement), 'no existing unit moves');
     assert.equal(later[cwds.length].roomId, web.roomId, 'a new org-mate joins the org room');
     assert.equal(later[cwds.length + 1].roomId, acme.roomId, 'a new org-mate joins the lone unit room instead of moving it');
+    // Sticky organization evidence is independent of the canonical processing order.
+    await repository(at('z-held'), 'https://github.com/sticky/z.git'); await repository(at('a-later'), 'https://github.com/sticky/a.git');
+    const heldResolver = makeProjectResolver({ now: () => clock, execute: execFile, arrange: { home } });
+    const heldRoom = (await heldResolver.resolve(at('z-held'))).arrangement.roomId;
+    const joined = await heldResolver.resolveMany([at('a-later'), at('z-held')]);
+    assert(joined.every(row => row.arrangement.roomId === heldRoom), 'a newly sorted-first organization mate joins the established sticky room');
+
     // A repository later observed inside the scratch folder does not re-home its sub-folders.
     clock += 400000;
     const scratch = (await resolver.resolveMany([at('work-agents', 'clone-a'), at('work-agents', 'cv')])).map(row => row.arrangement);
