@@ -158,7 +158,7 @@ async function processBirthBoundary() {
     readConfiguration: async () => 'configured', rpc, execute });
   const resolver = createResolver(); // Actual default Python/libproc reader.
   let inspected = 0;
-  const observer = makeObserver({ now: () => 1000, identities: resolver, endpoint: 'birth-isolation-fixture',
+  const observer = makeObserver({ now: () => 1000, warmDetails: false, identities: resolver, endpoint: 'birth-isolation-fixture',
     execute: async () => ({ stdout: JSON.stringify({ result: { agents: panes } }) }),
     projects: { resolve: async () => ({ projectId: 'fixture' }) },
     bus: { read: () => ({ rows: [], health: 'available' }) },

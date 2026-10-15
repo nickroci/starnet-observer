@@ -957,7 +957,7 @@ const SPRITES = (() => {
     onDegraded = typeof notifyDegraded === 'function' ? notifyDegraded : null;
     loading = true;
     try {
-      const resp = await fetch('assets/sprites/manifest.json', { cache: 'no-store' });
+      const resp = await fetch('assets/sprites/manifest.json', { cache: 'no-cache' });
       if (!resp.ok) return;
       const man = await resp.json();
       if(typeof SkinStudy!=='undefined')await SkinStudy.install(man);
